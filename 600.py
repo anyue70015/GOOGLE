@@ -197,7 +197,7 @@ with st.spinner("实时扫描中..."):
             failed_count += 1
             st.warning(f"{sym} 失败: {str(e)}")
         count_text.text(f"已完成: {i+1}/{len(tickers)} | 高概率发现: {len(high_prob)} | 失败: {failed_count}")
-        time.sleep(60)
+        time.sleep(10)
 
 st.success(f"全扫描完成！共发现 {len(high_prob)} 只 ≥ {threshold*100:.0f}% 的股票")
 if high_prob:
@@ -208,3 +208,4 @@ if high_prob:
             st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - **7日概率: {row['prob7']*100:.1f}%** - PF: {row['pf7']:.2f}")
 
 st.caption("2025年12月24日数据。实时显示 + 超慢60秒防限流，绝对稳！假期市场概率偏低。")
+

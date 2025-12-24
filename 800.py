@@ -6,7 +6,7 @@ import pandas as pd
 from io import StringIO
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 大盘扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 自动扫描工具（8秒/只 + 断点续扫 + 修复卡第一个）")
+st.title("标普500 + 纳斯达克100 自动扫描工具（固定顺序 + 已扫不重扫）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -146,7 +146,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "avg_loss7": avg_loss7 * 100,
     }
 
-# ==================== 加载成分股 ====================
+# ==================== 加载成分股（固定顺序） ====================
 @st.cache_data(ttl=86400)
 def load_sp500_tickers():
     url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
@@ -161,68 +161,64 @@ def load_ndx100_tickers():
 
 sp500 = load_sp500_tickers()
 ndx100 = load_ndx100_tickers()
-tickers = list(set(sp500 + ndx100))
-st.write(f"总计 {len(tickers)} 只股票")
+all_tickers = list(set(sp500 + ndx100))
+all_tickers.sort()  # 固定字母顺序，保证每次顺序完全一致
+
+st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 threshold = st.slider("7日盈利概率阈值 (%)", 50, 90, 65) / 100.0
 
-# ==================== session_state ====================
+# ==================== session_state：已扫不重扫 + 结果保存 ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
-if 'current_index' not in st.session_state:
-    st.session_state.current_index = 0
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()  # 已扫描过的股票（永久记住）
 if 'failed_count' not in st.session_state:
     st.session_state.failed_count = 0
 
 result_container = st.container()
-progress_bar = st.progress(st.session_state.current_index / len(tickers) if len(tickers) > 0 else 0)
+progress_bar = st.progress(len(st.session_state.scanned_symbols) / len(all_tickers))
 status_text = st.empty()
 
-# ==================== 实时显示 ====================
+# ==================== 实时显示 + 排序 ====================
 with result_container:
     if st.session_state.high_prob:
-        st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
-        st.subheader(f"已发现 {len(st.session_state.high_prob)} 只 ≥ {threshold*100:.0f}% 的股票（实时排序）")
-        for row in st.session_state.high_prob:
+        displayed = sorted(st.session_state.high_prob, key=lambda x: x["prob7"], reverse=True)
+        st.subheader(f"已发现 {len(displayed)} 只 ≥ {threshold*100:.0f}% 的股票（实时排序）")
+        for row in displayed:
             change_str = f"{row['change']:+.2f}%"
             st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - **7日概率: {row['prob7']*100:.1f}%** - PF: {row['pf7']:.2f}")
 
-st.info(f"进度: {st.session_state.current_index}/{len(tickers)} | 失败: {st.session_state.failed_count} | 已发现: {len(st.session_state.high_prob)}")
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 已发现高概率: {len(st.session_state.high_prob)}")
 
-# ==================== 修复卡第一个 + 自动跑完剩余 ====================
-if st.session_state.current_index < len(tickers):
-    if st.button("点一次自动跑完所有剩余股票（8秒/只）", type="primary"):
-        # 修复卡第一个：先强制rerun一次清缓存
-        st.rerun()
+# ==================== 完全自动跑（固定顺序 + 已扫不重扫） ====================
+with st.spinner("自动扫描中（保持页面打开）..."):
+    for sym in all_tickers:
+        if sym in st.session_state.scanned_symbols:
+            continue  # 已扫过的绝对跳过
+        status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+        progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
+        try:
+            metrics = compute_stock_metrics(sym, mode)
+            st.session_state.scanned_symbols.add(sym)
+            if metrics["prob7"] >= threshold:
+                st.session_state.high_prob.append(metrics)
+                with result_container:
+                    displayed = sorted(st.session_state.high_prob, key=lambda x: x["prob7"], reverse=True)
+                    st.rerun()
+        except Exception as e:
+            st.session_state.failed_count += 1
+            st.warning(f"{sym} 失败: {str(e)}")
+            st.session_state.scanned_symbols.add(sym)  # 失败也标记为已扫，避免重复
+        time.sleep(8)  # 8秒/只
 
-        placeholder = st.empty()
-        with placeholder.container():
-            st.warning("扫描启动！请保持页面打开。剩余约 {(len(tickers) - st.session_state.current_index) * 8 / 60:.1f} 分钟")
-        while st.session_state.current_index < len(tickers):
-            i = st.session_state.current_index
-            sym = tickers[i]
-            status_text.text(f"正在计算 {sym} ({i+1}/{len(tickers)})")
-            progress_bar.progress((i + 1) / len(tickers))
-            try:
-                metrics = compute_stock_metrics(sym, mode)
-                if metrics["prob7"] >= threshold:
-                    st.session_state.high_prob.append(metrics)
-                st.session_state.current_index += 1
-            except Exception as e:
-                st.session_state.failed_count += 1
-                st.warning(f"{sym} 失败: {str(e)}")
-                st.session_state.current_index += 1
-            time.sleep(8)
-        placeholder.empty()
-        st.success("所有股票扫描完成！")
-else:
-    st.success("扫描已完成，结果已保存")
+st.success("所有股票扫描完成！结果永久保存")
 
-if st.button("重置进度（从头开始）"):
+if st.button("重置所有进度（从头开始，清除已扫记录）"):
     st.session_state.high_prob = []
-    st.session_state.current_index = 0
+    st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
     st.rerun()
 
-st.caption("修复卡第一个版：点一次自动跑完剩余，8秒/只，断点续扫 + 实时显示排序。保持页面打开！")
+st.caption("固定顺序版：股票按字母排序，每次顺序完全一致，已扫过的（包括失败）绝对不重复扫！结果永久保存，实时排序显示。")

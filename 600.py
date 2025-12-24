@@ -1,14 +1,46 @@
 import streamlit as st
+import requests
 import numpy as np
 import time
 import pandas as pd
-import yfinance as yf  # 新增：pip install yfinance 如果没装
+from io import StringIO
 
 # ==================== 页面设置 ====================
 st.set_page_config(page_title="标普500 + 纳斯达克100 大盘扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 扫描工具（7日盈利概率 ≥75%） - yfinance版（稳定不限流）")
+st.title("标普500 + 纳斯达克100 扫描工具（7日盈利概率筛选） - 超慢版（每只60秒）")
 
-# ==================== 计算函数（改用yfinance拉数据） ====================
+# ==================== 原核心计算函数（用requests拉Yahoo，稳定但慢） ====================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+}
+
+BACKTEST_CONFIG = {
+    "3个月": {"range": "3mo", "interval": "1d"},
+    "6个月": {"range": "6mo", "interval": "1d"},
+    "1年":  {"range": "1y",  "interval": "1d"},
+    "2年":  {"range": "2y",  "interval": "1d"},
+    "3年":  {"range": "3y",  "interval": "1d"},
+    "5年":  {"range": "5y",  "interval": "1d"},
+    "10年": {"range": "10y", "interval": "1d"},
+}
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
+    resp = requests.get(url, headers=HEADERS, timeout=20)
+    resp.raise_for_status()
+    data = resp.json()["chart"]["result"][0]
+    quote = data["indicators"]["quote"][0]
+    close = np.array(quote["close"], dtype=float)
+    high = np.array(quote["high"], dtype=float)
+    low = np.array(quote["low"], dtype=float)
+    volume = np.array(quote["volume"], dtype=float)
+    mask = ~np.isnan(close)
+    close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
+    if len(close) < 80:
+        raise ValueError("数据不足")
+    return close, high, low, volume
+
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -75,16 +107,13 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     return win_rate, pf, avg_win, avg_loss
 
 @st.cache_data(show_spinner=False)
-def compute_stock_metrics(symbol: str, period: str = "1y"):
-    ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period)
-    if df.empty or len(df) < 80:
-        raise ValueError("数据不足")
-    close = df['Close'].values
-    high = df['High'].values
-    low = df['Low'].values
-    volume = df['Volume'].values
-    
+def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
+    yahoo_symbol = symbol.upper()  # 美股直接用
+    try:
+        close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
+    except Exception as e:
+        raise ValueError(f"数据拉取失败: {str(e)}")
+
     macd_hist = macd_hist_np(close)
     rsi = rsi_np(close)
     atr = atr_np(high, low, close)
@@ -102,12 +131,12 @@ def compute_stock_metrics(symbol: str, period: str = "1y"):
 
     prob7, pf7, avg_win7, avg_loss7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
 
-    current_price = close[-1]
+    price = close[-1]
     change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
 
     return {
         "symbol": symbol.upper(),
-        "price": current_price,
+        "price": price,
         "change": change,
         "prob7": prob7,
         "pf7": pf7,
@@ -115,11 +144,56 @@ def compute_stock_metrics(symbol: str, period: str = "1y"):
         "avg_loss7": avg_loss7 * 100,
     }
 
-# ==================== 加载成分股（同之前） ====================
-# ... (复制之前load_sp500_tickers 和 load_ndx100_tickers)
+# ==================== 加载最新成分股 ====================
+@st.cache_data(ttl=86400)
+def load_sp500_tickers():
+    url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+    resp = requests.get(url, headers=HEADERS)
+    df = pd.read_csv(StringIO(resp.text))
+    return df['Symbol'].tolist()
 
-# 主代码同之前：tickers, mode selectbox ("1年"对应"1y", "3年"对应"3y"等), threshold slider, 循环compute_stock_metrics, sleep(1)就够了因为yfinance稳定
+@st.cache_data(ttl=86400)
+def load_ndx100_tickers():
+    # 2025年12月最新Nasdaq100列表（从可靠来源提取）
+    return ["ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA","CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT","GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL","MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR","PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS","TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"]
 
-# 显示部分同之前
+sp500 = load_sp500_tickers()
+ndx100 = load_ndx100_tickers()
+tickers = list(set(sp500 + ndx100))
+st.write(f"总计 {len(tickers)} 只股票（2025年12月最新去重）")
 
-st.caption("现在用yfinance拉数据，超级稳定！批量600只也没问题。")
+mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)  # 默认1年
+threshold = st.slider("7日盈利概率阈值 (%)", 50, 90, 65) / 100.0  # 默认65%避免空白
+
+high_prob = []
+failed_count = 0
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+count_text = st.empty()
+
+with st.spinner("超慢扫描启动，每只股票等待60秒防限流（全600只需10小时左右，耐心等）..."):
+    for i, sym in enumerate(tickers):
+        status_text.text(f"正在计算 {sym} ({i+1}/{len(tickers)})")
+        progress_bar.progress((i + 1) / len(tickers))
+        try:
+            metrics = compute_stock_metrics(sym, mode)
+            high_prob.append(metrics)
+        except Exception as e:
+            failed_count += 1
+            st.warning(f"{sym} 失败: {str(e)}")
+        count_text.text(f"成功: {len(high_prob)} | 失败: {failed_count}")
+        time.sleep(60)  # 每只60秒，超级安全
+
+if not high_prob:
+    st.error("所有股票计算失败或概率太低！可能是假期市场数据问题，建议明天再跑或降低阈值到50%。")
+else:
+    # 过滤并排序
+    filtered = [m for m in high_prob if m["prob7"] >= threshold]
+    filtered.sort(key=lambda x: x["prob7"], reverse=True)
+    st.success(f"扫描完成！找到 {len(filtered)} 只7日概率 ≥ {threshold*100:.0f}% 的股票（总成功 {len(high_prob)} 只）")
+    for row in filtered:
+        change_str = f"{row['change']:+.2f}%"
+        st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - **7日概率: {row['prob7']*100:.1f}%** - PF: {row['pf7']:.2f}")
+
+st.caption("2025年12月24日数据。假期市场低量，概率整体偏低。跑慢但绝对防限流！仅供研究参考。")

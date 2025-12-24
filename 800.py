@@ -6,7 +6,7 @@ import pandas as pd
 from io import StringIO
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 大盘扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 扫描工具（点一次自动跑完剩余 + 断点续扫）")
+st.title("标普500 + 纳斯达克100 自动扫描工具（8秒/只 + 断点续扫）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -167,7 +167,7 @@ st.write(f"总计 {len(tickers)} 只股票")
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 threshold = st.slider("7日盈利概率阈值 (%)", 50, 90, 65) / 100.0
 
-# ==================== session_state ====================
+# ==================== session_state 断点续扫 ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'current_index' not in st.session_state:
@@ -179,23 +179,23 @@ result_container = st.container()
 progress_bar = st.progress(st.session_state.current_index / len(tickers) if len(tickers) > 0 else 0)
 status_text = st.empty()
 
-# ==================== 实时显示 ====================
+# ==================== 实时显示 + 排序 ====================
 with result_container:
     if st.session_state.high_prob:
         st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
-        st.subheader(f"已发现 {len(st.session_state.high_prob)} 只 ≥ {threshold*100:.0f}% 的股票")
+        st.subheader(f"已发现 {len(st.session_state.high_prob)} 只 ≥ {threshold*100:.0f}% 的股票（实时排序）")
         for row in st.session_state.high_prob:
             change_str = f"{row['change']:+.2f}%"
             st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - **7日概率: {row['prob7']*100:.1f}%** - PF: {row['pf7']:.2f}")
 
 st.info(f"进度: {st.session_state.current_index}/{len(tickers)} | 失败: {st.session_state.failed_count} | 已发现: {len(st.session_state.high_prob)}")
 
-# ==================== 点一次自动跑完剩余 ====================
+# ==================== 自动扫描（点一次跑完剩余，8秒/只） ====================
 if st.session_state.current_index < len(tickers):
-    if st.button("点一次自动跑完所有剩余股票（10秒/只，安全防限流）", type="primary"):
+    if st.button("点一次自动跑完所有剩余股票（8秒/只）", type="primary"):
         placeholder = st.empty()
         with placeholder.container():
-            st.warning("扫描已启动！请保持页面打开，不要刷新或关闭。扫描期间页面会自动更新。预计剩余时间约 {0} 分钟。".format((len(tickers) - st.session_state.current_index) * 10 / 60))
+            st.warning("扫描启动！请保持页面打开，不要刷新。剩余约 {(len(tickers) - st.session_state.current_index) * 8 / 60:.1f} 分钟")
         while st.session_state.current_index < len(tickers):
             i = st.session_state.current_index
             sym = tickers[i]
@@ -207,13 +207,13 @@ if st.session_state.current_index < len(tickers):
                     st.session_state.high_prob.append(metrics)
                     with result_container:
                         st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
-                        st.rerun()
+                        st.rerun()  # 实时更新
                 st.session_state.current_index += 1
             except Exception as e:
                 st.session_state.failed_count += 1
                 st.warning(f"{sym} 失败: {str(e)}")
                 st.session_state.current_index += 1
-            time.sleep(10)
+            time.sleep(8)  # 8秒/只
         placeholder.empty()
         st.success("所有股票扫描完成！")
         st.rerun()
@@ -226,4 +226,4 @@ if st.button("重置进度（从头开始）"):
     st.session_state.failed_count = 0
     st.rerun()
 
-st.caption("最后一次版：点一次按钮就自动跑完所有剩余股票（保持页面打开），中断刷新后点按钮继续，实时显示排序。10秒sleep安全。")
+st.caption("恢复自动跑版：点一次按钮自动跑完所有剩余股票（8秒/只），断点续扫 + 实时显示排序 + 结果不丢！保持页面打开即可。")

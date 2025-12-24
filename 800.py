@@ -6,7 +6,7 @@ import pandas as pd
 from io import StringIO
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 大盘扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 扫描工具（自动 + 断点续扫 + 10秒防限流）")
+st.title("标普500 + 纳斯达克100 扫描工具（点一次自动跑完剩余 + 断点续扫）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -44,7 +44,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     except Exception as e:
         raise ValueError(f"请求失败: {str(e)}")
 
-# ==================== 指标计算函数 ====================
+# ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -110,7 +110,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     avg_loss = rets[rets <= 0].mean() if (rets <= 0).any() else 0
     return win_rate, pf, avg_win, avg_loss
 
-# ==================== 核心计算函数 ====================
+# ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     yahoo_symbol = symbol.upper()
@@ -162,12 +162,12 @@ def load_ndx100_tickers():
 sp500 = load_sp500_tickers()
 ndx100 = load_ndx100_tickers()
 tickers = list(set(sp500 + ndx100))
-st.write(f"总计 {len(tickers)} 只股票（2025年12月最新去重）")
+st.write(f"总计 {len(tickers)} 只股票")
 
-mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)  # 默认1年
+mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 threshold = st.slider("7日盈利概率阈值 (%)", 50, 90, 65) / 100.0
 
-# ==================== session_state 持久化 ====================
+# ==================== session_state ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'current_index' not in st.session_state:
@@ -179,43 +179,46 @@ result_container = st.container()
 progress_bar = st.progress(st.session_state.current_index / len(tickers) if len(tickers) > 0 else 0)
 status_text = st.empty()
 
-# ==================== 实时显示已发现股票（排序） ====================
+# ==================== 实时显示 ====================
 with result_container:
     if st.session_state.high_prob:
         st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
-        st.subheader(f"已发现 {len(st.session_state.high_prob)} 只 ≥ {threshold*100:.0f}% 的股票（实时排序）")
+        st.subheader(f"已发现 {len(st.session_state.high_prob)} 只 ≥ {threshold*100:.0f}% 的股票")
         for row in st.session_state.high_prob:
             change_str = f"{row['change']:+.2f}%"
             st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - **7日概率: {row['prob7']*100:.1f}%** - PF: {row['pf7']:.2f}")
 
 st.info(f"进度: {st.session_state.current_index}/{len(tickers)} | 失败: {st.session_state.failed_count} | 已发现: {len(st.session_state.high_prob)}")
 
-# ==================== 自动扫描按钮 ====================
+# ==================== 点一次自动跑完剩余 ====================
 if st.session_state.current_index < len(tickers):
-    if st.button("开始/继续自动扫描（点一次跑完剩余，每只10秒）", type="primary"):
-        with st.spinner("自动扫描中...（中断刷新后继续）"):
-            while st.session_state.current_index < len(tickers):
-                i = st.session_state.current_index
-                sym = tickers[i]
-                status_text.text(f"正在计算 {sym} ({i+1}/{len(tickers)})")
-                progress_bar.progress((i + 1) / len(tickers))
-                try:
-                    metrics = compute_stock_metrics(sym, mode)
-                    if metrics["prob7"] >= threshold:
-                        st.session_state.high_prob.append(metrics)
-                        with result_container:
-                            st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
-                            st.rerun()  # 实时更新显示
-                    st.session_state.current_index += 1
-                except Exception as e:
-                    st.session_state.failed_count += 1
-                    st.warning(f"{sym} 失败: {str(e)}")
-                    st.session_state.current_index += 1
-                time.sleep(10)
-        st.success("扫描完成！")
+    if st.button("点一次自动跑完所有剩余股票（10秒/只，安全防限流）", type="primary"):
+        placeholder = st.empty()
+        with placeholder.container():
+            st.warning("扫描已启动！请保持页面打开，不要刷新或关闭。扫描期间页面会自动更新。预计剩余时间约 {0} 分钟。".format((len(tickers) - st.session_state.current_index) * 10 / 60))
+        while st.session_state.current_index < len(tickers):
+            i = st.session_state.current_index
+            sym = tickers[i]
+            status_text.text(f"正在计算 {sym} ({i+1}/{len(tickers)})")
+            progress_bar.progress((i + 1) / len(tickers))
+            try:
+                metrics = compute_stock_metrics(sym, mode)
+                if metrics["prob7"] >= threshold:
+                    st.session_state.high_prob.append(metrics)
+                    with result_container:
+                        st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
+                        st.rerun()
+                st.session_state.current_index += 1
+            except Exception as e:
+                st.session_state.failed_count += 1
+                st.warning(f"{sym} 失败: {str(e)}")
+                st.session_state.current_index += 1
+            time.sleep(10)
+        placeholder.empty()
+        st.success("所有股票扫描完成！")
         st.rerun()
 else:
-    st.success("所有股票扫描完成！结果已保存")
+    st.success("扫描已完成，结果已保存")
 
 if st.button("重置进度（从头开始）"):
     st.session_state.high_prob = []
@@ -223,4 +226,4 @@ if st.button("重置进度（从头开始）"):
     st.session_state.failed_count = 0
     st.rerun()
 
-st.caption("终极完整版：点一次按钮自动跑完剩余，断点续扫 + 实时排序显示 + 结果不丢 + 10秒防限流！当前2025年12月24日数据。")
+st.caption("最后一次版：点一次按钮就自动跑完所有剩余股票（保持页面打开），中断刷新后点按钮继续，实时显示排序。10秒sleep安全。")

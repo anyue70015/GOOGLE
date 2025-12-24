@@ -183,7 +183,7 @@ with st.spinner("超慢扫描启动，每只股票等待60秒防限流（全600�
             failed_count += 1
             st.warning(f"{sym} 失败: {str(e)}")
         count_text.text(f"成功: {len(high_prob)} | 失败: {failed_count}")
-        time.sleep(60)  # 每只60秒，超级安全
+        time.sleep(10)  # 每只60秒，超级安全
 
 if not high_prob:
     st.error("所有股票计算失败或概率太低！可能是假期市场数据问题，建议明天再跑或降低阈值到50%。")
@@ -197,3 +197,4 @@ else:
         st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - **7日概率: {row['prob7']*100:.1f}%** - PF: {row['pf7']:.2f}")
 
 st.caption("2025年12月24日数据。假期市场低量，概率整体偏低。跑慢但绝对防限流！仅供研究参考。")
+

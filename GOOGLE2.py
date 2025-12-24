@@ -319,8 +319,8 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
 
 # ==================== 交互 ====================
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["QQQ", "AAPL", "MSFT", "GOOGL", "META", "AMZN", "NVDA", "TSLA", "NUE", "COR", "HOOD", "NEM", "BE", "TSM", "SLV", "ABBV", "CAH", "WELL"]
-
+    st.session_state.watchlist = ["WDC", "APH", "GEV", "ZS", "HWM", "GE", "JNJ", "CTSH", "NUE", "COR", "HOOD", "NEM", "BE", "TSM", "SLV", "ABBV", "CAH", 
+"PM","STX","NDAQ","CTAS","INSM","CZR","GLW","RMD","CSX","NSC","EVRG","SBUX","ADP","BA","AEE","DLTR","WEC","AZN","ES","EL","SCHW","LRCX","TPR","CTVA","TRI","AEP","EPAM"]
 if "mode" not in st.session_state:
     st.session_state.mode = "1年"
 
@@ -406,4 +406,5 @@ else:
                 st.markdown(html, unsafe_allow_html=True)
 
 st.caption("数据来源 Yahoo Finance。回测基于历史信号统计，仅供研究参考，不构成投资建议。")
+
 

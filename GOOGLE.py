@@ -2,8 +2,8 @@ import streamlit as st
 import requests
 import numpy as np
 
-# ============ Ò³Ãæ»ù´¡ÉèÖÃ ============
-st.set_page_config(page_title="»Ø²âĞÅºÅÃæ°å", layout="wide")
+# ============ é¡µé¢åŸºç¡€è®¾ç½® ============
+st.set_page_config(page_title="å›æµ‹ä¿¡å·é¢æ¿", layout="wide")
 st.markdown(
     """
     <style>
@@ -127,19 +127,19 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("»Ø²âĞÅºÅÃæ°å")
+st.title("å›æµ‹ä¿¡å·é¢æ¿")
 
-# ============ »Ø²âÅäÖÃ£¨ÈÕÏß+4H+1H£© ============
-BACKTEST_OPTIONS = ["1Äê", "6¸öÔÂ", "2Äê", "3Äê", "5Äê", "10Äê"]
+# ============ å›æµ‹é…ç½®ï¼ˆæ—¥çº¿+4H+1Hï¼‰ ============
+BACKTEST_OPTIONS = ["1å¹´", "6ä¸ªæœˆ", "2å¹´", "3å¹´", "5å¹´", "10å¹´"]
 BACKTEST_CONFIG = {
-    "3¸öÔÂ": {"range": "3mo", "interval": "1d", "steps_per_day": 1},
-    "6¸öÔÂ": {"range": "6mo", "interval": "1d", "steps_per_day": 1},
-    "1Äê":  {"range": "1y",  "interval": "1d", "steps_per_day": 1},
-    "6¸öÔÂ": {"range": "6mo", "interval": "1d", "steps_per_day": 1},
-    "2Äê":  {"range": "2y",  "interval": "1d", "steps_per_day": 1},
-    "3Äê":  {"range": "3y",  "interval": "1d", "steps_per_day": 1},
-    "5Äê":  {"range": "5y",  "interval": "1d", "steps_per_day": 1},
-    "10Äê": {"range": "10y", "interval": "1d", "steps_per_day": 1},
+    "3ä¸ªæœˆ": {"range": "3mo", "interval": "1d", "steps_per_day": 1},
+    "6ä¸ªæœˆ": {"range": "6mo", "interval": "1d", "steps_per_day": 1},
+    "1å¹´":  {"range": "1y",  "interval": "1d", "steps_per_day": 1},
+    "6ä¸ªæœˆ": {"range": "6mo", "interval": "1d", "steps_per_day": 1},
+    "2å¹´":  {"range": "2y",  "interval": "1d", "steps_per_day": 1},
+    "3å¹´":  {"range": "3y",  "interval": "1d", "steps_per_day": 1},
+    "5å¹´":  {"range": "5y",  "interval": "1d", "steps_per_day": 1},
+    "10å¹´": {"range": "10y", "interval": "1d", "steps_per_day": 1},
 }
 
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
@@ -148,19 +148,19 @@ YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={r
 def format_symbol_for_yahoo(symbol: str) -> str:
     """Normalize user input to a Yahoo Finance ticker.
 
-    - A¹É³£¼û 6 Î»´úÂë»á×Ô¶¯¸ù¾İÇ°×º²¹È« .SS »ò .SZ ºó×º
-    - ÆäËûÇé¿ö±£³ÖÓÃ»§ÊäÈëµÄ´óĞ´
+    - Aè‚¡å¸¸è§ 6 ä½ä»£ç ä¼šè‡ªåŠ¨æ ¹æ®å‰ç¼€è¡¥å…¨ .SS æˆ– .SZ åç¼€
+    - å…¶ä»–æƒ…å†µä¿æŒç”¨æˆ·è¾“å…¥çš„å¤§å†™
     """
 
     sym = symbol.strip().upper()
     if not sym:
-        raise ValueError("¹ÉÆ±´úÂë²»ÄÜÎª¿Õ")
+        raise ValueError("è‚¡ç¥¨ä»£ç ä¸èƒ½ä¸ºç©º")
 
     if sym.isdigit() and len(sym) == 6:
         if sym.startswith(("600", "601", "603", "605", "688")):
-            return f"{sym}.SS"  # ÉÏ½»Ëù
+            return f"{sym}.SS"  # ä¸Šäº¤æ‰€
         if sym.startswith(("000", "001", "002", "003", "300")):
-            return f"{sym}.SZ"  # Éî½»Ëù
+            return f"{sym}.SZ"  # æ·±äº¤æ‰€
 
     return sym
 
@@ -170,7 +170,7 @@ def contains_chinese(text: str) -> bool:
 
 
 def search_eastmoney_symbol(query: str):
-    """³¢ÊÔÓÃ¶«²ÆÄ£ºıËÑË÷ÖĞÎÄÃû³Æ£¬·µ»Ø (´úÂë, Ãû³Æ, ÊĞ³¡) »ò None¡£"""
+    """å°è¯•ç”¨ä¸œè´¢æ¨¡ç³Šæœç´¢ä¸­æ–‡åç§°ï¼Œè¿”å› (ä»£ç , åç§°, å¸‚åœº) æˆ– Noneã€‚"""
 
     try:
         resp = requests.get(
@@ -206,7 +206,7 @@ def search_eastmoney_symbol(query: str):
 
 
 def search_yahoo_symbol_by_name(query: str):
-    """Ê¹ÓÃ Yahoo Finance ËÑË÷½Ó¿ÚÓÃÖĞÎÄÄ£ºıÆ¥Åä A ¹É´úÂë¡£"""
+    """ä½¿ç”¨ Yahoo Finance æœç´¢æ¥å£ç”¨ä¸­æ–‡æ¨¡ç³ŠåŒ¹é… A è‚¡ä»£ç ã€‚"""
 
     try:
         resp = requests.get(
@@ -237,12 +237,12 @@ def search_yahoo_symbol_by_name(query: str):
 def resolve_user_input_symbol(user_input: str) -> str:
     raw = user_input.strip()
     if not raw:
-        raise ValueError("ÇëÊäÈë¹ÉÆ±´úÂë»òÃû³Æ")
+        raise ValueError("è¯·è¾“å…¥è‚¡ç¥¨ä»£ç æˆ–åç§°")
 
     if raw.isdigit() and len(raw) == 6:
         return raw
 
-    # ¶ÔÖĞÎÄ»òÆ´ÒôÊäÈëÏÈ³¢ÊÔ¶«²ÆÄ£ºıËÑË÷£¬ÔÙ¶µµ× Yahoo ËÑË÷
+    # å¯¹ä¸­æ–‡æˆ–æ‹¼éŸ³è¾“å…¥å…ˆå°è¯•ä¸œè´¢æ¨¡ç³Šæœç´¢ï¼Œå†å…œåº• Yahoo æœç´¢
     em_hit = search_eastmoney_symbol(raw)
     if em_hit:
         return em_hit[0]
@@ -252,18 +252,18 @@ def resolve_user_input_symbol(user_input: str) -> str:
         return yahoo_hit[0]
 
     if contains_chinese(raw):
-        raise ValueError("Î´ÕÒµ½Æ¥ÅäµÄ A ¹É´úÂë£¬Çë¸ÄÓÃ 6 Î»´úÂë»òÃÀ¹É´úÂë£¨Ê¾Àı£º600519 / TSLA£©")
+        raise ValueError("æœªæ‰¾åˆ°åŒ¹é…çš„ A è‚¡ä»£ç ï¼Œè¯·æ”¹ç”¨ 6 ä½ä»£ç æˆ–ç¾è‚¡ä»£ç ï¼ˆç¤ºä¾‹ï¼š600519 / TSLAï¼‰")
 
     return raw.upper()
 
 
 @st.cache_data(show_spinner=False)
 def fetch_display_name(symbol: str, yahoo_symbol: str) -> str:
-    """»ñÈ¡ÓÃÓÚÕ¹Ê¾µÄÃû³Æ£¬ÓÅÏÈ·µ»Ø A ¹ÉÖĞÎÄÃû¡£"""
+    """è·å–ç”¨äºå±•ç¤ºçš„åç§°ï¼Œä¼˜å…ˆè¿”å› A è‚¡ä¸­æ–‡åã€‚"""
 
     clean_sym = symbol.strip()
 
-    # A ¹É×ß¶«²Æ½Ó¿ÚÄÃÖĞÎÄÃû£¨SH=1, SZ=0£©
+    # A è‚¡èµ°ä¸œè´¢æ¥å£æ‹¿ä¸­æ–‡åï¼ˆSH=1, SZ=0ï¼‰
     if clean_sym.isdigit() and len(clean_sym) == 6:
         market_code = "1" if yahoo_symbol.endswith(".SS") else "0"
         try:
@@ -280,7 +280,7 @@ def fetch_display_name(symbol: str, yahoo_symbol: str) -> str:
         except Exception:
             pass
 
-    # ¶µµ××ß Yahoo quote ½Ó¿Ú
+    # å…œåº•èµ° Yahoo quote æ¥å£
     try:
         resp = requests.get(
             "https://query1.finance.yahoo.com/v7/finance/quote",
@@ -310,7 +310,7 @@ def fetch_yahoo_ohlcv(symbol: str, range_str: str, interval: str):
     )
     data = resp.json()
     if "chart" not in data or not data["chart"].get("result"):
-        raise ValueError("Yahoo ÎŞ·µ»ØÊı¾İ")
+        raise ValueError("Yahoo æ— è¿”å›æ•°æ®")
 
     result = data["chart"]["result"][0]
     quote = result["indicators"]["quote"][0]
@@ -327,12 +327,12 @@ def fetch_yahoo_ohlcv(symbol: str, range_str: str, interval: str):
     volume = volume[mask]
 
     if len(close) < 80:
-        raise ValueError("¿ÉÓÃÀúÊ·Êı¾İÌ«ÉÙ")
+        raise ValueError("å¯ç”¨å†å²æ•°æ®å¤ªå°‘")
 
     return close, high, low, volume
 
 
-# ============ ¼¼ÊõÖ¸±ê ============
+# ============ æŠ€æœ¯æŒ‡æ ‡ ============
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.zeros_like(x, dtype=float)
@@ -400,12 +400,12 @@ def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
     return np.cumsum(direction * volume)
 
 
-# ============ »Ø²âÍ³¼Æ£¨´ø¾ùÓ¯¾ù¿÷+PF£© ============
+# ============ å›æµ‹ç»Ÿè®¡ï¼ˆå¸¦å‡ç›ˆå‡äº+PFï¼‰ ============
 def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int, min_score: int = 3):
     """
-    steps: ÏòÇ°¿´µÄ bar Êı
-    ·µ»Ø£º
-      Ê¤ÂÊ¡¢¾»Æ½¾ùÊÕÒæ¡¢ĞÅºÅ´ÎÊı¡¢×î´ó»Ø³·¡¢Ó¯ÀûÒò×ÓPF¡¢Ó¯Àû´ÎÊı¡¢Æ½¾ùÓ¯Àû¡¢Æ½¾ù¿÷Ëğ
+    steps: å‘å‰çœ‹çš„ bar æ•°
+    è¿”å›ï¼š
+      èƒœç‡ã€å‡€å¹³å‡æ”¶ç›Šã€ä¿¡å·æ¬¡æ•°ã€æœ€å¤§å›æ’¤ã€ç›ˆåˆ©å› å­PFã€ç›ˆåˆ©æ¬¡æ•°ã€å¹³å‡ç›ˆåˆ©ã€å¹³å‡äºæŸ
     """
     if len(close) <= steps:
         return 0.0, 0.0, 0, 0.0, 0.0, 0, 0.0, 0.0
@@ -429,10 +429,10 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int, min_sc
     loss_rets = rets[loss_mask]
 
     avg_win = float(profit_rets.mean()) if wins > 0 else 0.0
-    avg_loss = float(loss_rets.mean()) if losses > 0 else 0.0  # ¸ºÊı
+    avg_loss = float(loss_rets.mean()) if losses > 0 else 0.0  # è´Ÿæ•°
 
     profit_sum = float(profit_rets.sum())
-    loss_sum = float(-loss_rets.sum())  # ÕıÊı
+    loss_sum = float(-loss_rets.sum())  # æ­£æ•°
 
     if loss_sum > 0:
         pf = profit_sum / loss_sum
@@ -455,12 +455,12 @@ def prob_class(p):
     return "prob-bad"
 
 
-# ============ ½¨ÒéÂß¼­£¨7ÈÕ / 30ÈÕ ¸÷×ÔÒ»Ì×£© ============
+# ============ å»ºè®®é€»è¾‘ï¼ˆ7æ—¥ / 30æ—¥ å„è‡ªä¸€å¥—ï¼‰ ============
 def decide_advice(prob: float, pf: float):
     """
-    ·µ»Ø: (label, intensity, color_class)
-      label: ½¨ÒéÂòÈë / ¹ÛÍû / ½¨ÒéÂô³ö
-      intensity: 1~5 µã
+    è¿”å›: (label, intensity, color_class)
+      label: å»ºè®®ä¹°å…¥ / è§‚æœ› / å»ºè®®å–å‡º
+      intensity: 1~5 ç‚¹
       color_class: buy / hold / sell
     """
     if pf <= 0:
@@ -481,7 +481,7 @@ def decide_advice(prob: float, pf: float):
         if pf   >= 1.20: score += 1
         if pf   >= 1.60: score += 1
         intensity = max(1, min(5, score))
-        label = "½¨ÒéÂòÈë"
+        label = "å»ºè®®ä¹°å…¥"
         color = "buy"
     elif kind == "sell":
         score = 0
@@ -491,7 +491,7 @@ def decide_advice(prob: float, pf: float):
         if pf   <= 0.80: score += 1
         if pf   <= 0.60: score += 1
         intensity = max(1, min(5, score))
-        label = "½¨ÒéÂô³ö"
+        label = "å»ºè®®å–å‡º"
         color = "sell"
     else:  # hold
         score = 1
@@ -500,13 +500,13 @@ def decide_advice(prob: float, pf: float):
         if 0.90 <= pf <= 1.10:   score += 1
         if 0.95 <= pf <= 1.05:   score += 1
         intensity = max(1, min(5, score))
-        label = "¹ÛÍû"
+        label = "è§‚æœ›"
         color = "hold"
 
     return label, intensity, color
 
 
-# ============ ¼ÆËãµ¥Ö»¹ÉÆ±£¨Ê¹ÓÃÉÏÒ»¸ùÍêÕûKÏß£© ============
+# ============ è®¡ç®—å•åªè‚¡ç¥¨ï¼ˆä½¿ç”¨ä¸Šä¸€æ ¹å®Œæ•´Kçº¿ï¼‰ ============
 def compute_stock_metrics(symbol: str, cfg_key: str):
     cfg = BACKTEST_CONFIG[cfg_key]
     yahoo_symbol = format_symbol_for_yahoo(symbol)
@@ -515,8 +515,8 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
         yahoo_symbol, range_str=cfg["range"], interval=cfg["interval"]
     )
 
-    # ¶ªµô×îºóÒ»¸ù¡¸¿ÉÄÜ»¹Ã»×ßÍê¡¹µÄKÏß
-    # ÈÕÏß = ×òÈÕÊÕÅÌ£»4H/1H = ×î½üÍêÕûÖÜÆÚ
+    # ä¸¢æ‰æœ€åä¸€æ ¹ã€Œå¯èƒ½è¿˜æ²¡èµ°å®Œã€çš„Kçº¿
+    # æ—¥çº¿ = æ˜¨æ—¥æ”¶ç›˜ï¼›4H/1H = æœ€è¿‘å®Œæ•´å‘¨æœŸ
     if len(close) > 81:
         close = close[:-1]
         high = high[:-1]
@@ -558,16 +558,16 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
 
     indicators = []
 
-    # MACD£ºÖ»ÓÃºì/ÂÌµã±íÊ¾¶àÍ·/¿ÕÍ·£¬²»ÏÔÊ¾ÊıÖµ
+    # MACDï¼šåªç”¨çº¢/ç»¿ç‚¹è¡¨ç¤ºå¤šå¤´/ç©ºå¤´ï¼Œä¸æ˜¾ç¤ºæ•°å€¼
     macd_val = float(macd_hist[last_idx])
     macd_status = "bull" if macd_val > 0 else "bear"
     indicators.append({
-        "name": "MACD ¶àÍ·/¿ÕÍ·",
+        "name": "MACD å¤šå¤´/ç©ºå¤´",
         "status": macd_status,
         "desc": ""
     })
 
-    # ³É½»Á¿Ïà¶Ô20ÈÕ¾ùÁ¿£ºãĞÖµ 1.10x
+    # æˆäº¤é‡ç›¸å¯¹20æ—¥å‡é‡ï¼šé˜ˆå€¼ 1.10x
     vol_ratio = float(volume[last_idx] / (vol_ma20[last_idx] + 1e-9))
     vol_target = 1.10
     if vol_ratio > vol_target:
@@ -577,12 +577,12 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
     else:
         vol_status = "neutral"
     indicators.append({
-        "name": "³É½»Á¿Ïà¶Ô20ÈÕ¾ùÁ¿",
+        "name": "æˆäº¤é‡ç›¸å¯¹20æ—¥å‡é‡",
         "status": vol_status,
         "desc": f"{vol_target:.2f} / {vol_ratio:.2f}"
     })
 
-    # RSI£ºãĞÖµ 60
+    # RSIï¼šé˜ˆå€¼ 60
     rsi_val = float(rsi[last_idx])
     if rsi_val >= 60:
         rsi_status = "bull"
@@ -591,12 +591,12 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
     else:
         rsi_status = "neutral"
     indicators.append({
-        "name": "RSI Çø¼ä",
+        "name": "RSI åŒºé—´",
         "status": rsi_status,
         "desc": f"60.0 / {rsi_val:.1f}"
     })
 
-    # ATR ²¨¶¯ÂÊ£ºãĞÖµ 1.10x
+    # ATR æ³¢åŠ¨ç‡ï¼šé˜ˆå€¼ 1.10x
     atr_ratio = float(atr[last_idx] / (atr_ma20[last_idx] + 1e-9))
     if atr_ratio > 1.10:
         atr_status = "bull"
@@ -605,12 +605,12 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
     else:
         atr_status = "neutral"
     indicators.append({
-        "name": "ATR ²¨¶¯ÂÊ",
+        "name": "ATR æ³¢åŠ¨ç‡",
         "status": atr_status,
         "desc": f"1.10 / {atr_ratio:.2f}"
     })
 
-    # OBV ×Ê½ğÇ÷ÊÆ£ºãĞÖµ 1.05x
+    # OBV èµ„é‡‘è¶‹åŠ¿ï¼šé˜ˆå€¼ 1.05x
     obv_ratio = float(obv[last_idx] / (obv_ma20[last_idx] + 1e-9))
     if obv_ratio > 1.05:
         obv_status = "bull"
@@ -619,7 +619,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
     else:
         obv_status = "neutral"
     indicators.append({
-        "name": "OBV ×Ê½ğÇ÷ÊÆ",
+        "name": "OBV èµ„é‡‘è¶‹åŠ¿",
         "status": obv_status,
         "desc": f"1.05 / {obv_ratio:.2f}"
     })
@@ -643,14 +643,14 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
     }
 
 
-# ============ »º´æ ============
+# ============ ç¼“å­˜ ============
 @st.cache_data(show_spinner=False)
 def get_stock_metrics_cached(symbol: str, cfg_key: str, version: int = 14):
-    # version ¸Ä³É 14£¬Ç¿ÖÆË¢ĞÂ»º´æ
+    # version æ”¹æˆ 14ï¼Œå¼ºåˆ¶åˆ·æ–°ç¼“å­˜
     return compute_stock_metrics(symbol, cfg_key=cfg_key)
 
 
-# ============ Streamlit ½»»¥²ã ============
+# ============ Streamlit äº¤äº’å±‚ ============
 def add_symbol_from_input():
     raw_val = st.session_state.get("new_symbol_input", "")
     if not raw_val.strip():
@@ -667,14 +667,15 @@ def add_symbol_from_input():
     st.session_state.new_symbol_input = ""
 
 
-default_watchlist = ["QQQ", "AAPL", "MSFT", "GOOGL", "META", "AMZN", "NVDA", "TSLA", "NUE", "COR", "HOOD", "NEM", "BE", "TSM", "SLV", "ABBV", "CAH", "WELL"]
+default_watchlist = ["WDC", "APH", "GEV", "ZS", "HWM", "GE", "JNJ", "CTSH", "NUE", "COR", "HOOD", "NEM", "BE", "TSM", "SLV", "ABBV", "CAH", 
+"PM","STX","NDAQ","CTAS","INSM","CZR","GLW","RMD","CSX","NSC","EVRG","SBUX","ADP","BA","AEE","DLTR","WEC","AZN","ES","EL","SCHW","LRCX","TPR","CTVA","TRI","AEP","EPAM"]
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = default_watchlist.copy()
 
 if st.session_state.get("mode_label") and st.session_state.mode_label not in BACKTEST_CONFIG:
     del st.session_state["mode_label"]
 
-MODE_DEFAULT = "1Äê"
+MODE_DEFAULT = "1å¹´"
 if "mode_label" not in st.session_state or st.session_state.get("mode_label") not in BACKTEST_CONFIG:
     st.session_state["mode_label"] = MODE_DEFAULT
 
@@ -685,17 +686,17 @@ with top_c1:
         "",
         value="",
         max_chars=10,
-        placeholder="ÊäÈë¹ÉÆ±´úÂë£¨Àı£ºTSLA / 600519 £©",
+        placeholder="è¾“å…¥è‚¡ç¥¨ä»£ç ï¼ˆä¾‹ï¼šTSLA / 600519 ï¼‰",
         label_visibility="collapsed",
         key="new_symbol_input",
         on_change=add_symbol_from_input,
     )
 with top_c2:
-    add_btn = st.button("²éÑ¯")
+    add_btn = st.button("æŸ¥è¯¢")
 with top_c3:
     sort_by = st.selectbox(
         "",
-        ["Ä¬ÈÏË³Ğò", "ÕÇµø·ù", "7ÈÕÓ¯Àû¸ÅÂÊ", "30ÈÕÓ¯Àû¸ÅÂÊ"],
+        ["é»˜è®¤é¡ºåº", "æ¶¨è·Œå¹…", "7æ—¥ç›ˆåˆ©æ¦‚ç‡", "30æ—¥ç›ˆåˆ©æ¦‚ç‡"],
         index=0,
         label_visibility="collapsed",
     )
@@ -714,23 +715,23 @@ if add_btn:
 rows = []
 for sym in st.session_state.watchlist:
     try:
-        with st.spinner(f"ÔØÈë {sym} ..."):
+        with st.spinner(f"è½½å…¥ {sym} ..."):
             metrics = get_stock_metrics_cached(sym, cfg_key=mode_label)
         rows.append(metrics)
     except Exception as e:
-        st.warning(f"{sym} ¼ÓÔØÊ§°Ü£º{e}")
+        st.warning(f"{sym} åŠ è½½å¤±è´¥ï¼š{e}")
         continue
 
-if sort_by == "ÕÇµø·ù":
+if sort_by == "æ¶¨è·Œå¹…":
     rows.sort(key=lambda x: x["change"], reverse=True)
-elif sort_by == "7ÈÕÓ¯Àû¸ÅÂÊ":
+elif sort_by == "7æ—¥ç›ˆåˆ©æ¦‚ç‡":
     rows.sort(key=lambda x: x["prob7"], reverse=True)
-elif sort_by == "30ÈÕÓ¯Àû¸ÅÂÊ":
+elif sort_by == "30æ—¥ç›ˆåˆ©æ¦‚ç‡":
     rows.sort(key=lambda x: x["prob30"], reverse=True)
 
-# ============ ¿¨Æ¬Õ¹Ê¾ ============
+# ============ å¡ç‰‡å±•ç¤º ============
 if not rows:
-    st.info("ÔİÎŞ×ÔÑ¡¹ÉÆ±£¬ÇëÏÈÔÚÉÏ·½ÊäÈë´úÂëÌí¼Ó¡£")
+    st.info("æš‚æ— è‡ªé€‰è‚¡ç¥¨ï¼Œè¯·å…ˆåœ¨ä¸Šæ–¹è¾“å…¥ä»£ç æ·»åŠ ã€‚")
 else:
     cols_per_row = 4
     for i in range(0, len(rows), cols_per_row):
@@ -766,7 +767,7 @@ else:
                         f"<span class='dot dot-{ind['status']}'></span></div>"
                     )
 
-                # 7 ÈÕ & 30 ÈÕ ½¨Òé·Ö±ğ¼ÆËã
+                # 7 æ—¥ & 30 æ—¥ å»ºè®®åˆ†åˆ«è®¡ç®—
                 adv7_label, adv7_intensity, adv7_kind = decide_advice(row["prob7"], pf7)
                 adv30_label, adv30_intensity, adv30_kind = decide_advice(row["prob30"], pf30)
 
@@ -820,29 +821,29 @@ else:
                   <div>
                     <div class="profit-row" style="display:flex;justify-content:space-between;gap:8px;margin-bottom:4px;">
                       <div>
-                        <span class="label">7ÈÕÓ¯Àû¸ÅÂÊ</span>
+                        <span class="label">7æ—¥ç›ˆåˆ©æ¦‚ç‡</span>
                         <span class="{prob7_class}"> {prob7_pct:.1f}%</span>
                       </div>
-                      <div class="label">¾ùÓ¯ {avg_win7_pct:+.1f}% / ¾ù¿÷ {avg_loss7_pct:+.1f}% / Ó¯¿÷ {pf7:.2f}</div>
+                      <div class="label">å‡ç›ˆ {avg_win7_pct:+.1f}% / å‡äº {avg_loss7_pct:+.1f}% / ç›ˆäº {pf7:.2f}</div>
                     </div>
                     <div class="profit-row" style="display:flex;justify-content:space-between;gap:8px;">
                       <div>
-                        <span class="label">30ÈÕÓ¯Àû¸ÅÂÊ</span>
+                        <span class="label">30æ—¥ç›ˆåˆ©æ¦‚ç‡</span>
                         <span class="{prob30_class}"> {prob30_pct:.1f}%</span>
                       </div>
-                      <div class="label">¾ùÓ¯ {avg_win30_pct:+.1f}% / ¾ù¿÷ {avg_loss30_pct:+.1f}% / Ó¯¿÷ {pf30:.2f}</div>
+                      <div class="label">å‡ç›ˆ {avg_win30_pct:+.1f}% / å‡äº {avg_loss30_pct:+.1f}% / ç›ˆäº {pf30:.2f}</div>
                     </div>
                   </div>
 
                   <div class="section-divider"></div>
 
                   <div class="score">
-                    <span class="score-label">7ÈÕĞÅºÅ</span>
+                    <span class="score-label">7æ—¥ä¿¡å·</span>
                     <span class="{adv7_class}">{adv7_text}</span>
                     {adv7_dots}
                   </div>
                   <div class="score">
-                    <span class="score-label">30ÈÕĞÅºÅ</span>
+                    <span class="score-label">30æ—¥ä¿¡å·</span>
                     <span class="{adv30_class}">{adv30_text}</span>
                     {adv30_dots}
                   </div>
@@ -851,8 +852,9 @@ else:
                 st.markdown(html, unsafe_allow_html=True)
 
 st.caption(
-    "ËùÓĞÖ¸±êºÍ»Ø²â¾ù»ùÓÚ¡°ÉÏÒ»¸ùÍêÕûKÏß¡±£¨ÈÕÏß=×òÈÕÊÕÅÌ£¬4Ğ¡Ê±/1Ğ¡Ê±=ÉÏÒ»ÍêÕûÖÜÆÚ£©£¬"
-    "²»»áÊ¹ÓÃÅÌÖĞÉĞÎ´×ßÍêµÄKÏßÊı¾İ¡£"
-    "7ÈÕ/30ÈÕÓ¯Àû¸ÅÂÊ»ùÓÚÀúÊ·Í¬ÀàĞÅºÅÍ³¼Æ£¬À¨ºÅÎªÆ½¾ùÓ¯Àû¡¢Æ½¾ù¿÷ËğºÍÓ¯¿÷±È£¨Profit Factor£©£¬"
-    "½ö×÷¸öÈËÁ¿»¯ÑĞ¾¿£¬²»¹¹³ÉÍ¶×Ê½¨Òé¡£"
+    "æ‰€æœ‰æŒ‡æ ‡å’Œå›æµ‹å‡åŸºäºâ€œä¸Šä¸€æ ¹å®Œæ•´Kçº¿â€ï¼ˆæ—¥çº¿=æ˜¨æ—¥æ”¶ç›˜ï¼Œ4å°æ—¶/1å°æ—¶=ä¸Šä¸€å®Œæ•´å‘¨æœŸï¼‰ï¼Œ"
+    "ä¸ä¼šä½¿ç”¨ç›˜ä¸­å°šæœªèµ°å®Œçš„Kçº¿æ•°æ®ã€‚"
+    "7æ—¥/30æ—¥ç›ˆåˆ©æ¦‚ç‡åŸºäºå†å²åŒç±»ä¿¡å·ç»Ÿè®¡ï¼Œæ‹¬å·ä¸ºå¹³å‡ç›ˆåˆ©ã€å¹³å‡äºæŸå’Œç›ˆäºæ¯”ï¼ˆProfit Factorï¼‰ï¼Œ"
+    "ä»…ä½œä¸ªäººé‡åŒ–ç ”ç©¶ï¼Œä¸æ„æˆæŠ•èµ„å»ºè®®ã€‚"
+
 )

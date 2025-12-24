@@ -3,7 +3,6 @@ import requests
 import numpy as np
 import time
 
-# ==================== 页面设置 ====================
 st.set_page_config(page_title="币圈回测信号面板 (Yahoo Finance)", layout="wide")
 
 st.markdown(
@@ -86,25 +85,4 @@ st.markdown(
     .dot-bear { background:#fb7185; box-shadow:0 0 0 1px rgba(251,113,133,0.25); }
 
     .label { color:#9ca3af; }
-    .prob-good { color:#4ade80; font-weight:600; }
-    .prob-mid { color:#facc15; font-weight:600; }
-    .prob-bad { color:#fb7185; font-weight:600; }
-
-    .score{
-        font-size:12px;
-        color:#9ca3af;
-        margin-top:8px;
-        display:flex;
-        align-items:center;
-        gap:8px;
-    }
-    .score-label{
-        font-size:13px;
-        font-weight:700;
-        color:#e5e7eb;
-        min-width:70px;
-    }
-    .dot-score{
-        width:9px;
-        height:9px;
-        border-radius
+    .prob-good { color:#4ade80; font-weight:600;

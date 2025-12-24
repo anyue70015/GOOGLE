@@ -3,8 +3,10 @@ import requests
 import numpy as np
 import time
 
+# ==================== 页面设置 ====================
 st.set_page_config(page_title="币圈回测信号面板 (Yahoo Finance)", layout="wide")
 
+# CSS 使用三单引号
 st.markdown(
     '''
     <style>
@@ -85,4 +87,77 @@ st.markdown(
     .dot-bear { background:#fb7185; box-shadow:0 0 0 1px rgba(251,113,133,0.25); }
 
     .label { color:#9ca3af; }
-    .prob-good { color:#4ade80; font-weight:600;
+    .prob-good { color:#4ade80; font-weight:600; }
+    .prob-mid { color:#facc15; font-weight:600; }
+    .prob-bad { color:#fb7185; font-weight:600; }
+
+    .score{
+        font-size:12px;
+        color:#9ca3af;
+        margin-top:8px;
+        display:flex;
+        align-items:center;
+        gap:8px;
+    }
+    .score-label{
+        font-size:13px;
+        font-weight:700;
+        color:#e5e7eb;
+        min-width:70px;
+    }
+    .dot-score{
+        width:9px;
+        height:9px;
+        border-radius:50%;
+        display:inline-block;
+        margin-right:2px;
+    }
+    .dot-score-buy{ background:#4ade80; }
+    .dot-score-hold{ background:#facc15; }
+    .dot-score-sell{ background:#fb7185; }
+    .dot-score-off{ background:#4b5563; }
+    .advice-text{
+        font-size:13px;
+        font-weight:600;
+    }
+    .advice-buy{ color:#4ade80; }
+    .advice-hold{ color:#facc15; }
+    .advice-sell{ color:#fb7185; }
+    .profit-row { font-size:12px; }
+    </style>
+    ''',
+    unsafe_allow_html=True,
+)
+
+st.title("币圈回测信号面板 (Yahoo Finance API)")
+
+# ==================== 配置 ====================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+}
+
+YAHOO_CRYPTO = {
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+    "BNB": "BNB-USD",
+    "XRP": "XRP-USD",
+    "DOGE": "DOGE-USD",
+    "ADA": "ADA-USD",
+    "AVAX": "AVAX-USD",
+    "TRX": "TRX-USD",
+    "LINK": "LINK-USD",
+    "DOT": "DOT-USD",
+    "TON": "TON11419-USD",
+    "SUI": "SUI-USD",
+    "PEPE": "PEPE24478-USD",
+    "WIF": "WIF-USD",
+    "SHIB": "SHIB-USD",
+}
+
+CHINESE_NAMES = {
+    "BTC-USD": "比特币",
+    "ETH-USD": "以太坊",
+    "SOL-USD": "Solana",
+    "BNB-USD": "币安币",
+    "XRP-USD": "

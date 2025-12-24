@@ -6,7 +6,7 @@ import pandas as pd
 from io import StringIO
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 大盘扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 自动扫描工具（8秒/只 + 断点续扫）")
+st.title("标普500 + 纳斯达克100 自动扫描工具（8秒/只 + 断点续扫 + 修复卡第一个）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -167,7 +167,7 @@ st.write(f"总计 {len(tickers)} 只股票")
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 threshold = st.slider("7日盈利概率阈值 (%)", 50, 90, 65) / 100.0
 
-# ==================== session_state 断点续扫 ====================
+# ==================== session_state ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'current_index' not in st.session_state:
@@ -179,7 +179,7 @@ result_container = st.container()
 progress_bar = st.progress(st.session_state.current_index / len(tickers) if len(tickers) > 0 else 0)
 status_text = st.empty()
 
-# ==================== 实时显示 + 排序 ====================
+# ==================== 实时显示 ====================
 with result_container:
     if st.session_state.high_prob:
         st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
@@ -190,12 +190,15 @@ with result_container:
 
 st.info(f"进度: {st.session_state.current_index}/{len(tickers)} | 失败: {st.session_state.failed_count} | 已发现: {len(st.session_state.high_prob)}")
 
-# ==================== 自动扫描（点一次跑完剩余，8秒/只） ====================
+# ==================== 修复卡第一个 + 自动跑完剩余 ====================
 if st.session_state.current_index < len(tickers):
     if st.button("点一次自动跑完所有剩余股票（8秒/只）", type="primary"):
+        # 修复卡第一个：先强制rerun一次清缓存
+        st.rerun()
+
         placeholder = st.empty()
         with placeholder.container():
-            st.warning("扫描启动！请保持页面打开，不要刷新。剩余约 {(len(tickers) - st.session_state.current_index) * 8 / 60:.1f} 分钟")
+            st.warning("扫描启动！请保持页面打开。剩余约 {(len(tickers) - st.session_state.current_index) * 8 / 60:.1f} 分钟")
         while st.session_state.current_index < len(tickers):
             i = st.session_state.current_index
             sym = tickers[i]
@@ -205,18 +208,14 @@ if st.session_state.current_index < len(tickers):
                 metrics = compute_stock_metrics(sym, mode)
                 if metrics["prob7"] >= threshold:
                     st.session_state.high_prob.append(metrics)
-                    with result_container:
-                        st.session_state.high_prob.sort(key=lambda x: x["prob7"], reverse=True)
-                        st.rerun()  # 实时更新
                 st.session_state.current_index += 1
             except Exception as e:
                 st.session_state.failed_count += 1
                 st.warning(f"{sym} 失败: {str(e)}")
                 st.session_state.current_index += 1
-            time.sleep(8)  # 8秒/只
+            time.sleep(8)
         placeholder.empty()
         st.success("所有股票扫描完成！")
-        st.rerun()
 else:
     st.success("扫描已完成，结果已保存")
 
@@ -226,4 +225,4 @@ if st.button("重置进度（从头开始）"):
     st.session_state.failed_count = 0
     st.rerun()
 
-st.caption("恢复自动跑版：点一次按钮自动跑完所有剩余股票（8秒/只），断点续扫 + 实时显示排序 + 结果不丢！保持页面打开即可。")
+st.caption("修复卡第一个版：点一次自动跑完剩余，8秒/只，断点续扫 + 实时显示排序。保持页面打开！")

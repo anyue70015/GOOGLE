@@ -3,7 +3,7 @@ import requests
 import numpy as np
 import time
 import pandas as pd
-from io import StringIO, BytesIO
+from io import StringIO
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 极品短线扫描工具", layout="wide")
 st.title("标普500 + 纳斯达克100 极品短线扫描工具（7日≥68% + PF7≥3.5）")
@@ -106,9 +106,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
-    avg_win = rets[rets > 0].mean() if (rets > 0).any() else 0
-    avg_loss = rets[rets <= 0].mean() if (rets <= 0).any() else 0
-    return win_rate, pf, avg_win, avg_loss
+    return win_rate, pf
 
 # ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
@@ -138,29 +136,18 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
     score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
 
-    prob7, pf7, avg_win7, avg_loss7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
-    prob30, pf30, avg_win30, avg_loss30 = backtest_with_stats(close[:-1], score_arr[:-1], 30)
+    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)[:2]
 
     price = close[-1]
     change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
-
-    signals_detail = []
-    if sig_macd: signals_detail.append("MACD柱>0")
-    if sig_vol: signals_detail.append("放量>1.1x MA20")
-    if sig_rsi: signals_detail.append("RSI≥60")
-    if sig_atr: signals_detail.append("ATR放量>1.1x")
-    if sig_obv: signals_detail.append("OBV>1.05x MA20")
 
     return {
         "symbol": symbol.upper(),
         "price": price,
         "change": change,
         "score": score,
-        "signals": " | ".join(signals_detail) if signals_detail else "无",
         "prob7": prob7,
         "pf7": pf7,
-        "prob30": prob30,
-        "pf30": pf30,
     }
 
 # ==================== 加载成分股（固定顺序） ====================
@@ -188,12 +175,12 @@ ndx100 = [
 
 sp500 = load_sp500_tickers()
 all_tickers = list(set(sp500 + ndx100))
-all_tickers.sort()  # 固定字母顺序
+all_tickers.sort()
 
 st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Nasdaq-100 已更新至2025年12月最新")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
-sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率", "PF30", "30日概率"], index=0)
+sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
 # ==================== session_state ====================
 if 'high_prob' not in st.session_state:
@@ -222,61 +209,53 @@ if st.session_state.high_prob:
         df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
         df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
         df_display['pf7'] = df_display['pf7'].round(2)
-        df_display['prob30'] = (df_display['prob30'] * 100).round(1).map("{:.1f}%".format)
-        df_display['pf30'] = df_display['pf30'].round(2)
         
         # 排序
         if sort_by == "PF7 (盈利因子)":
             df_display = df_display.sort_values("pf7", ascending=False)
-        elif sort_by == "PF30":
-            df_display = df_display.sort_values("pf30", ascending=False)
-        elif sort_by == "30日概率":
-            df_display = df_display.sort_values("prob30", ascending=False)
         else:
             df_display = df_display.sort_values("prob7", ascending=False)
         
         # 页面显示
         with result_container:
-            st.subheader(f"🎯 极品短线股票（7日概率≥68% 且 PF7≥3.5） 共 {len(df_display)} 只  |  排序：{sort_by}")
+            st.subheader(f"🎯 极品短线股票（7日概率≥68% + PF7≥3.5） 共 {len(df_display)} 只  |  排序：{sort_by}")
             for _, row in df_display.iterrows():
                 st.markdown(
                     f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
-                    f"得分: {row['score']}/5 ({row['signals']}) - "
-                    f"**7日: {row['prob7']} (PF7: {row['pf7']})** - "
-                    f"30日: {row['prob30']} (PF30: {row['pf30']})"
+                    f"得分: {row['score']}/5 - "
+                    f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
         
-        # 导出 CSV
-        csv_data = df_display.to_csv(index=False).encode('utf-8')
+        # 导出 CSV（简洁版）
+        csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📄 导出极品股票为 CSV（已美化）",
+            label="📄 导出极品股票为 CSV",
             data=csv_data,
             file_name=f"极品短线股票_7日≥68%_PF≥3.5_{time.strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
         
-        # 导出 TXT
+        # 导出 TXT（超级清晰）
         txt_lines = []
-        txt_lines.append(f"极品短线股票扫描结果（严格筛选）")
+        txt_lines.append(f"极品短线股票扫描结果")
         txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
         txt_lines.append(f"筛选条件：7日上涨概率 ≥ 68%  且  PF7 ≥ 3.5")
         txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
         txt_lines.append(f"符合股票数量：{len(df_display)} 只")
-        txt_lines.append("=" * 80)
+        txt_lines.append("=" * 60)
         txt_lines.append("")
         
         for _, row in df_display.iterrows():
             txt_lines.append(
                 f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
-                f"得分 {row['score']}/5  {row['signals']:35} | "
-                f"7日 {row['prob7']:>6}  PF7 {row['pf7']:>5} | "
-                f"30日 {row['prob30']:>6}  PF30 {row['pf30']:>5}"
+                f"得分 {row['score']}/5 | "
+                f"7日概率 {row['prob7']:>6}  |  PF7 {row['pf7']:>5}"
             )
         
         txt_content = "\n".join(txt_lines)
         
         st.download_button(
-            label="📜 导出极品股票为 TXT（超级易读，推荐）",
+            label="📜 导出极品股票为 TXT（推荐，超清晰）",
             data=txt_content.encode('utf-8'),
             file_name=f"极品短线股票_7日≥68%_PF≥3.5_{time.strftime('%Y%m%d')}.txt",
             mime="text/plain"
@@ -297,7 +276,7 @@ with st.spinner("自动扫描中（保持页面打开）..."):
         try:
             metrics = compute_stock_metrics(sym, mode)
             st.session_state.scanned_symbols.add(sym)
-            st.session_state.high_prob.append(metrics)  # 全部存下来，用于严格筛选
+            st.session_state.high_prob.append(metrics)
             st.rerun()
         except Exception as e:
             st.session_state.failed_count += 1
@@ -313,4 +292,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.failed_count = 0
     st.rerun()
 
-st.caption("2025最新版 | 只看极品短线信号 | 双格式导出 | 实时更新 | 专注3-7日爆发机会")
+st.caption("2025最新版 | 专注3-7日短线极品 | 只看得分 + 7日概率 + PF7 | 简洁高效")

@@ -6,7 +6,7 @@ import pandas as pd
 from io import StringIO
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 极品短线扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 极品短线扫描工具（7日≥68% + PF7≥3.5）")
+st.title("标普500 + 纳斯达克100 短线扫描工具（PF7≥3.6 或 7日≥68%）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -150,7 +150,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "pf7": pf7,
     }
 
-# ==================== 加载成分股（固定顺序） ====================
+# ==================== 加载成分股 ====================
 @st.cache_data(ttl=86400)
 def load_sp500_tickers():
     url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
@@ -159,7 +159,6 @@ def load_sp500_tickers():
     df = pd.read_csv(StringIO(resp.text))
     return df['Symbol'].tolist()
 
-# 2025年12月22日重组后最新 Nasdaq-100 列表（已确认最新：新增 ALNY,FER,INSM,MPWR,STX,WDC）
 ndx100 = [
     "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI",
     "AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON",
@@ -177,7 +176,7 @@ sp500 = load_sp500_tickers()
 all_tickers = list(set(sp500 + ndx100))
 all_tickers.sort()
 
-st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Nasdaq-100 已更新至2025年12月22日最新重组")
+st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Nasdaq-100 已更新至2025年12月最新")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
@@ -191,8 +190,6 @@ if 'failed_count' not in st.session_state:
     st.session_state.failed_count = 0
 
 result_container = st.container()
-
-# 修复：进度条初始化为0
 progress_bar = st.progress(0)
 status_text = st.empty()
 
@@ -200,10 +197,11 @@ status_text = st.empty()
 if st.session_state.high_prob:
     df_all = pd.DataFrame(st.session_state.high_prob)
     
-    filtered_df = df_all[(df_all['prob7'] >= 0.68) & (df_all['pf7'] >= 3.5)].copy()
+    # 新条件：PF7 >= 3.6 OR 7日概率 >= 0.68
+    filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
     
     if filtered_df.empty:
-        st.warning("当前扫描中暂无同时满足 7日概率≥68% 且 PF7≥3.5 的极品短线股票，继续扫描中...")
+        st.warning("当前扫描中暂无满足 PF7≥3.6 或 7日概率≥68% 的股票，继续扫描中...")
     else:
         df_display = filtered_df.copy()
         df_display['price'] = df_display['price'].round(2)
@@ -217,7 +215,7 @@ if st.session_state.high_prob:
             df_display = df_display.sort_values("prob7", ascending=False)
         
         with result_container:
-            st.subheader(f"🎯 极品短线股票（7日概率≥68% + PF7≥3.5） 共 {len(df_display)} 只  |  排序：{sort_by}")
+            st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只  |  排序：{sort_by}")
             for _, row in df_display.iterrows():
                 st.markdown(
                     f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
@@ -225,18 +223,20 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
         
+        # CSV 导出
         csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📄 导出极品股票为 CSV",
+            label="📄 导出结果为 CSV",
             data=csv_data,
-            file_name=f"极品短线股票_7日≥68%_PF≥3.5_{time.strftime('%Y%m%d')}.csv",
+            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.csv",
             mime="text/csv"
         )
         
+        # TXT 导出
         txt_lines = []
-        txt_lines.append(f"极品短线股票扫描结果")
+        txt_lines.append(f"短线优质股票扫描结果")
         txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
-        txt_lines.append(f"筛选条件：7日上涨概率 ≥ 68%  且  PF7 ≥ 3.5")
+        txt_lines.append(f"筛选条件：PF7 ≥ 3.6  或  7日上涨概率 ≥ 68%")
         txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
         txt_lines.append(f"符合股票数量：{len(df_display)} 只")
         txt_lines.append("=" * 60)
@@ -252,16 +252,16 @@ if st.session_state.high_prob:
         txt_content = "\n".join(txt_lines)
         
         st.download_button(
-            label="📜 导出极品股票为 TXT（推荐，超清晰）",
+            label="📜 导出结果为 TXT（推荐，清晰对齐）",
             data=txt_content.encode('utf-8'),
-            file_name=f"极品短线股票_7日≥68%_PF≥3.5_{time.strftime('%Y%m%d')}.txt",
+            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.txt",
             mime="text/plain"
         )
         
-        with st.expander("🔍 TXT 导出内容预览"):
+        with st.expander("🔍 TXT 预览"):
             st.text(txt_content)
 
-st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 极品股票: {len([x for x in st.session_state.high_prob if x['prob7']>=0.68 and x['pf7']>=3.5])}")
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
 
 # ==================== 自动扫描 ====================
 with st.spinner("自动扫描中（保持页面打开）..."):
@@ -269,7 +269,6 @@ with st.spinner("自动扫描中（保持页面打开）..."):
         if sym in st.session_state.scanned_symbols:
             continue
         status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
-        # 实时更新进度条
         progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
         try:
             metrics = compute_stock_metrics(sym, mode)
@@ -282,7 +281,7 @@ with st.spinner("自动扫描中（保持页面打开）..."):
             st.session_state.scanned_symbols.add(sym)
         time.sleep(8)
 
-st.success("所有股票扫描完成！极品结果已更新")
+st.success("所有股票扫描完成！结果已更新")
 
 if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.high_prob = []
@@ -290,4 +289,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.failed_count = 0
     st.rerun()
 
-st.caption("2025最新版 | 专注3-7日短线极品 | 只看得分 + 7日概率 + PF7 | 简洁高效")
+st.caption("2025最新版 | PF7≥3.6 或 7日≥68% | 简洁专注短线")

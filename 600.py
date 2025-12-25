@@ -5,8 +5,8 @@ import time
 import pandas as pd
 from io import StringIO, BytesIO
 
-st.set_page_config(page_title="标普500 + 纳斯达克100 大盘扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 自动扫描工具（固定顺序 + 已扫不重扫 + 多改进）")
+st.set_page_config(page_title="标普500 + 纳斯达克100 极品短线扫描工具", layout="wide")
+st.title("标普500 + 纳斯达克100 极品短线扫描工具（7日≥68% + PF7≥3.5）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -172,8 +172,19 @@ def load_sp500_tickers():
     df = pd.read_csv(StringIO(resp.text))
     return df['Symbol'].tolist()
 
-# 更新为2025年12月最新Nasdaq-100列表（基于Wikipedia 2025-12-22更新）
-ndx100 = ["ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA","CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT","GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL","MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR","PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS","TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"]
+# 2025年12月22日重组后最新 Nasdaq-100 列表
+ndx100 = [
+    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI",
+    "AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON",
+    "BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
+    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH",
+    "EA","EXC","FAST","FER","FTNT","GEHC","GILD","HON","IDXX","INSM",
+    "INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
+    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX",
+    "NVDA","NXPI","ORLY","ODFL","PCAR","PLTR","PANW","PAYX","PYPL","PDD",
+    "PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+]
 
 sp500 = load_sp500_tickers()
 all_tickers = list(set(sp500 + ndx100))
@@ -182,7 +193,6 @@ all_tickers.sort()  # 固定字母顺序
 st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Nasdaq-100 已更新至2025年12月最新")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
-prob7_threshold = st.slider("7日盈利概率阈值 (%)", 50, 90, 65) / 100.0
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率", "PF30", "30日概率"], index=0)
 
 # ==================== session_state ====================
@@ -197,65 +207,66 @@ result_container = st.container()
 progress_bar = st.progress(len(st.session_state.scanned_symbols) / len(all_tickers))
 status_text = st.empty()
 
-# ==================== 实时显示 ====================
-with result_container:
-    if st.session_state.high_prob:
-        if sort_by == "PF7 (盈利因子)":
-            displayed = sorted(st.session_state.high_prob, key=lambda x: x["pf7"], reverse=True)
-        elif sort_by == "PF30":
-            displayed = sorted(st.session_state.high_prob, key=lambda x: x["pf30"], reverse=True)
-        elif sort_by == "30日概率":
-            displayed = sorted(st.session_state.high_prob, key=lambda x: x["prob30"], reverse=True)
-        else:
-            displayed = sorted(st.session_state.high_prob, key=lambda x: x["prob7"], reverse=True)
-        
-        st.subheader(f"已发现 {len(displayed)} 只 ≥ {prob7_threshold*100:.0f}% (7日概率) 的股票（实时排序：{sort_by}）")
-        for row in displayed:
-            change_str = f"{row['change']:+.2f}%"
-            st.markdown(f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({change_str}) - "
-                        f"得分: {row['score']}/5 ({row['signals']}) - "
-                        f"**7日概率: {row['prob7']*100:.1f}% | PF7: {row['pf7']:.2f}** - "
-                        f"30日概率: {row['prob30']*100:.1f}% | PF30: {row['pf30']:.2f}")
-
-# 导出CSV
+# ==================== 结果筛选与显示 + 导出 ====================
 if st.session_state.high_prob:
-    df_export = pd.DataFrame(st.session_state.high_prob)
-    csv = df_export.to_csv(index=False).encode()
-    st.download_button(
-        label="导出当前结果为CSV",
-        data=csv,
-        file_name=f"高概率股票_{time.strftime('%Y%m%d')}.csv",
-        mime="text/csv"
-    )
-
-st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 已发现高概率: {len(st.session_state.high_prob)}")
-
-# ==================== 自动扫描 ====================
-with st.spinner("自动扫描中（保持页面打开）..."):
-    for sym in all_tickers:
-        if sym in st.session_state.scanned_symbols:
-            continue
-        status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
-        progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
-        try:
-            metrics = compute_stock_metrics(sym, mode)
-            st.session_state.scanned_symbols.add(sym)
-            if metrics["prob7"] >= prob7_threshold:
-                st.session_state.high_prob.append(metrics)
-                with result_container:
-                    st.rerun()
-        except Exception as e:
-            st.session_state.failed_count += 1
-            st.warning(f"{sym} 失败: {str(e)}")
-            st.session_state.scanned_symbols.add(sym)
-        time.sleep(8)
-
-st.success("所有股票扫描完成！结果永久保存")
-
-if st.button("重置所有进度（从头开始）"):
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.rerun()
-
-st.caption("改进版：Nasdaq-100更新至2025年12月最新 | 显示得分明细 | 支持PF排序 | 新增30日胜率/PF | 支持导出CSV | 实时更新")
+    df_all = pd.DataFrame(st.session_state.high_prob)
+    
+    # 严格筛选：7日概率 ≥ 68% 且 PF7 ≥ 3.5
+    filtered_df = df_all[(df_all['prob7'] >= 0.68) & (df_all['pf7'] >= 3.5)].copy()
+    
+    if filtered_df.empty:
+        st.warning("当前扫描中暂无同时满足 7日概率≥68% 且 PF7≥3.5 的极品短线股票，继续扫描中...")
+    else:
+        df_display = filtered_df.copy()
+        df_display['price'] = df_display['price'].round(2)
+        df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+        df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
+        df_display['pf7'] = df_display['pf7'].round(2)
+        df_display['prob30'] = (df_display['prob30'] * 100).round(1).map("{:.1f}%".format)
+        df_display['pf30'] = df_display['pf30'].round(2)
+        
+        # 排序
+        if sort_by == "PF7 (盈利因子)":
+            df_display = df_display.sort_values("pf7", ascending=False)
+        elif sort_by == "PF30":
+            df_display = df_display.sort_values("pf30", ascending=False)
+        elif sort_by == "30日概率":
+            df_display = df_display.sort_values("prob30", ascending=False)
+        else:
+            df_display = df_display.sort_values("prob7", ascending=False)
+        
+        # 页面显示
+        with result_container:
+            st.subheader(f"🎯 极品短线股票（7日概率≥68% 且 PF7≥3.5） 共 {len(df_display)} 只  |  排序：{sort_by}")
+            for _, row in df_display.iterrows():
+                st.markdown(
+                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 ({row['signals']}) - "
+                    f"**7日: {row['prob7']} (PF7: {row['pf7']})** - "
+                    f"30日: {row['prob30']} (PF30: {row['pf30']})"
+                )
+        
+        # 导出 CSV
+        csv_data = df_display.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📄 导出极品股票为 CSV（已美化）",
+            data=csv_data,
+            file_name=f"极品短线股票_7日≥68%_PF≥3.5_{time.strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+        
+        # 导出 TXT
+        txt_lines = []
+        txt_lines.append(f"极品短线股票扫描结果（严格筛选）")
+        txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
+        txt_lines.append(f"筛选条件：7日上涨概率 ≥ 68%  且  PF7 ≥ 3.5")
+        txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
+        txt_lines.append(f"符合股票数量：{len(df_display)} 只")
+        txt_lines.append("=" * 80)
+        txt_lines.append("")
+        
+        for _, row in df_display.iterrows():
+            txt_lines.append(
+                f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
+                f"得分 {row['score']}/5  {row['signals']:35} | "
+                f"7日 {row['prob7']:>6}  PF

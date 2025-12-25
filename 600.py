@@ -99,10 +99,10 @@ def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
 
 def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     if len(close) <= steps + 1:
-        return 0.5, 0.0, 0.0, 0.0
+        return 0.5, 0.0
     idx = np.where(score[:-steps] >= 3)[0]
     if len(idx) == 0:
-        return 0.5, 0.0, 0.0, 0.0
+        return 0.5, 0.0
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
@@ -136,7 +136,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
     score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
 
-    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)[:2]
+    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
 
     price = close[-1]
     change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
@@ -159,7 +159,7 @@ def load_sp500_tickers():
     df = pd.read_csv(StringIO(resp.text))
     return df['Symbol'].tolist()
 
-# 2025年12月22日重组后最新 Nasdaq-100 列表
+# 2025年12月22日重组后最新 Nasdaq-100 列表（已确认最新：新增 ALNY,FER,INSM,MPWR,STX,WDC）
 ndx100 = [
     "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI",
     "AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON",
@@ -177,7 +177,7 @@ sp500 = load_sp500_tickers()
 all_tickers = list(set(sp500 + ndx100))
 all_tickers.sort()
 
-st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Nasdaq-100 已更新至2025年12月最新")
+st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Nasdaq-100 已更新至2025年12月22日最新重组")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
@@ -191,14 +191,15 @@ if 'failed_count' not in st.session_state:
     st.session_state.failed_count = 0
 
 result_container = st.container()
-progress_bar = st.progress(len(st.session_state.scanned_symbols) / len(all_tickers))
+
+# 修复：进度条初始化为0
+progress_bar = st.progress(0)
 status_text = st.empty()
 
 # ==================== 结果筛选与显示 + 导出 ====================
 if st.session_state.high_prob:
     df_all = pd.DataFrame(st.session_state.high_prob)
     
-    # 严格筛选：7日概率 ≥ 68% 且 PF7 ≥ 3.5
     filtered_df = df_all[(df_all['prob7'] >= 0.68) & (df_all['pf7'] >= 3.5)].copy()
     
     if filtered_df.empty:
@@ -210,13 +211,11 @@ if st.session_state.high_prob:
         df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
         df_display['pf7'] = df_display['pf7'].round(2)
         
-        # 排序
         if sort_by == "PF7 (盈利因子)":
             df_display = df_display.sort_values("pf7", ascending=False)
         else:
             df_display = df_display.sort_values("prob7", ascending=False)
         
-        # 页面显示
         with result_container:
             st.subheader(f"🎯 极品短线股票（7日概率≥68% + PF7≥3.5） 共 {len(df_display)} 只  |  排序：{sort_by}")
             for _, row in df_display.iterrows():
@@ -226,7 +225,6 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
         
-        # 导出 CSV（简洁版）
         csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📄 导出极品股票为 CSV",
@@ -235,7 +233,6 @@ if st.session_state.high_prob:
             mime="text/csv"
         )
         
-        # 导出 TXT（超级清晰）
         txt_lines = []
         txt_lines.append(f"极品短线股票扫描结果")
         txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
@@ -272,6 +269,7 @@ with st.spinner("自动扫描中（保持页面打开）..."):
         if sym in st.session_state.scanned_symbols:
             continue
         status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+        # 实时更新进度条
         progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
         try:
             metrics = compute_stock_metrics(sym, mode)

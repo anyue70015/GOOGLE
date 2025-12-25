@@ -269,4 +269,48 @@ if st.session_state.high_prob:
             txt_lines.append(
                 f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
                 f"得分 {row['score']}/5  {row['signals']:35} | "
-                f"7日 {row['prob7']:>6}  PF
+                f"7日 {row['prob7']:>6}  PF7 {row['pf7']:>5} | "
+                f"30日 {row['prob30']:>6}  PF30 {row['pf30']:>5}"
+            )
+        
+        txt_content = "\n".join(txt_lines)
+        
+        st.download_button(
+            label="📜 导出极品股票为 TXT（超级易读，推荐）",
+            data=txt_content.encode('utf-8'),
+            file_name=f"极品短线股票_7日≥68%_PF≥3.5_{time.strftime('%Y%m%d')}.txt",
+            mime="text/plain"
+        )
+        
+        with st.expander("🔍 TXT 导出内容预览"):
+            st.text(txt_content)
+
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 极品股票: {len([x for x in st.session_state.high_prob if x['prob7']>=0.68 and x['pf7']>=3.5])}")
+
+# ==================== 自动扫描 ====================
+with st.spinner("自动扫描中（保持页面打开）..."):
+    for sym in all_tickers:
+        if sym in st.session_state.scanned_symbols:
+            continue
+        status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+        progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
+        try:
+            metrics = compute_stock_metrics(sym, mode)
+            st.session_state.scanned_symbols.add(sym)
+            st.session_state.high_prob.append(metrics)  # 全部存下来，用于严格筛选
+            st.rerun()
+        except Exception as e:
+            st.session_state.failed_count += 1
+            st.warning(f"{sym} 失败: {str(e)}")
+            st.session_state.scanned_symbols.add(sym)
+        time.sleep(8)
+
+st.success("所有股票扫描完成！极品结果已更新")
+
+if st.button("🔄 重置所有进度（从头开始）"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.rerun()
+
+st.caption("2025最新版 | 只看极品短线信号 | 双格式导出 | 实时更新 | 专注3-7日爆发机会")

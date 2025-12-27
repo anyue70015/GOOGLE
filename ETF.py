@@ -3,67 +3,255 @@ import requests
 import numpy as np
 import time
 import pandas as pd
+from io import StringIO
 
-st.set_page_config(page_title="回本利器-数据校准版", layout="wide")
-st.title("🎯 极品短线扫描 (数据精准校准版)")
+st.set_page_config(page_title="标普500 + 纳斯达克100 + ETF 扫描工具", layout="wide")
+st.title("🎯 极品短线扫描 (PF7≥3.6 或 7日≥68%)")
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"}
+# ==================== 核心常量 ====================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+}
 
-CORE_ETFS = ["SLV", "GLD", "GDX", "SOXX", "SMH", "SPY", "QQQ", "IWM", "BITO", "WDC", "NVDA", "AAPL"]
+BACKTEST_CONFIG = {
+    "3个月": {"range": "3mo", "interval": "1d"},
+    "6个月": {"range": "6mo", "interval": "1d"},
+    "1年":  {"range": "1y",  "interval": "1d"},
+    "2年":  {"range": "2y",  "interval": "1d"},
+    "3年":  {"range": "3y",  "interval": "1d"},
+    "5年":  {"range": "5y",  "interval": "1d"},
+    "10年": {"range": "10y", "interval": "1d"},
+}
 
-@st.cache_data(ttl=3600)
-def fetch_clean_data(symbol):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d"
+# 你关注的核心 ETF 列表
+CORE_ETFS = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO"]
+
+# ==================== 数据拉取 ====================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
         data = resp.json()["chart"]["result"][0]
         quote = data["indicators"]["quote"][0]
-        df = pd.DataFrame({"close": quote["close"], "vol": quote["volume"]}).dropna()
-        # 确保只取有价格波动的行，过滤掉成交量为0的僵尸交易日（周末残留）
-        df = df[df['vol'] > 0]
-        return df
-    except:
-        return None
+        close = np.array(quote["close"], dtype=float)
+        high = np.array(quote["high"], dtype=float)
+        low = np.array(quote["low"], dtype=float)
+        volume = np.array(quote["volume"], dtype=float)
+        mask = ~np.isnan(close)
+        close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
+        if len(close) < 100:
+            raise ValueError("数据不足")
+        return close, high, low, volume
+    except Exception as e:
+        raise ValueError(f"请求失败: {str(e)}")
 
-def compute_metrics(symbol):
-    df = fetch_clean_data(symbol)
-    if df is None or len(df) < 50: return None
-    
-    close = df["close"].values
-    
-    # --- 修正逻辑开始 ---
-    # 计算每日百分比收益率
-    rets = np.diff(close) / close[:-1]
-    
-    # 只统计显著波动的日子，避免微小震荡摊薄 PF
-    # 如果某天涨跌幅几乎为 0 (小于 0.01%)，不计入 PF 分母，防止数值被恶意摊薄
-    pos_rets = rets[rets > 0.0001]
-    neg_rets = rets[rets < -0.0001]
-    
-    pf7 = round(pos_rets.sum() / (abs(neg_rets.sum()) + 1e-9), 2)
-    prob7 = round((len(pos_rets) / len(rets)) * 100, 1)
-    # --- 修正逻辑结束 ---
-    
-    # 得分逻辑保持不变
-    s1 = 1 if close[-1] > close[-2] else 0
-    s2 = 1 if df['vol'].values[-1] > df['vol'].rolling(20).mean().values[-1] * 1.1 else 0
-    s3 = 1 if close[-1] > df['close'].rolling(20).mean().values[-1] else 0
-    score = s1 + s2 + s3 + 2
-    
-    return {"代码": symbol, "现价": round(close[-1], 2), "得分": f"{score}/5", "胜率": f"{prob7}%", "PF7效率": pf7}
+# ==================== 指标函数 ====================
+def ema_np(x: np.ndarray, span: int) -> np.ndarray:
+    alpha = 2 / (span + 1)
+    ema = np.empty_like(x)
+    ema[0] = x[0]
+    for i in range(1, len(x)):
+        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+    return ema
 
-if st.sidebar.button("👉 重新校准扫描"):
-    results = []
-    for s in CORE_ETFS:
-        m = compute_metrics(s)
-        if m: results.append(m)
+def macd_hist_np(close: np.ndarray) -> np.ndarray:
+    ema12 = ema_np(close, 12)
+    ema26 = ema_np(close, 26)
+    macd_line = ema12 - ema26
+    signal = ema_np(macd_line, 9)
+    return macd_line - signal
+
+def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    alpha = 1 / period
+    gain_ema = np.empty_like(gain)
+    loss_ema = np.empty_like(loss)
+    gain_ema[0] = gain[0]
+    loss_ema[0] = loss[0]
+    for i in range(1, len(gain)):
+        gain_ema[i] = alpha * gain[i] + (1 - alpha) * gain_ema[i-1]
+        loss_ema[i] = alpha * loss[i] + (1 - alpha) * loss_ema[i-1]
+    rs = gain_ema / (loss_ema + 1e-9)
+    return 100 - (100 / (1 + rs))
+
+def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    atr = np.empty_like(tr)
+    atr[0] = tr[0]
+    alpha = 1 / period
+    for i in range(1, len(tr)):
+        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
+    return atr
+
+def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
+    if len(x) < window:
+        return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
+    cumsum = np.cumsum(np.insert(x, 0, 0.0))
+    ma = (cumsum[window:] - cumsum[:-window]) / window
+    return np.concatenate([np.full(window-1, ma[0]), ma])
+
+def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+    direction = np.sign(np.diff(close, prepend=close[0]))
+    return np.cumsum(direction * volume)
+
+def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
+    if len(close) <= steps + 1:
+        return 0.5, 0.0
+    idx = np.where(score[:-steps] >= 3)[0]
+    if len(idx) == 0:
+        return 0.5, 0.0
+    rets = close[idx + steps] / close[idx] - 1
+    win_rate = (rets > 0).mean()
+    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
+    return win_rate, pf
+
+# ==================== 核心计算 ====================
+@st.cache_data(show_spinner=False)
+def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
+    yahoo_symbol = symbol.upper()
+    close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
+
+    macd_hist = macd_hist_np(close)
+    rsi = rsi_np(close)
+    atr = atr_np(high, low, close)
+    obv = obv_np(close, volume)
+    vol_ma20 = rolling_mean_np(volume, 20)
+    atr_ma20 = rolling_mean_np(atr, 20)
+    obv_ma20 = rolling_mean_np(obv, 20)
+
+    sig_macd = (macd_hist > 0).astype(int)[-1]
+    sig_vol = (volume[-1] > vol_ma20[-1] * 1.1).astype(int)
+    sig_rsi = (rsi[-1] >= 60).astype(int)
+    sig_atr = (atr[-1] > atr_ma20[-1] * 1.1).astype(int)
+    sig_obv = (obv[-1] > obv_ma20[-1] * 1.05).astype(int)
+    score = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
+
+    sig_macd_hist = (macd_hist > 0).astype(int)
+    sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int)
+    sig_rsi_hist = (rsi >= 60).astype(int)
+    sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int)
+    sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
+    score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
+
+    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+
+    price = close[-1]
+    change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
+
+    return {
+        "symbol": symbol.upper(),
+        "price": price,
+        "change": change,
+        "score": score,
+        "prob7": prob7,
+        "pf7": pf7,
+    }
+
+# ==================== 加载成分股 ====================
+@st.cache_data(ttl=86400)
+def load_sp500_tickers():
+    url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+    resp = requests.get(url, headers=HEADERS)
+    resp.raise_for_status()
+    df = pd.read_csv(StringIO(resp.text))
+    return df['Symbol'].tolist()
+
+ndx100 = [
+    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI",
+    "AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON",
+    "BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
+    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH",
+    "EA","EXC","FAST","FER","FTNT","GEHC","GILD","HON","IDXX","INSM",
+    "INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
+    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX",
+    "NVDA","NXPI","ORLY","ODFL","PCAR","PLTR","PANW","PAYX","PYPL","PDD",
+    "PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+]
+
+# 合并所有标的
+sp500 = load_sp500_tickers()
+all_tickers = list(set(sp500 + ndx100 + CORE_ETFS)) # 加入了 CORE_ETFS
+all_tickers.sort()
+
+st.write(f"总计 {len(all_tickers)} 只标的 (含标普500、纳指100及核心ETF)")
+
+mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
+sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
+
+# ==================== session_state ====================
+if 'high_prob' not in st.session_state:
+    st.session_state.high_prob = []
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()
+if 'failed_count' not in st.session_state:
+    st.session_state.failed_count = 0
+
+result_container = st.container()
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+# ==================== 结果筛选与显示 ====================
+if st.session_state.high_prob:
+    df_all = pd.DataFrame(st.session_state.high_prob)
+    filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
     
-    if results:
-        df_res = pd.DataFrame(results).sort_values("PF7效率", ascending=False)
-        st.table(df_res) # 使用 Table 最稳
+    if filtered_df.empty:
+        st.warning("暂无满足条件的极品标的，扫描继续中...")
+    else:
+        df_display = filtered_df.copy()
+        df_display['price'] = df_display['price'].round(2)
+        df_display['change_val'] = df_display['change'] # 保留数值用于逻辑
+        df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+        df_display['prob7_val'] = df_display['prob7'] # 保留数值用于排序
+        df_display['prob7_str'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
         
-        # TXT 报告
-        txt = "--- 校准后报告 ---\n"
-        for _, r in df_res.iterrows():
-            txt += f"{r['代码']}: PF7={r['PF7效率']} | 胜率={r['胜率']}\n"
-        st.download_button("下载报告", txt, "fix_report.txt")
+        if sort_by == "PF7 (盈利因子)":
+            df_display = df_display.sort_values("pf7", ascending=False)
+        else:
+            df_display = df_display.sort_values("prob7_val", ascending=False)
+        
+        with result_container:
+            st.subheader(f"🔥 极品短线列表 (共 {len(df_display)} 只)")
+            for _, row in df_display.iterrows():
+                st.markdown(
+                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - "
+                    f"**7日概率: {row['prob7_str']} | PF7: {row['pf7']:.2f}**"
+                )
+
+        # 导出 TXT
+        txt_lines = [f"极品扫描报告 - {time.strftime('%Y-%m-%d %H:%M')}", "="*50]
+        for _, row in df_display.iterrows():
+            txt_lines.append(f"{row['symbol']:6} | PF7: {row['pf7']:5.2f} | 胜率: {row['prob7_str']:>6} | 得分: {row['score']}/5")
+        
+        st.download_button("📜 导出报告", "\n".join(txt_lines).encode('utf-8'), f"Report_{time.strftime('%Y%m%d')}.txt")
+
+# ==================== 自动扫描逻辑 ====================
+with st.spinner("扫描中..."):
+    for sym in all_tickers:
+        if sym in st.session_state.scanned_symbols:
+            continue
+        status_text.text(f"正在扫描: {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+        progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
+        try:
+            metrics = compute_stock_metrics(sym, mode)
+            st.session_state.scanned_symbols.add(sym)
+            st.session_state.high_prob.append(metrics)
+            st.rerun()
+        except Exception:
+            st.session_state.failed_count += 1
+            st.session_state.scanned_symbols.add(sym)
+            time.sleep(1) # 遇错稍微停顿
+
+if st.button("🔄 重置"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.rerun()

@@ -4,7 +4,6 @@ import numpy as np
 import time
 import pandas as pd
 from io import StringIO
-import concurrent.futures
 
 st.set_page_config(page_title="短线扫描-批量修复版", layout="wide")
 st.title("🚀 短线批量扫描工具（修复PF7计算）")
@@ -251,7 +250,10 @@ def get_stock_pool(mode):
 stocks_to_scan = get_stock_pool(scan_mode)
 
 st.write(f"**扫描股票池**: {len(stocks_to_scan)} 只股票")
-st.write("股票列表:", ", ".join(stocks_to_scan[:20]) + ("..." if len(stocks_to_scan) > 20 else ""))
+if len(stocks_to_scan) <= 20:
+    st.write("股票列表:", ", ".join(stocks_to_scan))
+else:
+    st.write("股票列表:", ", ".join(stocks_to_scan[:20]) + "...")
 
 # 初始化session state
 if 'scan_results' not in st.session_state:

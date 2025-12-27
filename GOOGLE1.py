@@ -4,95 +4,107 @@ import numpy as np
 import pandas as pd
 import time
 
-# ==================== 1. 核心科学引擎 (严格保持你最信任的算法) ====================
-class ScienceEngine:
-    @staticmethod
-    def ema(x, span):
+# --- 1. 核心计算函数 (严格保持科学一致性) ---
+def compute_science_metrics(close, high, low, volume):
+    # EMA 计算
+    def get_ema(x, span):
         alpha = 2 / (span + 1)
-        ema = np.empty_like(x); ema[0] = x[0]
-        for i in range(1, len(x)): ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
-        return ema
+        res = np.empty_like(x); res[0] = x[0]
+        for i in range(1, len(x)): res[i] = alpha * x[i] + (1 - alpha) * res[i-1]
+        return res
 
-    @staticmethod
-    def rolling_mean(x, window):
-        if len(x) < window: return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
+    # 指标计算
+    e12 = get_ema(close, 12)
+    e26 = get_ema(close, 26)
+    macd_hist = (e12 - e26) - get_ema(e12 - e26, 9)
+    
+    # RSI
+    delta = np.diff(close, prepend=close[0])
+    g = np.where(delta > 0, delta, 0.0)
+    l = np.where(delta < 0, -delta, 0.0)
+    ge = np.empty_like(g); le = np.empty_like(l)
+    ge[0], le[0] = g[0], l[0]
+    for i in range(1, len(g)):
+        ge[i] = 0.0714 * g[i] + 0.9286 * ge[i-1]
+        le[i] = 0.0714 * l[i] + 0.9286 * le[i-1]
+    rsi = 100 - (100 / (1 + (ge / (le + 1e-9))))
+
+    # ATR
+    pc = np.roll(close, 1); pc[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(np.abs(high - pc), np.abs(low - pc)))
+    atr = np.empty_like(tr); atr[0] = tr[0]
+    for i in range(1, len(tr)): atr[i] = 0.0714 * tr[i] + 0.9286 * atr[i-1]
+    
+    # OBV
+    obv = np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
+
+    # MA 过滤
+    def get_ma(x, w=20):
+        if len(x) < w: return x
         cs = np.cumsum(np.insert(x, 0, 0.0))
-        ma = (cs[window:] - cs[:-window]) / window
-        return np.concatenate([np.full(window-1, ma[0]), ma])
+        ma = (cs[w:] - cs[:-w]) / w
+        return np.concatenate([np.full(w-1, ma[0]), ma])
 
-    @staticmethod
-    def compute_metrics(close, high, low, volume):
-        e12, e26 = ScienceEngine.ema(close, 12), ScienceEngine.ema(close, 26)
-        mh = (e12 - e26) - ScienceEngine.ema(e12 - e26, 9)
-        delta = np.diff(close, prepend=close[0])
-        g, l = np.where(delta > 0, delta, 0.0), np.where(delta < 0, -delta, 0.0)
-        ge, le = np.empty_like(g), np.empty_like(l); ge[0], le[0] = g[0], l[0]
-        for i in range(1, len(g)):
-            ge[i] = 0.0714 * g[i] + 0.9286 * ge[i-1]
-            le[i] = 0.0714 * l[i] + 0.9286 * le[i-1]
-        rsi = 100 - (100 / (1 + (ge / (le + 1e-9))))
-        pc = np.roll(close, 1); pc[0] = close[0]
-        tr = np.maximum(high - low, np.maximum(np.abs(high - pc), np.abs(low - pc)))
-        atr = np.empty_like(tr); atr[0] = tr[0]
-        for i in range(1, len(tr)): atr[i] = 0.0714 * tr[i] + 0.9286 * atr[i-1]
-        obv = np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
-        vma, ama, oma = ScienceEngine.rolling_mean(volume, 20), ScienceEngine.rolling_mean(atr, 20), ScienceEngine.rolling_mean(obv, 20)
-        score_arr = (mh>0).astype(int) + (volume>vma*1.1).astype(int) + (rsi>=60).astype(int) + (atr>ama*1.1).astype(int) + (obv>oma*1.05).astype(int)
-        c_bt, s_bt = close[:-1], score_arr[:-1]
-        idx = np.where(s_bt[:-7] >= 3)[0]
-        if len(idx) > 0:
-            rets = c_bt[idx + 7] / c_bt[idx] - 1
-            prob7, pf7 = (rets > 0).mean(), rets[rets > 0].sum() / (abs(rets[rets <= 0].sum()) + 1e-9)
-        else: prob7, pf7 = 0.5, 0.0
-        return score_arr[-1], prob7, pf7
+    vma, ama, oma = get_ma(volume), get_ma(atr), get_ma(obv)
+    
+    # 5维评分
+    score_arr = (macd_hist > 0).astype(int) + (volume > vma*1.1).astype(int) + \
+                (rsi >= 60).astype(int) + (atr > ama*1.1).astype(int) + (obv > oma*1.05).astype(int)
+    
+    # 回测逻辑 [:-1] 剔除当天干扰
+    c_bt, s_bt = close[:-1], score_arr[:-1]
+    idx = np.where(s_bt[:-7] >= 3)[0]
+    if len(idx) > 0:
+        rets = c_bt[idx + 7] / c_bt[idx] - 1
+        prob7 = (rets > 0).mean()
+        pf7 = rets[rets > 0].sum() / (abs(rets[rets <= 0].sum()) + 1e-9)
+    else:
+        prob7, pf7 = 0.5, 0.0
+        
+    return score_arr[-1], prob7, pf7
 
-# ==================== 2. 界面与配置 ====================
-st.set_page_config(page_title="科学全量扫描仪", layout="wide")
-st.title("🛡️ 科学实战：全量自动扫描系统")
+# --- 2. 界面布局 ---
+st.set_page_config(page_title="科学流水线扫描仪", layout="wide")
 
-# 初始化状态 (State)
-if 'results' not in st.session_state: st.session_state.results = []
-if 'idx' not in st.session_state: st.session_state.idx = 0
-if 'scanning' not in st.session_state: st.session_state.scanning = False
+# 侧边栏交互区
+st.sidebar.title("🔍 扫描控制中心")
+ticker_input = st.sidebar.text_area("1. 粘贴股票代码 (逗号或回车分隔)", 
+                                   "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,WDC,SNDK,SPY,QQQ,SOXL,TQQQ", 
+                                   height=300)
+min_pf = st.sidebar.slider("2. 最低 PF7 阈值", 0.0, 10.0, 3.6)
+min_win = st.sidebar.slider("3. 最低胜率阈值 (%)", 0, 100, 68) / 100.0
 
-# --- 侧边栏：输入与控制 ---
-st.sidebar.header("🔍 扫描配置")
+col_a, col_b = st.sidebar.columns(2)
+run_btn = col_a.button("▶️ 开始全自动扫描")
+stop_btn = col_b.button("⏹️ 停止")
 
-# 1. 股票名侧边栏输入 (默认填入一些，支持手动修改)
-default_tickers = "NVDA,AAPL,MSFT,AMZN,GOOGL,META,TSLA,AVGO,WDC,SNDK,SPY,QQQ,SOXL,TQQQ"
-input_tickers = st.sidebar.text_area("输入股票代码 (逗号或换行分隔)", default_tickers, height=200)
+# --- 3. 状态管理 ---
+if 'db' not in st.session_state: st.session_state.db = []
+if 'curr_idx' not in st.session_state: st.session_state.curr_idx = 0
+if 'is_running' not in st.session_state: st.session_state.is_running = False
 
-# 解析输入内容
-ticker_list = [s.strip().upper() for s in input_tickers.replace('\n', ',').split(',') if s.strip()]
+tickers = [s.strip().upper() for s in ticker_input.replace('\n', ',').split(',') if s.strip()]
 
-# 2. 筛选闸门
-st.sidebar.subheader("⚙️ 筛选阈值")
-min_pf = st.sidebar.number_input("最低 PF7", value=3.6, step=0.1)
-min_prob = st.sidebar.number_input("最低胜率 (%)", value=68.0, step=1.0) / 100
-
-# 3. 扫描控制按钮
-col1, col2 = st.sidebar.columns(2)
-start_btn = col1.button("🚀 开始扫描")
-stop_btn = col2.button("⏹️ 停止")
-
-if start_btn:
-    st.session_state.scanning = True
-    st.session_state.idx = 0
-    st.session_state.results = []
+if run_btn:
+    st.session_state.db = []
+    st.session_state.curr_idx = 0
+    st.session_state.is_running = True
     st.rerun()
 
 if stop_btn:
-    st.session_state.scanning = False
+    st.session_state.is_running = False
 
-# ==================== 3. 扫描执行核心 ====================
-progress_bar = st.progress(0.0)
-status_placeholder = st.empty()
+# --- 4. 自动扫描执行体 ---
+st.title("🛡️ 科学实战：流水线自动化扫描")
+p_bar = st.progress(0.0)
+p_text = st.empty()
 
-if st.session_state.scanning and st.session_state.idx < len(ticker_list):
-    sym = ticker_list[st.session_state.idx]
-    status_placeholder.info(f"正在分析: {sym} ({st.session_state.idx + 1}/{len(ticker_list)})")
-    progress_bar.progress((st.session_state.idx + 1) / len(ticker_list))
+if st.session_state.is_running and st.session_state.curr_idx < len(tickers):
+    sym = tickers[st.session_state.curr_idx]
+    p_text.warning(f"正在分析第 {st.session_state.curr_idx + 1} 只: {sym}")
+    p_bar.progress((st.session_state.curr_idx + 1) / len(tickers))
     
+    # 获取数据
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=1y&interval=1d"
         r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=10).json()
@@ -102,33 +114,31 @@ if st.session_state.scanning and st.session_state.idx < len(ticker_list):
         c, h, l, v = c[mask], h[mask], l[mask], v[mask]
         
         if len(c) >= 100:
-            score, prob, pf = ScienceEngine.compute_metrics(c, h, l, v)
-            st.session_state.results.append({
-                "代码": sym, "价格": round(c[-1], 2), "得分": score,
-                "胜率": prob, "PF7": pf
+            score, prob, pf = compute_science_metrics(c, h, l, v)
+            st.session_state.db.append({
+                "代码": sym, "价格": round(c[-1], 2), "得分": score, "胜率": prob, "PF7": pf
             })
-    except: pass
+    except:
+        pass
     
-    st.session_state.idx += 1
-    time.sleep(0.05)
-    st.rerun()  # 关键：这行保证它会自动跳到下一个
+    # 自动推进到下一个
+    st.session_state.curr_idx += 1
+    st.rerun() # 核心：强制触发下一次运行
 
-# ==================== 4. 实时表格展示 ====================
-if st.session_state.results:
-    df = pd.DataFrame(st.session_state.results)
-    # 按照侧边栏设定的阈值实时筛选
-    filtered = df[(df['PF7'] >= min_pf) | (df['胜率'] >= min_prob)].copy()
+# --- 5. 结果实时展示 ---
+if st.session_state.db:
+    df = pd.DataFrame(st.session_state.db)
+    # 科学筛选
+    res = df[(df['PF7'] >= min_pf) | (df['胜率'] >= min_win)].copy()
     
-    st.subheader(f"📊 发现符合条件标的: {len(filtered)} 只")
-    
-    if not filtered.empty:
-        # 美化格式
-        filtered['胜率'] = filtered['胜率'].apply(lambda x: f"{x*100:.1f}%")
-        filtered['PF7'] = filtered['PF7'].round(2)
-        st.dataframe(filtered.sort_values("PF7", ascending=False), use_container_width=True)
+    st.subheader(f"✅ 符合条件的优质标的 (已发现 {len(res)} 只)")
+    if not res.empty:
+        res['胜率'] = res['胜率'].apply(lambda x: f"{x*100:.1f}%")
+        res['PF7'] = res['PF7'].round(2)
+        st.table(res.sort_values("PF7", ascending=False))
     else:
-        st.write("暂未发现符合条件的标的，扫描继续中...")
+        st.info("扫描中，暂未发现符合阈值的股票...")
 
-if st.session_state.idx >= len(ticker_list) and len(ticker_list) > 0:
-    st.success("🎉 扫描任务全部完成！")
-    st.session_state.scanning = False
+if st.session_state.curr_idx >= len(tickers) and len(tickers) > 0:
+    st.success("🎉 全量扫描已结束！")
+    st.session_state.is_running = False

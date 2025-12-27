@@ -223,19 +223,12 @@ def get_stock_pool(mode):
         ]
     elif mode == "完整扫描（热门股票）":
         return [
-            # 科技巨头
             "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "META", "NVDA", "TSLA",
-            # 半导体
             "AMD", "INTC", "AVGO", "QCOM", "TXN", "MU",
-            # 金融
             "JPM", "BAC", "WFC", "GS", "MS",
-            # 消费
             "WMT", "PG", "KO", "PEP", "MCD",
-            # 医疗
             "JNJ", "PFE", "ABBV", "MRK", "LLY",
-            # 工业
             "CAT", "BA", "MMM", "HON", "GE",
-            # ETF
             "SPY", "QQQ", "IWM", "DIA", "GLD", "SLV"
         ]
     else:
@@ -396,8 +389,7 @@ if st.session_state.scan_results:
             score_color = "#00cc00" if row['score'] >= 4 else "#ff9900" if row['score'] >= 3 else "#ff4444"
             pf_color = "#00cc00" if row['pf7'] >= 5 else "#ff9900" if row['pf7'] >= 3 else "#ff4444"
             
-            st.markdown(f"""
-            <div style="border-left: 5px solid {score_color}; padding: 12px; margin: 10px 0; background: #f8f9fa;">
+            st.markdown(f"""<div style="border-left: 5px solid {score_color}; padding: 12px; margin: 10px 0; background: #f8f9fa;">
                 <div style="display: flex; justify-content: space-between; align-items: center;">
                     <div>
                         <strong style="font-size: 18px;">{row['symbol']}</strong>
@@ -416,8 +408,7 @@ if st.session_state.scan_results:
                     胜率: <strong>{row['prob7']*100:.1f}%</strong> | 
                     数据点: {row['data_points']}
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
     else:
         st.warning("没有找到符合筛选条件的股票")
     

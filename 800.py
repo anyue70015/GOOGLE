@@ -153,17 +153,29 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 # ==================== 加载成分股 ====================
 @st.cache_data(ttl=86400)
 def load_russell2000_tickers():
-    # 使用 iShares Russell 2000 ETF (IWM) 的持仓 CSV（每日更新，包含最新 Russell 2000 成分股）
-    url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
-    resp = requests.get(url, headers=HEADERS)
-    resp.raise_for_status()
-    df = pd.read_csv(StringIO(resp.text), skiprows=10)  # 前几行是说明，实际持仓从第10行后开始
-    tickers = df['Ticker'].dropna().str.replace('-', '.').tolist()  # 处理可能的破折号替换为点（Yahoo Finance 格式）
-    return sorted(set(tickers))  # 去重并按字母排序
+    url = "https://www.barchart.com/etfs-funds/quotes/IWM/constituents"
+    try:
+        df_list = pd.read_html(url)
+        if not df_list:
+            raise ValueError("未找到表格")
+        df = df_list[0]  # 通常第一个表格就是持仓表
+        # 表格列通常包括 Symbol, Company Name, % Weight 等
+        if 'Symbol' not in df.columns:
+            raise ValueError("表格中无 'Symbol' 列")
+        tickers = df['Symbol'].dropna().astype(str).tolist()
+        # 清理可能的 '-' 或其他无效符号
+        tickers = [t for t in tickers if t != '-' and len(t) <= 5]
+        return sorted(set(tickers))
+    except Exception as e:
+        st.error(f"加载 Russell 2000 成分股失败: {str(e)}。请检查网络或稍后重试。")
+        return []
 
 all_tickers = load_russell2000_tickers()
 
-st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 IWM ETF 持仓）")
+if not all_tickers:
+    st.stop()
+
+st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 Barchart IWM 持仓）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
@@ -184,7 +196,6 @@ status_text = st.empty()
 if st.session_state.high_prob:
     df_all = pd.DataFrame(st.session_state.high_prob)
     
-    # 新条件：PF7 >= 3.6 OR 7日概率 >= 0.68
     filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
     
     if filtered_df.empty:
@@ -210,7 +221,6 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
         
-        # CSV 导出
         csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
         st.download_button(
             label="📄 导出结果为 CSV",
@@ -219,7 +229,6 @@ if st.session_state.high_prob:
             mime="text/csv"
         )
         
-        # TXT 导出
         txt_lines = []
         txt_lines.append(f"罗素2000 短线优质股票扫描结果")
         txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")

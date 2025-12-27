@@ -153,21 +153,21 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 # ==================== 加载成分股 ====================
 @st.cache_data(ttl=86400)
 def load_russell2000_tickers():
-    url = "https://www.barchart.com/etfs-funds/quotes/IWM/constituents"
+    # iShares Russell 2000 ETF (IWM) 官方持仓 CSV 下载链接（每日更新）
+    url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
     try:
-        df_list = pd.read_html(url)
-        if not df_list:
-            raise ValueError("未找到表格")
-        df = df_list[0]  # 通常第一个表格就是持仓表
-        # 表格列通常包括 Symbol, Company Name, % Weight 等
-        if 'Symbol' not in df.columns:
-            raise ValueError("表格中无 'Symbol' 列")
-        tickers = df['Symbol'].dropna().astype(str).tolist()
-        # 清理可能的 '-' 或其他无效符号
-        tickers = [t for t in tickers if t != '-' and len(t) <= 5]
+        resp = requests.get(url, headers=HEADERS, timeout=30)
+        resp.raise_for_status()
+        # CSV 前10行是元数据，实际持仓从第11行开始（skiprows=10）
+        df = pd.read_csv(StringIO(resp.text), skiprows=10)
+        # Ticker 列可能包含 '-' 表示现金或其他，过滤有效股票符号
+        if 'Ticker' not in df.columns:
+            raise ValueError("CSV 中无 'Ticker' 列")
+        tickers = df['Ticker'].dropna().astype(str).tolist()
+        tickers = [t.replace('-', '.') for t in tickers if t != '-' and len(t) <= 5]  # 处理 BRK.B 等
         return sorted(set(tickers))
     except Exception as e:
-        st.error(f"加载 Russell 2000 成分股失败: {str(e)}。请检查网络或稍后重试。")
+        st.error(f"加载 Russell 2000 成分股失败: {str(e)}。请检查网络或尝试手动更新。")
         return []
 
 all_tickers = load_russell2000_tickers()
@@ -175,7 +175,7 @@ all_tickers = load_russell2000_tickers()
 if not all_tickers:
     st.stop()
 
-st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 Barchart IWM 持仓）")
+st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 iShares IWM ETF 持仓，每日更新）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)

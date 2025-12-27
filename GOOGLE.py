@@ -71,7 +71,6 @@ def compute_metrics(symbol, cfg_key):
     macd_h, rsi = macd_hist_np(c), rsi_np(c)
     vol_ma20 = rolling_mean_np(v, 20)
     
-    # 5项指标明细
     sig_list = [
         macd_h[-1] > 0,
         v[-1] > vol_ma20[-1] * 1.1,
@@ -81,7 +80,6 @@ def compute_metrics(symbol, cfg_key):
     ]
     score = sum(sig_list)
     
-    # 历史回测逻辑 (7日)
     score_hist = (macd_h > 0).astype(int) + (v > vol_ma20 * 1.1).astype(int) + (rsi >= 60).astype(int)
     idx = np.where(score_hist[:-7] >= 2)[0]
     if len(idx) > 0:
@@ -111,8 +109,8 @@ if single_sym:
             else: col.error(f"{labels[i]} ❌")
 st.sidebar.markdown("---")
 
-# ==================== 全量扫描逻辑 ====================
-mode = st.selectbox("选择扫描的回测周期", list(BACKTEST_CONFIG.keys()), index=2)
+# ==================== 主逻辑：自动扫描 ====================
+mode = st.selectbox("全量扫描周期", list(BACKTEST_CONFIG.keys()), index=2)
 
 if 'high_prob' not in st.session_state: st.session_state.high_prob = []
 if 'scanned' not in st.session_state: st.session_state.scanned = set()
@@ -129,7 +127,7 @@ all_tickers = get_all_tickers()
 all_tickers.sort()
 
 if len(st.session_state.scanned) < len(all_tickers):
-    with st.spinner("正在逐一扫描标的..."):
+    with st.spinner("扫描中..."):
         remaining = [s for s in all_tickers if s not in st.session_state.scanned]
         for sym in remaining:
             res = compute_metrics(sym, mode)
@@ -141,37 +139,38 @@ if len(st.session_state.scanned) < len(all_tickers):
 if st.session_state.high_prob:
     df = pd.DataFrame(st.session_state.high_prob)
     
-    # 强制执行你的排序逻辑
+    # 强制排序：得分优先，其次胜率，最后PF
     df_sorted = df.sort_values(
         by=['score', 'prob7', 'pf7'], 
         ascending=[False, False, False]
     )
     
-    # 精选名单 (满足任意一个高价值条件)
+    # 筛选
     df_prime = df_sorted[(df_sorted['score'] >= 3) | (df_sorted['prob7'] >= 0.68)].copy()
 
-    st.subheader(f"🔥 精选结果 (共 {len(df_prime)} 只) - 排序规则: 得分 > 胜率 > PF7")
+    st.subheader(f"🔥 精选结果 (共 {len(df_prime)} 只) - 排序：得分 > 胜率 > PF7")
     
     for _, row in df_prime.iterrows():
-        border_color = "#31333F" if row['score'] < 3 else "#00FF00"
+        border = "6px solid #00FF00" if row['score'] >= 3 else "2px solid #31333F"
         st.markdown(
-            f"""<div style="border-left: 6px solid {border_color}; padding: 10px; margin: 10px 0; background-color: #f0f2f622;">
-                <span style="font-size:20px; font-weight:bold;">{row['symbol']}</span> | 
+            f"""<div style="border-left: {border}; padding: 10px; margin: 10px 0; background-color: #f0f2f622;">
+                <span style="font-size:18px; font-weight:bold;">{row['symbol']}</span> | 
                 价格: ${row['price']:.2f} | 
                 <b>得分: {row['score']}/5</b> | 
-                胜率: {row['prob7']*100:.1f}% | 
+                7日胜率: {row['prob7']*100:.1f}% | 
                 PF7效率: {row['pf7']:.2f}
             </div>""", unsafe_allow_html=True
         )
 
-    # TXT 导出逻辑 (已修正 SyntaxError)
-    report_txt = "--- 极品精选报告 ---\n"
+    # 修复后的导出逻辑
+    report_lines = ["--- 极品精选报告 ---"]
     for _, row in df_prime.iterrows():
-        line = f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf7']:.2f}\n"
-        report_txt += line
+        line = f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf7']:.2f}"
+        report_lines.append(line)
     
-    st.download_button("📥 导出精选 TXT", report_txt.encode('utf-8'), "Prime_Report.txt")
+    final_report = "\n".join(report_lines)
+    st.download_button("📥 导出精选报告", final_report.encode('utf-8'), "Report.txt")
 
-if st.button("🔄 重置所有进度"):
+if st.button("🔄 重置"):
     st.session_state.high_prob, st.session_state.scanned = [], set()
     st.rerun()

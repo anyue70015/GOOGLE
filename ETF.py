@@ -5,8 +5,8 @@ import time
 import pandas as pd
 from io import StringIO
 
-st.set_page_config(page_title="标普500 + 纳斯达克100 + ETF 扫描工具", layout="wide")
-st.title("🎯 极品短线扫描 (PF7≥3.6 或 7日≥68%)")
+st.set_page_config(page_title="标普500 + 纳斯达克100 极品短线扫描工具", layout="wide")
+st.title("标普500 + 纳斯达克100 短线扫描工具（PF7≥3.6 或 7日≥68%）")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -22,9 +22,6 @@ BACKTEST_CONFIG = {
     "5年":  {"range": "5y",  "interval": "1d"},
     "10年": {"range": "10y", "interval": "1d"},
 }
-
-# 你关注的核心 ETF 列表
-CORE_ETFS = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO"]
 
 # ==================== 数据拉取 ====================
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -47,7 +44,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     except Exception as e:
         raise ValueError(f"请求失败: {str(e)}")
 
-# ==================== 指标函数 ====================
+# ==================== 指标函数 (你的原始算法) ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -153,7 +150,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "pf7": pf7,
     }
 
-# ==================== 加载成分股 ====================
+# ==================== 加载成分股 (修改处：添加了 ETF) ====================
 @st.cache_data(ttl=86400)
 def load_sp500_tickers():
     url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
@@ -175,17 +172,20 @@ ndx100 = [
     "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
 ]
 
-# 合并所有标的
+# 在这里直接定义你想看的 ETF
+core_etf = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO"]
+
 sp500 = load_sp500_tickers()
-all_tickers = list(set(sp500 + ndx100 + CORE_ETFS)) # 加入了 CORE_ETFS
+# 合并列表并去重
+all_tickers = list(set(sp500 + ndx100 + core_etf))
 all_tickers.sort()
 
-st.write(f"总计 {len(all_tickers)} 只标的 (含标普500、纳指100及核心ETF)")
+st.write(f"总计 {len(all_tickers)} 只股票（含标普500+纳指100+核心ETF）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-# ==================== session_state ====================
+# ==================== 状态管理与扫描逻辑 (完全恢复你的原始逻辑) ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -197,60 +197,49 @@ result_container = st.container()
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# ==================== 结果筛选与显示 ====================
+# ==================== 结果显示 (你的原始逻辑) ====================
 if st.session_state.high_prob:
     df_all = pd.DataFrame(st.session_state.high_prob)
     filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
     
-    if filtered_df.empty:
-        st.warning("暂无满足条件的极品标的，扫描继续中...")
-    else:
+    if not filtered_df.empty:
         df_display = filtered_df.copy()
         df_display['price'] = df_display['price'].round(2)
-        df_display['change_val'] = df_display['change'] # 保留数值用于逻辑
-        df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
-        df_display['prob7_val'] = df_display['prob7'] # 保留数值用于排序
+        df_display['change_str'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
         df_display['prob7_str'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
         
         if sort_by == "PF7 (盈利因子)":
             df_display = df_display.sort_values("pf7", ascending=False)
         else:
-            df_display = df_display.sort_values("prob7_val", ascending=False)
+            df_display = df_display.sort_values("prob7", ascending=False)
         
         with result_container:
-            st.subheader(f"🔥 极品短线列表 (共 {len(df_display)} 只)")
+            st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只")
             for _, row in df_display.iterrows():
                 st.markdown(
-                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change_str']}) - "
                     f"得分: {row['score']}/5 - "
-                    f"**7日概率: {row['prob7_str']} | PF7: {row['pf7']:.2f}**"
+                    f"**7日概率: {row['prob7_str']}  |  PF7: {row['pf7']:.2f}**"
                 )
 
-        # 导出 TXT
-        txt_lines = [f"极品扫描报告 - {time.strftime('%Y-%m-%d %H:%M')}", "="*50]
-        for _, row in df_display.iterrows():
-            txt_lines.append(f"{row['symbol']:6} | PF7: {row['pf7']:5.2f} | 胜率: {row['prob7_str']:>6} | 得分: {row['score']}/5")
-        
-        st.download_button("📜 导出报告", "\n".join(txt_lines).encode('utf-8'), f"Report_{time.strftime('%Y%m%d')}.txt")
-
-# ==================== 自动扫描逻辑 ====================
+# ==================== 自动扫描逻辑 (完全恢复你的原始逻辑) ====================
 with st.spinner("扫描中..."):
     for sym in all_tickers:
         if sym in st.session_state.scanned_symbols:
             continue
-        status_text.text(f"正在扫描: {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+        status_text.text(f"正在分析 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
         progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
         try:
             metrics = compute_stock_metrics(sym, mode)
             st.session_state.scanned_symbols.add(sym)
             st.session_state.high_prob.append(metrics)
-            st.rerun()
-        except Exception:
+            st.rerun() # 恢复你的逐个扫描刷新逻辑
+        except Exception as e:
             st.session_state.failed_count += 1
             st.session_state.scanned_symbols.add(sym)
-            time.sleep(1) # 遇错稍微停顿
+            time.sleep(1)
 
-if st.button("🔄 重置"):
+if st.button("🔄 重置进度"):
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0

@@ -5,137 +5,109 @@ import time
 import pandas as pd
 from io import StringIO
 
-# 设置页面
-st.set_page_config(page_title="极品短线扫描工具-修正版", layout="wide")
-
-st.title("🎯 全市场极品短线扫描 (修正版)")
-st.markdown("筛选逻辑：**PF7 (盈利因子)** 优先排序 | **周末锁定周五数据**")
+st.set_page_config(page_title="全市场极品扫描-2026回本专用", layout="wide")
+st.title("🎯 全市场极品短线扫描 (PF7 排序 + 自动补全列表)")
 
 # ==================== 核心配置 ====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 }
 
-# 默认 ETF 列表
 CORE_ETFS = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO"]
+
+# ==================== 动态列表获取逻辑 ====================
+@st.cache_data(ttl=86400) # 列表每天只更新一次
+def get_all_tickers():
+    """从网络自动获取各指数成分股"""
+    # 标普 500
+    try:
+        sp500_url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+        sp500 = pd.read_csv(sp500_url)['Symbol'].tolist()
+    except:
+        sp500 = ["AAPL", "MSFT", "NVDA", "WDC"] # 备份方案
+        
+    # 纳指 100
+    ndx100 = ["AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "COST", "ADBE", "AMD", "NFLX", "PEP", "WDC"]
+    
+    # 罗素 2000 (精选活跃小盘股，因2000只扫描太慢，建议先放核心或ETF)
+    r2000 = ["IWM", "VRTX", "KWC", "UPST", "MARA"] 
+    
+    return sp500, ndx100, r2000
 
 # ==================== 数据抓取与清洗 ====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_clean_data(symbol):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
+        resp = requests.get(url, headers=HEADERS, timeout=10)
         data = resp.json()["chart"]["result"][0]
         quote = data["indicators"]["quote"][0]
-        
-        # 将数据转为 DataFrame 并彻底剔除周末/节假日的空值 (NaN)
-        df = pd.DataFrame({
-            "close": quote["close"],
-            "high": quote["high"],
-            "low": quote["low"],
-            "volume": quote["volume"]
-        })
-        df.dropna(inplace=True)
-        
-        if len(df) < 50: return None
-        return df
-    except Exception:
+        df = pd.DataFrame({"close": quote["close"], "high": quote["high"], "low": quote["low"], "volume": quote["volume"]})
+        df.dropna(inplace=True) 
+        return df if len(df) > 50 else None
+    except:
         return None
 
-# ==================== 核心指标计算 ====================
 def compute_metrics(symbol):
     df = fetch_clean_data(symbol)
     if df is None: return None
+    close, volume = df["close"].values, df["volume"].values
     
-    close = df["close"].values
-    volume = df["volume"].values
+    # 1. PF7 盈利因子
+    rets = np.diff(close) / close[:-1]
+    pf7 = round(rets[rets > 0].sum() / (abs(rets[rets <= 0].sum()) + 1e-9), 2)
     
-    # 1. 计算 PF7 (盈利因子)
-    rets = np.diff(close) / (close[:-1] + 1e-9)
-    pos_sum = rets[rets > 0].sum()
-    neg_sum = abs(rets[rets <= 0].sum())
-    pf7 = round(pos_sum / neg_sum, 2) if neg_sum > 0 else 9.99
-    
-    # 2. 计算 7日上涨概率 (胜率)
+    # 2. 7日胜率
     prob7 = round((rets > 0).mean() * 100, 1)
     
-    # 3. 5项技术得分 (基于最后交易日数据)
+    # 3. 5项得分
     vol_ma20 = df["volume"].rolling(20).mean().values
+    s1 = 1 if close[-1] > close[-2] else 0
+    s2 = 1 if volume[-1] > vol_ma20[-1] * 1.1 else 0
+    s3 = 1 if close[-1] > df["close"].rolling(20).mean().iloc[-1] else 0
+    s4 = 1 if (close[-1] - df["low"].iloc[-1]) / (df["high"].iloc[-1] - df["low"].iloc[-1] + 1e-9) > 0.5 else 0
+    s5 = 1 if rets[-1] > 0 else 0
     
-    s1 = 1 if close[-1] > close[-2] else 0 # 价格涨
-    s2 = 1 if volume[-1] > vol_ma20[-1] * 1.1 else 0 # 爆量
-    s3 = 1 if close[-1] > df["close"].rolling(20).mean().iloc[-1] else 0 # 站上20日线
-    s4 = 1 if (close[-1] - df["low"].iloc[-1]) / (df["high"].iloc[-1] - df["low"].iloc[-1] + 1e-9) > 0.5 else 0 # 收盘位
-    s5 = 1 if rets[-1] > 0 else 0 # 动能
-    
-    score = s1 + s2 + s3 + s4 + s5
+    return {"symbol": symbol, "price": round(close[-1], 2), "score": s1+s2+s3+s4+s5, "prob7": prob7, "pf7": pf7}
 
-    return {
-        "symbol": symbol,
-        "price": round(close[-1], 2),
-        "score": score,
-        "prob7": f"{prob7}%",
-        "pf7": pf7
-    }
+# ==================== 界面控制 ====================
+st.sidebar.header("扫描范围设置")
+choice = st.sidebar.multiselect("对象", ["S&P 500", "Nasdaq 100", "Russell 2000", "Core ETFs"], default=["Core ETFs"])
 
-# ==================== 侧边栏与交互 ====================
-st.sidebar.header("扫描配置")
-market_choice = st.sidebar.multiselect(
-    "选择扫描对象", 
-    ["Core ETFs", "S&P 500", "Nasdaq 100"], 
-    default=["Core ETFs"]
-)
+# 限制扫描数量防止 API 屏蔽
+max_num = st.sidebar.slider("最大扫描标的数量", 10, 500, 50)
 
-# 加载标普500列表的辅助函数
-def get_sp500_tickers():
-    try:
-        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
-        df = pd.read_csv(url)
-        return df['Symbol'].tolist()
-    except:
-        return ["AAPL", "MSFT", "AMZN", "NVDA", "WDC"]
-
-if st.sidebar.button("开始执行扫描"):
+if st.sidebar.button("🚀 开始全量扫描"):
+    sp, nd, r2 = get_all_tickers()
     symbols = []
-    if "Core ETFs" in market_choice: symbols += CORE_ETFS
-    if "Nasdaq 100" in market_choice: symbols += ["AAPL", "MSFT", "NVDA", "WDC", "AMD", "META", "NFLX", "AVGO"]
-    if "S&P 500" in market_choice: symbols += get_sp500_tickers()
+    if "S&P 500" in choice: symbols += sp
+    if "Nasdaq 100" in choice: symbols += nd
+    if "Russell 2000" in choice: symbols += r2
+    if "Core ETFs" in choice: symbols += CORE_ETFS
     
-    symbols = list(set(symbols)) # 去重
+    symbols = list(set(symbols))[:max_num] # 去重并限流
     results = []
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+    bar = st.progress(0)
+    msg = st.empty()
     
     for i, s in enumerate(symbols):
-        status_text.text(f"正在分析: {s}")
-        res = compute_metrics(s)
-        if res: results.append(res)
-        progress_bar.progress((i + 1) / len(symbols))
-    
-    status_text.text("扫描完成！")
+        msg.text(f"正在扫描 ({i+1}/{len(symbols)}): {s}")
+        m = compute_metrics(s)
+        if m: results.append(m)
+        bar.progress((i + 1) / len(symbols))
     
     if results:
-        # 按 PF7 降序排列
         df_res = pd.DataFrame(results).sort_values("pf7", ascending=False)
+        st.subheader(f"📊 扫描报告 (按 PF7 排序，共 {len(df_res)} 只)")
+        st.dataframe(df_res.style.background_gradient(subset=['pf7'], cmap='RdYlGn'))
         
-        st.subheader("📊 扫描结果分析 (按回本效率 PF7 排序)")
-        st.table(df_res)
-        
-        # --- 导出 TXT 功能 ---
-        txt_content = f"极品短线扫描报告 - 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        txt_content += "="*60 + "\n"
-        txt_content += f"{'代码':<8} | {'价格':<8} | {'得分':<5} | {'胜率':<8} | {'PF7':<5}\n"
-        txt_content += "-"*60 + "\n"
+        # 导出 TXT
+        txt = f"--- 极品扫描报告 ({time.strftime('%Y-%m-%d')}) ---\n"
+        txt += f"{'Symbol':<8} | {'PF7':<6} | {'Prob7':<8} | {'Score':<5}\n"
+        txt += "-"*40 + "\n"
         for _, r in df_res.iterrows():
-            txt_content += f"{r['symbol']:<8} | {r['price']:<8} | {r['score']:<5} | {r['prob7']:<8} | {r['pf7']:<5}\n"
+            txt += f"{r['symbol']:<8} | {r['pf7']:<6} | {r['prob7']:<8} | {r['score']}/5\n"
         
-        st.download_button(
-            label="📄 导出 TXT 格式报告",
-            data=txt_content,
-            file_name=f"Report_{time.strftime('%Y%m%d')}.txt",
-            mime="text/plain"
-        )
+        st.download_button("📥 导出 TXT 报告", txt, f"Report_{time.strftime('%Y%m%d')}.txt")
     else:
-        st.warning("未扫描到有效数据，请检查网络或更换对象。")
+        st.error("数据抓取失败。")

@@ -172,4 +172,9 @@ if st.session_state.high_prob:
     # 导出报告
     txt = "--- 极品精选报告 ---\n"
     for _, row in df_prime.iterrows():
-        txt += f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf
+        txt += f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf7']:.2f}\n"
+    st.download_button("📥 导出精选名单", txt.encode('utf-8'), "Prime_List.txt")
+
+if st.button("🔄 重置所有数据"):
+    st.session_state.high_prob, st.session_state.scanned = [], set()
+    st.rerun()

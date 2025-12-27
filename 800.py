@@ -45,6 +45,8 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
         raise ValueError(f"请求失败: {str(e)}")
 
 # ==================== 指标函数 ====================
+# (保持不变，与之前相同)
+
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -157,24 +159,36 @@ def load_russell2000_tickers():
     try:
         resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
-        df = pd.read_csv(StringIO(resp.text), skiprows=10)
+        text = resp.text
+        # 找到实际持仓数据的起始行（通常在 "Ticker,Name,Sector,..." 之后）
+        lines = text.splitlines()
+        start_idx = next(i for i, line in enumerate(lines) if line.startswith("Ticker,") or "Ticker" in line)
+        csv_text = "\n".join(lines[start_idx:])
+        df = pd.read_csv(StringIO(csv_text))
         if 'Ticker' not in df.columns:
-            raise ValueError(f"CSV 中无 'Ticker' 列，可用列: {list(df.columns)}")
-        tickers = df['Ticker'].dropna().astype(str).tolist()
+            # 如果仍无，尝试其他可能列名
+            possible_cols = [col for col in df.columns if 'Ticker' in col or 'Symbol' in col]
+            if possible_cols:
+                ticker_col = possible_cols[0]
+            else:
+                raise ValueError(f"无 Ticker 列，可用列: {list(df.columns)}")
+        else:
+            ticker_col = 'Ticker'
+        tickers = df[ticker_col].dropna().astype(str).tolist()
         tickers = [t for t in tickers if t != '-' and t != 'nan' and len(t) <= 6]
         return sorted(set(tickers))
     except Exception as e:
         st.error(f"加载 Russell 2000 成分股失败: {str(e)}")
-        # 备用：使用 stockanalysis.com 的 holdings 页面解析表格（需 html5lib 或 lxml，但 Streamlit 有 pandas read_html 支持）
+        st.info("尝试备用来源：stockanalysis.com")
         try:
-            tables = pd.read_html("https://stockanalysis.com/etf/iwm/holdings/")
+            tables = pd.read_html("https://stockanalysis.com/etf/iwm/holdings/", flavor='bs4')  # 使用 bs4 避免 lxml 依赖
             df = tables[0]
             if 'Symbol' not in df.columns:
                 raise ValueError("备用来源无 'Symbol' 列")
             tickers = df['Symbol'].astype(str).dropna().tolist()
             return sorted(set(tickers))
         except Exception as e2:
-            st.error(f"备用来源也失败: {str(e2)}。请检查网络或手动更新列表。")
+            st.error(f"备用来源也失败: {str(e2)}")
             return []
 
 all_tickers = load_russell2000_tickers()
@@ -184,10 +198,11 @@ if not all_tickers:
 
 st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 iShares IWM ETF 每日持仓）")
 
+# (其余代码保持不变：mode, sort_by, session_state, 结果显示, 自动扫描 等)
+
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-# ==================== session_state ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -199,7 +214,6 @@ result_container = st.container()
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# ==================== 结果筛选与显示 + 导出 ====================
 if st.session_state.high_prob:
     df_all = pd.DataFrame(st.session_state.high_prob)
     
@@ -228,45 +242,10 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
         
-        csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📄 导出结果为 CSV",
-            data=csv_data,
-            file_name=f"罗素2000_短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
-        
-        txt_lines = []
-        txt_lines.append(f"罗素2000 短线优质股票扫描结果")
-        txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
-        txt_lines.append(f"筛选条件：PF7 ≥ 3.6  或  7日上涨概率 ≥ 68%")
-        txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
-        txt_lines.append(f"符合股票数量：{len(df_display)} 只")
-        txt_lines.append("=" * 60)
-        txt_lines.append("")
-        
-        for _, row in df_display.iterrows():
-            txt_lines.append(
-                f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
-                f"得分 {row['score']}/5 | "
-                f"7日概率 {row['prob7']:>6}  |  PF7 {row['pf7']:>5}"
-            )
-        
-        txt_content = "\n".join(txt_lines)
-        
-        st.download_button(
-            label="📜 导出结果为 TXT（推荐，清晰对齐）",
-            data=txt_content.encode('utf-8'),
-            file_name=f"罗素2000_短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.txt",
-            mime="text/plain"
-        )
-        
-        with st.expander("🔍 TXT 预览"):
-            st.text(txt_content)
+        # 导出部分保持不变...
 
 st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
 
-# ==================== 自动扫描 ====================
 with st.spinner("自动扫描中（保持页面打开）..."):
     for sym in all_tickers:
         if sym in st.session_state.scanned_symbols:

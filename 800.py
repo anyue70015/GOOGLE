@@ -153,32 +153,38 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 # ==================== 加载成分股 ====================
 @st.cache_data(ttl=86400)
 def load_russell2000_tickers():
-    # 当前正确的 iShares IWM 持仓 CSV 下载链接（2025年12月最新确认）
-    url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
+    # 备用可靠来源：Sure Dividend 每日更新 Russell 2000 Excel 下载（转换为 CSV 链接）
+    url = "https://www.suredividend.com/wp-content/uploads/current_russell_2000_stocks_list.csv"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
-        # 前10行是元数据，持仓数据从第11行开始
-        df = pd.read_csv(StringIO(resp.text), skiprows=10)
-        # 打印列名用于调试（仅在开发时）
-        # st.write("CSV 列名:", list(df.columns))
-        if 'Ticker' not in df.columns:
-            raise ValueError(f"CSV 中无 'Ticker' 列，可用列: {list(df.columns)}")
-        tickers = df['Ticker'].dropna().astype(str).tolist()
-        # 过滤无效（如 '-' 表示现金或其他），并处理特殊符号（如 BRK.B）
-        tickers = [t for t in tickers if t != '-' and t != 'nan' and len(t) <= 6]
+        df = pd.read_csv(StringIO(resp.text))
+        # 假设列名为 'Ticker' 或 'Symbol'，自动检测
+        ticker_col = next((col for col in df.columns if col.lower() in ['ticker', 'symbol']), None)
+        if ticker_col is None:
+            raise ValueError(f"无有效 Ticker 列，可用列: {list(df.columns)}")
+        tickers = df[ticker_col].dropna().astype(str).tolist()
+        tickers = [t.upper() for t in tickers if len(t) <= 6 and t != '-']
         return sorted(set(tickers))
     except Exception as e:
-        st.error(f"加载 Russell 2000 成分股失败: {str(e)}。可能是网络问题或 BlackRock 调整了 CSV 格式。")
-        st.info("备用方案：可尝试从 https://www.suredividend.com/russell-2000-stocks/ 下载最新 Excel 列表手动导入，或等待修复。")
-        return []
+        st.error(f"加载 Russell 2000 成分股失败: {str(e)}。尝试其他来源...")
+        # 最终备用：使用 stockanalysis.com 的 holdings 页面（静态 CSV-like）
+        try:
+            df = pd.read_html("https://stockanalysis.com/etf/iwm/holdings/")[0]
+            if 'Symbol' not in df.columns:
+                raise ValueError("无 'Symbol' 列")
+            tickers = df['Symbol'].astype(str).tolist()
+            return sorted(set(tickers))
+        except Exception as e2:
+            st.error(f"备用来源也失败: {str(e2)}")
+            return []
 
 all_tickers = load_russell2000_tickers()
 
 if not all_tickers:
     st.stop()
 
-st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 iShares IWM ETF 每日持仓）")
+st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于可靠第三方每日数据）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
@@ -213,7 +219,7 @@ if st.session_state.high_prob:
         if sort_by == "PF7 (盈利因子)":
             df_display = df_display.sort_values("pf7", ascending=False)
         else:
-            df_display = df_display.sort_values("prob7", ascending=False)
+            df_display = df_display['prob7'].sort_values(ascending=False)
         
         with result_container:
             st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只  |  排序：{sort_by}")

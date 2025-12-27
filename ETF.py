@@ -1,105 +1,127 @@
 import streamlit as st
-import requests
+import yfinance as yf
 import numpy as np
 import time
 import pandas as pd
 
-# ==================== 1. 基础配置 ====================
+# ==================== 页面配置 ====================
 st.set_page_config(page_title="极品短线扫描工具", layout="wide")
-st.title("🎯 全市场极品短线扫描 (修正报错版)")
-st.markdown("说明：**锁定周五数据** | 按照 **PF7 (盈利因子)** 降序排列")
+st.title("🎯 全市场极品短线扫描 (2025最终稳定版)")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-}
-
-# 预设核心标的
+# ==================== 核心配置 ====================
 CORE_ETFS = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO"]
-TECH_STOCKS = ["AAPL", "MSFT", "NVDA", "WDC", "AMD", "META", "NFLX", "AVGO", "COST"]
 
-# ==================== 2. 数据处理函数 ====================
+# ==================== 数据抓取 ====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_clean_data(symbol):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range=1y&interval=1d"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        data = resp.json()["chart"]["result"][0]
-        quote = data["indicators"]["quote"][0]
-        df = pd.DataFrame({
-            "close": quote["close"],
-            "high": quote["high"],
-            "low": quote["low"],
-            "volume": quote["volume"]
-        })
-        df.dropna(inplace=True) # 过滤非交易日空行
-        return df if len(df) > 30 else None
-    except:
+        df = yf.download(symbol, period="1y", interval="1d", progress=False)
+        if len(df) < 50:
+            return None
+        df = df[['Close', 'High', 'Low', 'Volume']].dropna()
+        df.rename(columns={"Close": "close", "High": "high", "Low": "low", "Volume": "volume"}, inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+    except Exception:
         return None
 
-def compute_metrics(symbol):
+# ==================== 核心指标计算 ====================
+def compute_stock_metrics(symbol):
     df = fetch_clean_data(symbol)
-    if df is None: return None
+    if df is None:
+        return None
     
     close = df["close"].values
     volume = df["volume"].values
     
-    # PF7 盈利因子计算 (保命指标)
+    # PF7 (盈利因子)
     rets = np.diff(close) / (close[:-1] + 1e-9)
     pos_sum = rets[rets > 0].sum()
     neg_sum = abs(rets[rets <= 0].sum())
-    pf7 = float(round(pos_sum / neg_sum, 2)) if neg_sum > 0 else 9.99
+    pf7 = round(pos_sum / neg_sum, 2) if neg_sum > 0 else 9.99
     
-    # 7日上涨概率
+    # 日胜率（近似7日概率）
     prob7 = round((rets > 0).mean() * 100, 1)
     
-    # 得分逻辑
-    vol_ma = df["volume"].rolling(20).mean().values[-1]
+    # 5项得分
+    if len(df) < 2:
+        return None
+    vol_ma20 = df["volume"].rolling(20).mean().iloc[-1]
+    
     s1 = 1 if close[-1] > close[-2] else 0
-    s2 = 1 if volume[-1] > vol_ma * 1.1 else 0
+    s2 = 1 if volume[-1] > vol_ma20 * 1.1 else 0
     s3 = 1 if close[-1] > df["close"].rolling(20).mean().iloc[-1] else 0
     s4 = 1 if (close[-1] - df["low"].iloc[-1]) / (df["high"].iloc[-1] - df["low"].iloc[-1] + 1e-9) > 0.5 else 0
     s5 = 1 if rets[-1] > 0 else 0
-    
+    score = s1 + s2 + s3 + s4 + s5
+
     return {
         "代码": symbol,
-        "现价": round(float(close[-1]), 2),
-        "得分": int(s1 + s2 + s3 + s4 + s5),
-        "胜率%": float(prob7),
+        "现价": round(close[-1], 2),
+        "得分": f"{score}/5",
+        "胜率": f"{prob7}%",
         "PF7效率": pf7
     }
 
-# ==================== 3. 界面逻辑 ====================
-st.sidebar.header("扫描配置")
-choice = st.sidebar.multiselect("选择范围", ["核心ETF", "科技股龙头"], default=["核心ETF"])
+# ==================== 界面逻辑 ====================
+st.sidebar.header("扫描设置")
+targets = st.sidebar.multiselect(
+    "选择范围", 
+    ["Core ETFs", "Nasdaq 100 示例"], 
+    default=["Core ETFs", "Nasdaq 100 示例"]
+)
 
-if st.sidebar.button("开始执行全量扫描"):
+if st.sidebar.button("🚀 开始执行全量扫描"):
     symbols = []
-    if "核心ETF" in choice: symbols += CORE_ETFS
-    if "科技股龙头" in choice: symbols += TECH_STOCKS
+    if "Core ETFs" in targets:
+        symbols += CORE_ETFS
+    if "Nasdaq 100 示例" in targets:
+        symbols += [
+            "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "META", "NFLX", "COST",
+            "WDC", "APH", "MU", "SMH", "SOXX", "HOOD", "PM", "HCA"
+        ]
     
     symbols = list(set(symbols))
     results = []
+    progress = st.progress(0)
     
-    bar = st.progress(0)
     for i, s in enumerate(symbols):
-        m = compute_metrics(s)
-        if m: results.append(m)
-        bar.progress((i + 1) / len(symbols))
+        m = compute_stock_metrics(s)
+        if m:
+            results.append(m)
+        progress.progress((i + 1) / len(symbols))
+        time.sleep(1)  # 防限流
     
     if results:
-        # 转换为 DataFrame 并排序
         df_res = pd.DataFrame(results).sort_values("PF7效率", ascending=False)
         
-        # 核心：使用最稳健的显示方式，避开 Style 报错
-        st.subheader("📊 扫描结果汇总 (按 PF7 盈利效率排序)")
-        st.dataframe(df_res, use_container_width=True)
+        st.subheader(f"📊 扫描结果汇总 (共 {len(df_res)} 只，按 PF7 排序)")
         
-        # 导出报告
-        txt = f"报告生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        txt += "-"*50 + "\n"
+        # 安全高亮PF7
+        def highlight_pf7(val):
+            if val > 5:
+                return 'background-color: #90EE90'  # 浅绿
+            elif val > 3:
+                return 'background-color: #FFFFE0'  # 浅黄
+            else:
+                return 'background-color: #FFB6C1'  # 浅红
+        
+        styled = df_res.style.applymap(highlight_pf7, subset=['PF7效率'])
+        st.dataframe(styled, use_container_width=True)
+        
+        # TXT导出
+        txt_content = f"极品短线扫描报告 - {time.strftime('%Y-%m-%d')}\n"
+        txt_content += "="*70 + "\n"
         for _, r in df_res.iterrows():
-            txt += f"{r['代码']}: PF7={r['PF7效率']} | 胜率={r['胜率%']}% | 得分={r['得分']}/5\n"
+            txt_content += f"{r['代码']:6} | 现价 ${r['现价']:8.2f} | 得分 {r['得分']:4} | 胜率 {r['胜率']:6} | PF7 {r['PF7效率']:>6}\n"
         
-        st.download_button("📥 导出 TXT 报告", txt, f"Report_{time.strftime('%Y%m%d')}.txt")
+        st.download_button(
+            "📥 导出 TXT 报告（推荐）",
+            txt_content,
+            f"短线扫描报告_{time.strftime('%Y%m%d')}.txt",
+            mime="text/plain"
+        )
     else:
-        st.error("数据抓取失败，请检查网络。")
+        st.error("所有符号数据失败，请稍后重试或检查网络")
+
+st.caption("2025年12月27日最终版 | yfinance稳定拉数据 | SLV/WDC/APHOO等2025牛股优先捕捉 | 回本神器上线！")

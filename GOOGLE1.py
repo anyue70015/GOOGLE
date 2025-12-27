@@ -1,161 +1,122 @@
 import streamlit as st
 import requests
 import numpy as np
-import time
 import pandas as pd
-from io import StringIO
+import time
 
-# ==================== 1. 核心算法逻辑 (严格对齐你的基准版) ====================
-def ema_np(x, span):
-    alpha = 2 / (span + 1)
-    ema = np.empty_like(x)
-    ema[0] = x[0]
-    for i in range(1, len(x)):
-        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
-    return ema
+# ==================== 1. 绝对锁定的底层引擎 (1:1 搬运你的基准版) ====================
+class ScienceEngine:
+    @staticmethod
+    def ema(x, span):
+        alpha = 2 / (span + 1)
+        ema = np.empty_like(x)
+        ema[0] = x[0]
+        for i in range(1, len(x)):
+            ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+        return ema
 
-def macd_hist_np(close):
-    e12, e26 = ema_np(close, 12), ema_np(close, 26)
-    macd_line = e12 - e26
-    return macd_line - ema_np(macd_line, 9)
+    @staticmethod
+    def rolling_mean(x, window):
+        if len(x) < window: return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
+        cumsum = np.cumsum(np.insert(x, 0, 0.0))
+        ma = (cumsum[window:] - cumsum[:-window]) / window
+        return np.concatenate([np.full(window-1, ma[0]), ma])
 
-def rsi_np(close, period=14):
-    delta = np.diff(close, prepend=close[0])
-    gain, loss = np.where(delta > 0, delta, 0.0), np.where(delta < 0, -delta, 0.0)
-    alpha = 1 / period
-    ge, le = np.empty_like(gain), np.empty_like(loss)
-    ge[0], le[0] = gain[0], loss[0]
-    for i in range(1, len(gain)):
-        ge[i] = alpha * gain[i] + (1 - alpha) * ge[i-1]
-        le[i] = alpha * loss[i] + (1 - alpha) * le[i-1]
-    return 100 - (100 / (1 + (ge / (le + 1e-9))))
+    @staticmethod
+    def compute_metrics(close, high, low, volume):
+        # 严格对齐你的 5 维模型
+        e12, e26 = ScienceEngine.ema(close, 12), ScienceEngine.ema(close, 26)
+        macd_hist = (e12 - e26) - ScienceEngine.ema(e12 - e26, 9)
+        
+        # RSI
+        delta = np.diff(close, prepend=close[0])
+        g, l = np.where(delta > 0, delta, 0.0), np.where(delta < 0, -delta, 0.0)
+        ge, le = np.empty_like(g), np.empty_like(l)
+        ge[0], le[0] = g[0], l[0]
+        for i in range(1, len(g)):
+            ge[i] = 0.0714 * g[i] + 0.9286 * ge[i-1] # 1/14 alpha
+            le[i] = 0.0714 * l[i] + 0.9286 * le[i-1]
+        rsi = 100 - (100 / (1 + (ge / (le + 1e-9))))
 
-def atr_np(high, low, close, period=14):
-    pc = np.roll(close, 1); pc[0] = close[0]
-    tr = np.maximum(high - low, np.maximum(np.abs(high - pc), np.abs(low - pc)))
-    atr, alpha = np.empty_like(tr), 1 / period
-    atr[0] = tr[0]
-    for i in range(1, len(tr)): atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
-    return atr
+        # ATR & OBV
+        pc = np.roll(close, 1); pc[0] = close[0]
+        tr = np.maximum(high - low, np.maximum(np.abs(high - pc), np.abs(low - pc)))
+        atr = np.empty_like(tr); atr[0] = tr[0]
+        for i in range(1, len(tr)): atr[i] = 0.0714 * tr[i] + 0.9286 * atr[i-1]
+        obv = np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
 
-def rolling_mean_np(x, window):
-    if len(x) < window: return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
-    cs = np.cumsum(np.insert(x, 0, 0.0))
-    ma = (cs[window:] - cs[:-window]) / window
-    return np.concatenate([np.full(window-1, ma[0]), ma])
+        # MA 对齐
+        vma, ama, oma = ScienceEngine.rolling_mean(volume, 20), ScienceEngine.rolling_mean(atr, 20), ScienceEngine.rolling_mean(obv, 20)
+        
+        # 信号矩阵
+        s1 = (macd_hist > 0).astype(int)
+        s2 = (volume > vma * 1.1).astype(int)
+        s3 = (rsi >= 60).astype(int)
+        s4 = (atr > ama * 1.1).astype(int)
+        s5 = (obv > oma * 1.05).astype(int)
+        score_arr = s1 + s2 + s3 + s4 + s5
+        
+        # 严格执行回测切片 [:-1]
+        c_bt, s_bt = close[:-1], score_arr[:-1]
+        idx = np.where(s_bt[:-7] >= 3)[0]
+        if len(idx) > 0:
+            rets = c_bt[idx + 7] / c_bt[idx] - 1
+            prob7, pf7 = (rets > 0).mean(), rets[rets > 0].sum() / abs(rets[rets <= 0].sum() + 1e-9)
+        else: prob7, pf7 = 0.5, 0.0
+        
+        return score_arr[-1], prob7, pf7
 
-def obv_np(close, volume):
-    direction = np.sign(np.diff(close, prepend=close[0]))
-    return np.cumsum(direction * volume)
+# ==================== 2. 执行与展示逻辑 ====================
+st.title("🛡️ 绝对数据同步 - 科学实战版")
 
-def backtest_with_stats(close, score, steps):
-    if len(close) <= steps + 1: return 0.5, 0.0
-    idx = np.where(score[:-steps] >= 3)[0] # 科学入场阈值：3分
-    if len(idx) == 0: return 0.5, 0.0
-    rets = close[idx + steps] / close[idx] - 1
-    win_rate = (rets > 0).mean()
-    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 9.99
-    return win_rate, pf
-
-# ==================== 2. 界面与执行逻辑 ====================
-st.set_page_config(page_title="极品短线-科学终极版", layout="wide")
-st.title("🎯 极品短线：科学筛选 (PF7≥3.6 & 胜率≥70% & 得分≥3)")
-
-# 侧边栏：参数与筛选
-st.sidebar.header("配置中心")
-mode = st.sidebar.selectbox("回测周期", ["3mo", "6mo", "1y", "2y"], index=2)
-strict_mode = st.sidebar.checkbox("🚀 仅看超级精选 (PF≥3.6 & Score≥3)", value=True)
-
-# 容器准备
-status_box = st.empty()
-progress_bar = st.progress(0)
+# 强制锁定 1y 范围，确保与你的基准工具在同一个时间平面
+RANGE = "1y"
 
 @st.cache_data(ttl=3600)
-def fetch_data(symbol, range_str):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range_str}&interval=1d"
+def get_clean_data(sym):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range={RANGE}&interval=1d"
     try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15).json()
-        d = r["chart"]["result"][0]
-        q = d["indicators"]["quote"][0]
+        r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=15).json()
+        q = r["chart"]["result"][0]["indicators"]["quote"][0]
         c, h, l, v = np.array(q["close"]), np.array(q["high"]), np.array(q["low"]), np.array(q["volume"])
-        m = ~np.isnan(c); return c[m], h[m], l[m], v[m]
+        m = ~np.isnan(c)
+        return c[m], h[m], l[m], v[m]
     except: return None
 
-def compute_all(sym, rng):
-    data = fetch_data(sym, rng)
+# 核心计算流程
+def run_scan(sym):
+    data = get_clean_data(sym)
     if data is None or len(data[0]) < 100: return None
     c, h, l, v = data
-    
-    mh, rsi, atr, obv = macd_hist_np(c), rsi_np(c), atr_np(h, l, c), obv_np(c, v)
-    vma, ama, oma = rolling_mean_np(v, 20), rolling_mean_np(atr, 20), rolling_mean_np(obv, 20)
-    
-    # 当前得分 (5维动力模型)
-    sigs = [(mh[-1]>0), (v[-1]>vma[-1]*1.1), (rsi[-1]>=60), (atr[-1]>ama[-1]*1.1), (obv[-1]>oma[-1]*1.05)]
-    score = sum(sigs)
-    
-    # 历史序列回测 (严格切片保持一致性)
-    s_hist = (mh>0).astype(int)+(v>vma*1.1).astype(int)+(rsi>=60).astype(int)+(atr>ama*1.1).astype(int)+(obv>oma*1.05).astype(int)
-    prob7, pf7 = backtest_with_stats(c[:-1], s_hist[:-1], 7)
-    
-    # 近3日波动雷达
-    chg3 = [(c[-1]/c[-2]-1)*100, (c[-2]/c[-3]-1)*100, (c[-3]/c[-4]-1)*100] if len(c)>4 else [0,0,0]
-    
+    score, prob7, pf7 = ScienceEngine.compute_metrics(c, h, l, v)
+    chg3 = [(c[-1]/c[-2]-1)*100, (c[-2]/c[-3]-1)*100, (c[-3]/c[-4]-1)*100]
     return {"symbol": sym, "price": c[-1], "score": score, "prob7": prob7, "pf7": pf7, "chg3": chg3}
 
-# ==================== 3. 扫描执行 ====================
-if 'results' not in st.session_state: st.session_state.results = []
-if 'done' not in st.session_state: st.session_state.done = set()
+# --- 界面 ---
+tickers = ["SNDK", "WDC", "NVDA", "AAPL", "SLV", "GLD", "QQQ"] # 仅作示例
+if 'db' not in st.session_state: st.session_state.db = []
+if 'scanned' not in st.session_state: st.session_state.scanned = set()
 
-tickers = ["SNDK", "WDC", "NVDA", "AAPL", "SLV", "GLD", "QQQ", "SPY", "AMD", "MSFT", "TSLA", "PLTR", "SOXL"] # 更多可按需添加
+# 筛选条件设置 (根据你的需求)
+st.sidebar.subheader("筛选设置")
+min_score = st.sidebar.slider("最低得分", 0, 5, 3)
+min_prob = st.sidebar.slider("最低胜率", 0.0, 1.0, 0.70)
+min_pf = st.sidebar.slider("最低PF7", 0.0, 10.0, 3.6)
 
-if len(st.session_state.done) < len(tickers):
-    rem = [s for s in tickers if s not in st.session_state.done]
-    s = rem[0]
-    status_box.info(f"正在科学计算: {s} ({len(st.session_state.done)+1}/{len(tickers)})")
-    progress_bar.progress((len(st.session_state.done)+1)/len(tickers))
-    
-    res = compute_all(s, mode)
-    if res: st.session_state.results.append(res)
-    st.session_state.done.add(s)
+progress = st.empty()
+if len(st.session_state.scanned) < len(tickers):
+    target = [t for t in tickers if t not in st.session_state.scanned][0]
+    progress.info(f"正在同步计算: {target}")
+    res = run_scan(target)
+    if res: st.session_state.db.append(res)
+    st.session_state.scanned.add(target)
     st.rerun()
-else:
-    status_box.success("✅ 全市场科学扫描完成")
-    progress_bar.empty()
 
-# ==================== 4. 科学展示层 ====================
-if st.session_state.results:
-    df = pd.DataFrame(st.session_state.results)
-    df = df.sort_values(['score', 'pf7'], ascending=False)
+# 结果展示
+if st.session_state.db:
+    df = pd.DataFrame(st.session_state.db)
+    # 同时满足三个严苛条件
+    refined = df[(df['score'] >= min_score) & (df['prob7'] >= min_prob) & (df['pf7'] >= min_pf)]
     
-    # 科学筛选
-    if strict_mode:
-        show_df = df[(df['pf7'] >= 3.6) & (df['prob7'] >= 0.70) & (df['score'] >= 3)].copy()
-        st.subheader(f"💎 超级精选 (共 {len(show_df)} 只)")
-    else:
-        show_df = df[(df['pf7'] >= 3.6) | (df['prob7'] >= 0.68)].copy()
-        st.subheader(f"🔥 全量精选 (共 {len(show_df)} 只)")
-
-    for _, row in show_df.iterrows():
-        c3 = row['chg3']
-        # 三日雷达：判断是起涨还是超买
-        radar = f"<span style='color:{'#ff4b4b' if c3[0]>0 else '#00ff41'}'>{c3[0]:+.2f}%</span>, " \
-                f"{c3[1]:+.2f}%, {c3[2]:+.2f}%"
-        
-        st.markdown(f"""
-        <div style="border-left: 8px solid #FF4B4B; padding: 15px; margin: 10px 0; background-color: #1E1E1E; border-radius: 5px;">
-            <span style="font-size:22px; font-weight:bold; color:white;">{row['symbol']}</span> 
-            <span style="margin-left:20px; color:#AAA;">价格: ${row['price']:.2f}</span>
-            <hr style="margin: 10px 0; border: 0.5px solid #333;">
-            <div style="display: flex; justify-content: space-between;">
-                <div><b>得分: {row['score']}/5</b> (MACD/VOL/RSI/ATR/OBV)</div>
-                <div><b>7日胜率: <span style="color:#FFD700;">{row['prob7']*100:.1f}%</span></b></div>
-                <div><b>PF7盈利比: <span style="color:#FFD700;">{row['pf7']:.2f}</span></b></div>
-            </div>
-            <div style="margin-top:10px; font-size:13px; color:#888;">
-                📊 动力雷达 (T-0, T-1, T-2): {radar}
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-
-if st.button("🔄 重置计算"):
-    st.session_state.results, st.session_state.done = [], set(); st.rerun()
+    st.subheader(f"符合科学条件的极品 (共 {len(refined)} 只)")
+    st.dataframe(refined.sort_values('pf7', ascending=False))

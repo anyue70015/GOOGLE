@@ -20,10 +20,9 @@ BACKTEST_CONFIG = {
     "3年":  {"range": "3y",  "interval": "1d"},
 }
 
-# 核心标的池
 CORE_ETFS = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO", "WDC", "SNDK", "NVDA", "AAPL"]
 
-# ==================== 核心算法 (完全保留你的逻辑) ====================
+# ==================== 核心算法 ====================
 def ema_np(x, span):
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -72,7 +71,7 @@ def compute_metrics(symbol, cfg_key):
     macd_h, rsi = macd_hist_np(c), rsi_np(c)
     vol_ma20 = rolling_mean_np(v, 20)
     
-    # 5项指标明细 (用于单股穿透)
+    # 5项指标明细
     sig_list = [
         macd_h[-1] > 0,
         v[-1] > vol_ma20[-1] * 1.1,
@@ -92,7 +91,7 @@ def compute_metrics(symbol, cfg_key):
     
     return {"symbol": symbol, "price": c[-1], "score": score, "prob7": prob7, "pf7": pf7, "signals": sig_list}
 
-# ==================== 侧边栏：单股穿透 ====================
+# ==================== 侧边栏：单股深度穿透 ====================
 st.sidebar.header("🔍 单股深度穿透")
 single_sym = st.sidebar.text_input("输入代码 (如 SNDK/WDC)", "").upper()
 if single_sym:
@@ -102,24 +101,22 @@ if single_sym:
         if m:
             st.sidebar.write(f"**{p}**: 得分:{m['score']} | 胜率:{m['prob7']*100:.1f}% | PF:{m['pf7']:.2f}")
     
-    # 页面主区域显示穿透详情
-    st.subheader(f"🔎 {single_sym} 当前技术指标红绿灯 (1年周期)")
+    st.subheader(f"🔎 {single_sym} 当前指标状态 (1年周期)")
     m_main = compute_metrics(single_sym, "1年")
     if m_main:
         cols = st.columns(5)
-        labels = ["趋势(MACD)", "动力(VOL)", "强弱(RSI)", "位置(MA20)", "收盘(强弱)"]
+        labels = ["趋势(MACD)", "动力(VOL)", "强弱(RSI)", "均线(MA20)", "收盘强弱"]
         for i, col in enumerate(cols):
             if m_main['signals'][i]: col.success(f"{labels[i]} ✅")
             else: col.error(f"{labels[i]} ❌")
 st.sidebar.markdown("---")
 
-# ==================== 主逻辑：自动扫描 ====================
-mode = st.selectbox("全量扫描回测周期", list(BACKTEST_CONFIG.keys()), index=2)
+# ==================== 全量扫描逻辑 ====================
+mode = st.selectbox("选择扫描的回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 
 if 'high_prob' not in st.session_state: st.session_state.high_prob = []
 if 'scanned' not in st.session_state: st.session_state.scanned = set()
 
-# 获取标的并去重
 @st.cache_data(ttl=86400)
 def get_all_tickers():
     try:
@@ -131,9 +128,8 @@ def get_all_tickers():
 all_tickers = get_all_tickers()
 all_tickers.sort()
 
-# 执行扫描
 if len(st.session_state.scanned) < len(all_tickers):
-    with st.spinner("正在全速扫描全市场标的..."):
+    with st.spinner("正在逐一扫描标的..."):
         remaining = [s for s in all_tickers if s not in st.session_state.scanned]
         for sym in remaining:
             res = compute_metrics(sym, mode)
@@ -141,40 +137,41 @@ if len(st.session_state.scanned) < len(all_tickers):
             st.session_state.scanned.add(sym)
             st.rerun()
 
-# ==================== 结果显示 (你的核心逻辑排序) ====================
+# ==================== 排序与展示 (得分 > 胜率 > PF7) ====================
 if st.session_state.high_prob:
     df = pd.DataFrame(st.session_state.high_prob)
     
-    # 执行你的实战排序：得分 >= 3 优先，其次胜率，最后 PF7
-    df['is_high_score'] = df['score'] >= 3
+    # 强制执行你的排序逻辑
     df_sorted = df.sort_values(
-        by=['is_high_score', 'score', 'prob7', 'pf7'], 
-        ascending=[False, False, False, False]
+        by=['score', 'prob7', 'pf7'], 
+        ascending=[False, False, False]
     )
     
-    # 筛选出你定义的“优质标的”
+    # 精选名单 (满足任意一个高价值条件)
     df_prime = df_sorted[(df_sorted['score'] >= 3) | (df_sorted['prob7'] >= 0.68)].copy()
 
-    st.subheader(f"🔥 实战精选列表 (得分 > 胜率 > PF7) - 共 {len(df_prime)} 只")
+    st.subheader(f"🔥 精选结果 (共 {len(df_prime)} 只) - 排序规则: 得分 > 胜率 > PF7")
     
-    # 渲染显示
     for _, row in df_prime.iterrows():
-        color = "blue" if row['score'] >= 3 else "white"
+        border_color = "#31333F" if row['score'] < 3 else "#00FF00"
         st.markdown(
-            f"""<div style="border-left: 5px solid {color}; padding-left: 15px; margin-bottom: 10px;">
-                <b>{row['symbol']}</b> - 价格: ${row['price']:.2f} | 
-                <span style="color:#FF4B4B">得分: {row['score']}/5</span> | 
-                <b>7日胜率: {row['prob7']*100:.1f}%</b> | 
-                PF7: {row['pf7']:.2f}
-            </div>""", unsafe_allow_allow_html=True
+            f"""<div style="border-left: 6px solid {border_color}; padding: 10px; margin: 10px 0; background-color: #f0f2f622;">
+                <span style="font-size:20px; font-weight:bold;">{row['symbol']}</span> | 
+                价格: ${row['price']:.2f} | 
+                <b>得分: {row['score']}/5</b> | 
+                胜率: {row['prob7']*100:.1f}% | 
+                PF7效率: {row['pf7']:.2f}
+            </div>""", unsafe_allow_html=True
         )
 
-    # 导出报告
-    txt = "--- 极品精选报告 ---\n"
+    # TXT 导出逻辑 (已修正 SyntaxError)
+    report_txt = "--- 极品精选报告 ---\n"
     for _, row in df_prime.iterrows():
-        txt += f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf7']:.2f}\n"
-    st.download_button("📥 导出精选名单", txt.encode('utf-8'), "Prime_List.txt")
+        line = f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf7']:.2f}\n"
+        report_txt += line
+    
+    st.download_button("📥 导出精选 TXT", report_txt.encode('utf-8'), "Prime_Report.txt")
 
-if st.button("🔄 重置所有数据"):
+if st.button("🔄 重置所有进度"):
     st.session_state.high_prob, st.session_state.scanned = [], set()
     st.rerun()

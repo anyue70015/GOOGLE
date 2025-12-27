@@ -55,7 +55,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 # ==================== 完整硬编码成分股 + 热门ETF ====================
 @st.cache_data(ttl=86400)
 def load_sp500_tickers():
-    # 2025年12月27日完整S&P500成分股（503只，每行15个，共34行）
+    # 2025年12月完整S&P500成分股（503只，每行15个，共34行）
     return [
         "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
         "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",

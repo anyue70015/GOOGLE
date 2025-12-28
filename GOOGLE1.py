@@ -1,66 +1,63 @@
-"""
-quant_us.py
-一个干净、可审计的美股量化扫描工具
-Author: ChatGPT
-"""
-
-import requests
-import numpy as np
 import pandas as pd
+import numpy as np
+import requests
 from typing import List, Dict
 
+# 配置
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# =====================================================
-# 数据获取（Yahoo Finance, OHLCV）
-# =====================================================
-def fetch_ohlcv(symbol: str, years: int = 1) -> pd.DataFrame:
-    url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/"
-        f"{symbol}?range={years}y&interval=1d"
-    )
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    j = r.json()
-
-    if j["chart"]["result"] is None:
+# ========================================================
+# 获取OHLCV数据（美股数据）
+# ========================================================
+def fetch_ohlcv(symbol: str, period: str = "1y") -> pd.DataFrame:
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={period}&interval=1d"
+    response = requests.get(url, headers=HEADERS)
+    data = response.json()
+    
+    if "chart" not in data or data["chart"]["result"] is None:
         return None
-
-    q = j["chart"]["result"][0]["indicators"]["quote"][0]
-    df = pd.DataFrame(q)
-    df = df.dropna()
-    if len(df) < 120:
-        return None
-    return df.reset_index(drop=True)
-
-
-# =====================================================
-# 指标函数（全部“当日可见”）
-# =====================================================
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+    
+    # 提取数据
+    df = pd.DataFrame(data["chart"]["result"][0]["indicators"]["quote"][0])
+    df["timestamp"] = pd.to_datetime(data["chart"]["result"][0]["timestamp"], unit="s")
+    df.set_index("timestamp", inplace=True)
+    df = df.dropna()  # 去除缺失数据
+    return df
 
 
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
+# ========================================================
+# 计算技术指标
+# ========================================================
+def ema(df: pd.DataFrame, column: str, span: int) -> pd.Series:
+    return df[column].ewm(span=span, adjust=False).mean()
+
+
+def rsi(df: pd.DataFrame, column: str, period: int = 14) -> pd.Series:
+    delta = df[column].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = ema(gain, period)
-    avg_loss = ema(loss, period)
+    avg_gain = gain.rolling(window=period, min_periods=1).mean()
+    avg_loss = loss.rolling(window=period, min_periods=1).mean()
     rs = avg_gain / (avg_loss + 1e-9)
     return 100 - (100 / (1 + rs))
 
 
+def macd(df: pd.DataFrame, column: str) -> pd.DataFrame:
+    ema12 = ema(df, column, 12)
+    ema26 = ema(df, column, 26)
+    macd_line = ema12 - ema26
+    signal_line = ema(macd_line, column, 9)
+    return macd_line, signal_line
+
+
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    tr = pd.concat(
-        [
-            high - low,
-            (high - close.shift()).abs(),
-            (low - close.shift()).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return ema(tr, period)
+    high, low, close = df['high'], df['low'], df['close']
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs()
+    ], axis=1).max(axis=1)
+    return tr.rolling(window=period, min_periods=1).mean()
 
 
 def obv(df: pd.DataFrame) -> pd.Series:
@@ -68,155 +65,91 @@ def obv(df: pd.DataFrame) -> pd.Series:
     return (direction * df["volume"]).cumsum()
 
 
-# =====================================================
-# 核心策略（定义清楚）
-# =====================================================
-def compute_signals(df: pd.DataFrame) -> pd.DataFrame:
+# ========================================================
+# 策略信号生成
+# ========================================================
+def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    
+    # 计算技术指标
+    df["macd"], df["macd_signal"] = macd(df, "close")
+    df["rsi"] = rsi(df, "close")
+    df["ema20"] = ema(df, "close", 20)
+    df["ema50"] = ema(df, "close", 50)
+    df["atr14"] = atr(df)
+    df["obv"] = obv(df)
 
-    # MACD
-    ema12 = ema(df["close"], 12)
-    ema26 = ema(df["close"], 26)
-    macd = ema12 - ema26
-    signal = ema(macd, 9)
-    df["macd_hist"] = macd - signal
-
-    # RSI
-    df["rsi"] = rsi(df["close"], 14)
-
-    # MA
-    df["ma20"] = df["close"].rolling(20).mean()
-    df["ma50"] = df["close"].rolling(50).mean()
-
-    # ===== 入场评分（当日收盘已知）=====
-    df["score"] = (
-        (df["macd_hist"] > 0).astype(int)
-        + (df["close"] > df["ma20"] * 1.02).astype(int)
-        + (df["rsi"] >= 60).astype(int)
-        + (df["close"] > df["ma50"]).astype(int)
-    )
+    # 信号生成：满足以下条件为买入信号
+    df["buy_signal"] = (df["macd"] > df["macd_signal"]) & (df["rsi"] < 30) & (df["close"] > df["ema20"]) & (df["obv"] > df["obv"].rolling(20).mean())
+    
+    # 卖出信号
+    df["sell_signal"] = (df["macd"] < df["macd_signal"]) & (df["rsi"] > 70) & (df["close"] < df["ema20"]) & (df["obv"] < df["obv"].rolling(20).mean())
 
     return df
 
 
-# =====================================================
-# 回测（严格时间顺序）
-# =====================================================
-def backtest_pf(
-    df: pd.DataFrame,
-    hold_days: int = 7,
-    score_threshold: int = 3,
-) -> Dict:
+# ========================================================
+# 回测函数
+# ========================================================
+def backtest(df: pd.DataFrame, initial_cash: float = 10000, hold_days: int = 7) -> Dict:
     df = df.copy()
+    df["cash"] = initial_cash
+    df["position"] = 0
+    df["capital"] = initial_cash
+    df["returns"] = 0.0
 
-    # 丢掉 warm-up 区
-    df = df.iloc[60:].reset_index(drop=True)
-
-    entries = []
-    returns = []
-
+    # 用于记录买入卖出
     for i in range(len(df) - hold_days):
-        if df.loc[i, "score"] >= score_threshold:
-            entry_price = df.loc[i, "close"]
-            exit_price = df.loc[i + hold_days, "close"]
-            ret = exit_price / entry_price - 1
-            entries.append(i)
-            returns.append(ret)
+        if df["buy_signal"].iloc[i]:  # 如果是买入信号
+            df["position"].iloc[i + hold_days] = df["capital"].iloc[i] / df["close"].iloc[i]
+            df["capital"].iloc[i + hold_days] = 0  # 将资金冻结
+            
+        if df["sell_signal"].iloc[i]:  # 如果是卖出信号
+            df["capital"].iloc[i + hold_days] = df["position"].iloc[i] * df["close"].iloc[i]
+            df["position"].iloc[i + hold_days] = 0  # 清空持仓
+            
+        df["returns"].iloc[i + hold_days] = (df["capital"].iloc[i + hold_days] - df["capital"].iloc[i]) / df["capital"].iloc[i]
 
-    if len(returns) < 10:
-        return None
-
-    rets = np.array(returns)
-    wins = rets[rets > 0]
-    loss = rets[rets <= 0]
-
-    pf = wins.sum() / abs(loss.sum()) if loss.sum() != 0 else np.inf
-    winrate = len(wins) / len(rets)
-
+    # 计算累计收益与回报指标
+    df["pf"] = df["returns"].cumsum()
+    total_return = df["returns"].sum()
+    winrate = len(df[df["returns"] > 0]) / len(df[df["returns"].notna()])
+    
     return {
-        "trades": len(rets),
-        "pf": round(pf, 3),
-        "winrate": round(winrate, 3),
-        "avg_ret": round(rets.mean(), 4),
+        "total_return": total_return,
+        "pf": df["pf"].iloc[-1],
+        "winrate": winrate,
+        "total_trades": len(df[df["returns"].notna()])
     }
 
 
-# =====================================================
-# 增强分析（不改变原始样本）
-# =====================================================
-def enhancement_analysis(df: pd.DataFrame, hold_days: int = 7) -> Dict:
-    df = df.copy()
-
-    df["atr"] = atr(df)
-    df["atr_ma20"] = df["atr"].rolling(20).mean()
-    df["obv"] = obv(df)
-    df["obv_ma20"] = df["obv"].rolling(20).mean()
-    df["vol_ma20"] = df["volume"].rolling(20).mean()
-
-    df = df.iloc[60:].reset_index(drop=True)
-
-    enhanced_rets = []
-
-    for i in range(len(df) - hold_days):
-        if (
-            df.loc[i, "score"] >= 3
-            and df.loc[i, "volume"] > df.loc[i, "vol_ma20"]
-            and df.loc[i, "atr"] > df.loc[i, "atr_ma20"]
-            and df.loc[i, "obv"] > df.loc[i, "obv_ma20"]
-        ):
-            ret = df.loc[i + hold_days, "close"] / df.loc[i, "close"] - 1
-            enhanced_rets.append(ret)
-
-    if len(enhanced_rets) < 5:
-        return None
-
-    rets = np.array(enhanced_rets)
-    wins = rets[rets > 0]
-    loss = rets[rets <= 0]
-
-    pf = wins.sum() / abs(loss.sum()) if loss.sum() != 0 else np.inf
-    winrate = len(wins) / len(rets)
-
-    return {
-        "trades": len(rets),
-        "pf": round(pf, 3),
-        "winrate": round(winrate, 3),
-    }
-
-
-# =====================================================
-# 扫描入口
-# =====================================================
-def scan(symbols: List[str]):
+# ========================================================
+# 扫描所有股票，获取最终回测结果
+# ========================================================
+def scan(symbols: List[str]) -> pd.DataFrame:
     results = []
-    for s in symbols:
-        df = fetch_ohlcv(s)
+    
+    for symbol in symbols:
+        df = fetch_ohlcv(symbol)
         if df is None:
             continue
-
-        df = compute_signals(df)
-        base = backtest_pf(df)
-        enh = enhancement_analysis(df)
-
-        if base:
-            results.append(
-                {
-                    "symbol": s,
-                    "pf": base["pf"],
-                    "winrate": base["winrate"],
-                    "trades": base["trades"],
-                    "pf_enh": enh["pf"] if enh else None,
-                    "winrate_enh": enh["winrate"] if enh else None,
-                }
-            )
-
+        df = generate_signals(df)
+        result = backtest(df)
+        results.append({
+            "symbol": symbol,
+            "total_return": result["total_return"],
+            "pf": result["pf"],
+            "winrate": result["winrate"],
+            "total_trades": result["total_trades"]
+        })
+    
     return pd.DataFrame(results)
 
 
-# =====================================================
-# CLI 运行
-# =====================================================
+# ========================================================
+# 主函数（测试用例）
+# ========================================================
 if __name__ == "__main__":
-    symbols = ["AAPL", "NVDA", "MSFT", "AMD", "TSLA"]
-    df = scan(symbols)
-    print(df.sort_values("pf", ascending=False))
+    symbols = ["AAPL", "MSFT", "GOOG", "TSLA", "AMZN"]  # 你可以修改这里的股票
+    result = scan(symbols)
+    print(result.sort_values(by="pf", ascending=False))

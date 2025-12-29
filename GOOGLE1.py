@@ -132,8 +132,9 @@ st.markdown(
 
 st.title("🔥 回测信号面板 - 全市场扫描版")
 
-# ==================== 原完整常量 ====================
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+}
 
 BACKTEST_OPTIONS = ["1年", "6个月", "2年", "3年", "5年", "10年"]
 BACKTEST_CONFIG = {
@@ -148,7 +149,6 @@ BACKTEST_CONFIG = {
 
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
 
-# ==================== 原所有函数（一字不改） ====================
 def format_symbol_for_yahoo(symbol: str) -> str:
     sym = symbol.strip().upper()
     if not sym:
@@ -156,16 +156,14 @@ def format_symbol_for_yahoo(symbol: str) -> str:
 
     if sym.isdigit() and len(sym) == 6:
         if sym.startswith(("600", "601", "603", "605", "688")):
-            return f"{sym}.SS"
+            return f"{sym}.SS"  # 上交所
         if sym.startswith(("000", "001", "002", "003", "300")):
-            return f"{sym}.SZ"
+            return f"{sym}.SZ"  # 深交所
 
     return sym
 
-
 def contains_chinese(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
-
 
 def search_eastmoney_symbol(query: str):
     try:
@@ -200,7 +198,6 @@ def search_eastmoney_symbol(query: str):
 
     return None
 
-
 def search_yahoo_symbol_by_name(query: str):
     try:
         resp = requests.get(
@@ -227,7 +224,6 @@ def search_yahoo_symbol_by_name(query: str):
 
     return None
 
-
 def resolve_user_input_symbol(user_input: str) -> str:
     raw = user_input.strip()
     if not raw:
@@ -248,7 +244,6 @@ def resolve_user_input_symbol(user_input: str) -> str:
         raise ValueError("未找到匹配的 A 股代码，请改用 6 位代码或美股代码（示例：600519 / TSLA）")
 
     return raw.upper()
-
 
 @st.cache_data(show_spinner=False)
 def fetch_display_name(symbol: str, yahoo_symbol: str) -> str:
@@ -289,37 +284,35 @@ def fetch_display_name(symbol: str, yahoo_symbol: str) -> str:
 
     return yahoo_symbol
 
-
 def fetch_yahoo_ohlcv(symbol: str, range_str: str, interval: str):
     url = YAHOO_URL.format(symbol=symbol, range=range_str, interval=interval)
-    resp = requests.get(
-        url,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=15,
-    )
-    data = resp.json()
-    if "chart" not in data or not data["chart"].get("result"):
-        raise ValueError("Yahoo 无返回数据")
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if "chart" not in data or not data["chart"].get("result"):
+            raise ValueError("Yahoo 无返回数据")
 
-    result = data["chart"]["result"][0]
-    quote = result["indicators"]["quote"][0]
+        result = data["chart"]["result"][0]
+        q = result["indicators"]["quote"][0]
 
-    close = np.array(quote["close"], dtype="float64")
-    high = np.array(quote["high"], dtype="float64")
-    low = np.array(quote["low"], dtype="float64")
-    volume = np.array(quote["volume"], dtype="float64")
+        close = np.array(q["close"], dtype="float64")
+        high = np.array(q["high"], dtype="float64")
+        low = np.array(q["low"], dtype="float64")
+        volume = np.array(q["volume"], dtype="float64")
 
-    mask = ~np.isnan(close)
-    close = close[mask]
-    high = high[mask]
-    low = low[mask]
-    volume = volume[mask]
+        mask = ~np.isnan(close)
+        close = close[mask]
+        high = high[mask]
+        low = low[mask]
+        volume = volume[mask]
 
-    if len(close) < 80:
-        raise ValueError("可用历史数据太少")
+        if len(close) < 80:
+            raise ValueError("可用历史数据太少")
 
-    return close, high, low, volume
-
+        return close, high, low, volume
+    except Exception as e:
+        raise ValueError(f"数据获取失败: {str(e)}")
 
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
@@ -329,14 +322,12 @@ def ema_np(x: np.ndarray, span: int) -> np.ndarray:
         ema[i] = alpha * x[i] + (1 - alpha) * ema[i - 1]
     return ema
 
-
 def macd_hist_np(close: np.ndarray) -> np.ndarray:
     ema12 = ema_np(close, 12)
     ema26 = ema_np(close, 26)
     macd_line = ema12 - ema26
     signal = ema_np(macd_line, 9)
     return macd_line - signal
-
 
 def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
     delta = np.diff(close, prepend=close[0])
@@ -357,7 +348,6 @@ def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-
 def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     prev_close = np.roll(close, 1)
     prev_close[0] = close[0]
@@ -373,7 +363,6 @@ def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 1
         atr[i] = alpha * tr[i] + (1 - alpha) * atr[i - 1]
     return atr
 
-
 def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
     if len(x) < window:
         return np.full_like(x, x.mean(), dtype=float)
@@ -382,11 +371,9 @@ def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
     head = np.full(window - 1, ma[0])
     return np.concatenate([head, ma])
 
-
 def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
     direction = np.sign(np.diff(close, prepend=close[0]))
     return np.cumsum(direction * volume)
-
 
 def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int, min_score: int = 3):
     if len(close) <= steps:
@@ -428,14 +415,12 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int, min_sc
 
     return win_rate, avg_ret, signals, max_dd, pf, wins, avg_win, avg_loss
 
-
 def prob_class(p):
     if p >= 0.65:
         return "prob-good"
     if p >= 0.45:
         return "prob-mid"
     return "prob-bad"
-
 
 def decide_advice(prob: float, pf: float):
     if pf <= 0:
@@ -480,7 +465,6 @@ def decide_advice(prob: float, pf: float):
 
     return label, intensity, color
 
-
 def build_advice_html(label, intensity, kind):
     if kind == "buy":
         dot_on_class = "dot-score dot-score-buy"
@@ -496,7 +480,6 @@ def build_advice_html(label, intensity, kind):
         "<span class='dot-score dot-score-off'></span>" * (5 - intensity)
     )
     return advice_class, label, dots
-
 
 def compute_stock_metrics(symbol: str, cfg_key: str):
     cfg = BACKTEST_CONFIG[cfg_key]
@@ -626,13 +609,11 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
         "indicators": indicators,
     }
 
-
 @st.cache_data(show_spinner=False)
-def get_stock_metrics_cached(symbol: str, cfg_key: str, version: int = 15):
-    return compute_stock_metrics(symbol, cfg_key=cfg_key)
+def get_stock_metrics_cached(symbol: str, cfg_key: str):
+    return compute_stock_metrics(symbol, cfg_key)
 
-
-# ==================== 新增：股票列表 ====================
+# ==================== 新增：全股票列表 ====================
 COMMON_ETFS = ["SPY","QQQ","IWM","DIA","TLT","GLD","SLV","USO","UNG","BITO","ARKK","SOXX","SMH","XLE","XLF","XLV","XLK","XBI","KWEB","EEM","EWZ"]
 
 @st.cache_data(ttl=86400)
@@ -641,7 +622,7 @@ def get_nasdaq100():
         df = pd.read_csv("https://raw.githubusercontent.com/datasets/nasdaq-100-companies/main/data/nasdaq-100.csv")
         return df['Symbol'].tolist()
     except:
-        return []
+        return ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA"]
 
 @st.cache_data(ttl=86400)
 def get_sp500():
@@ -650,7 +631,7 @@ def get_sp500():
         df = pd.read_csv(StringIO(requests.get(url, headers=HEADERS).text))
         return df['Symbol'].tolist()
     except:
-        return []
+        return ["MSFT","AAPL","NVDA","GOOGL","AMZN"]
 
 all_tickers = list(set(get_nasdaq100() + get_sp500() + COMMON_ETFS))
 all_tickers.sort()
@@ -665,6 +646,7 @@ if single_sym:
         with st.spinner("查询中..."):
             try:
                 metrics = get_stock_metrics_cached(single_sym, mode_single)
+                # 完整原卡片展示
                 change_class = "change-up" if metrics["change"] >= 0 else "change-down"
                 change_str = f"{metrics['change']:+.2f}%"
 
@@ -687,7 +669,7 @@ if single_sym:
                     if ind["desc"]:
                         line = f"{ind['name']} ({ind['desc']})"
                     else:
-                        line = ind['name']
+                        line = ind["name"]
                     indicators_html += (
                         f"<div class='indicator-item'><span>{line}</span>"
                         f"<span class='dot dot-{ind['status']}'></span></div>"
@@ -757,7 +739,7 @@ if single_sym:
             except Exception as e:
                 st.sidebar.error(f"查询失败: {e}")
 
-# ==================== 全扫描 ====================
+# ==================== 全扫描逻辑 ====================
 mode = st.selectbox("全扫描周期", list(BACKTEST_CONFIG.keys()), index=2)
 
 if 'scanned' not in st.session_state:
@@ -770,8 +752,7 @@ if len(st.session_state.scanned) < len(all_tickers):
     status_text = st.empty()
 
     remaining = [s for s in all_tickers if s not in st.session_state.scanned]
-    batch = remaining[:1]
-    for sym in batch:
+    for sym in remaining[:1]:
         status_text.text(f"扫描 {sym} ... ({len(st.session_state.scanned)+1}/{len(all_tickers)})")
         try:
             metrics = get_stock_metrics_cached(sym, mode)
@@ -783,7 +764,7 @@ if len(st.session_state.scanned) < len(all_tickers):
         progress_bar.progress(len(st.session_state.scanned) / len(all_tickers))
         st.rerun()
 
-# ==================== 原完整展示 + 导出 ====================
+# ==================== 展示 + 导出 ====================
 if st.session_state.results:
     rows = st.session_state.results[:]
     rows = sorted(rows, key=lambda x: x["prob7"], reverse=True)
@@ -806,7 +787,6 @@ if st.session_state.results:
 
                 avg_win7_pct = row["avg_win7"] * 100
                 avg_loss7_pct = row["avg_loss7"] * 100
-
                 avg_win30_pct = row["avg_win30"] * 100
                 avg_loss30_pct = row["avg_loss30"] * 100
 
@@ -890,6 +870,7 @@ if st.session_state.results:
                 """
                 st.markdown(html, unsafe_allow_html=True)
 
+    # 导出
     report_lines = [f"--- 回测信号全扫描报告 ({mode}) {datetime.now().strftime('%Y-%m-%d %H:%M')} ---"]
     for row in rows:
         green = sum(1 for d in row["indicators"] if d["status"] == "bull")
@@ -904,4 +885,4 @@ if st.button("🔄 重置扫描"):
     st.session_state.results = []
     st.rerun()
 
-st.caption("所有指标和回测均基于“上一根完整K线” · 8秒/只防封 · 仅供研究")
+st.caption("所有指标基于上一根完整K线 · 8秒/只防封 · 仅供研究")

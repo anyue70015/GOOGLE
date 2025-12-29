@@ -1,116 +1,219 @@
-# us_stock_quant_tool.py
-# 美股量化工具：简单双均线交叉策略回测
-# 支持指定股票（如AAPL）、回测周期（默认最近7个交易日）
-# 计算：7天胜率、PF7（7天Profit Factor）、5大指标（总收益率、年化收益率、夏普比率、最大回撤、胜率）
-
-import pandas as pd
+import streamlit as st
+import requests
 import numpy as np
-import yfinance as yf
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+import time
+import pandas as pd
+from io import StringIO
 
-def fetch_data(ticker: str, days: int = 180):
-    """
-    下载股票历史数据（默认下载180天，确保有足够数据计算均线）
-    """
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days + 50)  # 多下载一些用于均线计算
-    data = yf.download(ticker, start=start_date, end=end_date)
-    if data.empty:
-        raise ValueError(f"无法下载 {ticker} 的数据，请检查股票代码或网络。")
-    return data
+st.set_page_config(page_title="极品短线-实战精选版", layout="wide")
+st.title("🎯 极品短线扫描 (得分 > 胜率 > PF7)")
 
-def backtest_strategy(ticker: str = "AAPL", short_window: int = 5, long_window: int = 20, backtest_days: int = 7):
-    """
-    双均线交叉策略回测（简单示例策略）
-    - 短期均线上穿长期均线：买入
-    - 短期均线下穿长期均线：卖出
-    - 只做多，不做空
-    """
-    data = fetch_data(ticker)
-    
-    # 计算均线
-    data['Short_MA'] = data['Close'].rolling(window=short_window).mean()
-    data['Long_MA'] = data['Close'].rolling(window=long_window).mean()
-    
-    # 生成信号
-    data['Signal'] = 0
-    data['Signal'][short_window:] = np.where(
-        data['Short_MA'][short_window:] > data['Long_MA'][short_window:], 1, 0)
-    data['Position'] = data['Signal'].diff()  # 1: 买入, -1: 卖出
-    
-    # 限制回测到最近的backtest_days个交易日（约7天）
-    recent_data = data[-backtest_days:]
-    
-    # 计算每日收益率（策略持仓时使用股票收益率）
-    recent_data = recent_data.copy()
-    recent_data['Returns'] = recent_data['Close'].pct_change()
-    recent_data['Strategy_Returns'] = recent_data['Returns'] * recent_data['Signal'].shift(1)
-    
-    # 累计收益率
-    recent_data['Cumulative_Strategy'] = (1 + recent_data['Strategy_Returns']).cumprod()
-    recent_data['Cumulative_Market'] = (1 + recent_data['Returns']).cumprod()
-    
-    # 交易记录（每次买入后到卖出算一笔交易）
-    trades = []
-    position = 0  # 0: 无仓, 1: 有仓
-    entry_price = 0
-    
-    for index, row in recent_data.iterrows():
-        if row['Position'] == 1 and position == 0:  # 买入信号
-            position = 1
-            entry_price = row['Close']
-        elif row['Position'] == -1 and position == 1:  # 卖出信号
-            position = 0
-            exit_price = row['Close']
-            profit = (exit_price - entry_price) / entry_price
-            trades.append(profit)
-    
-    # 如果最后仍有持仓，计算到最新价格的未实现盈亏
-    if position == 1:
-        exit_price = recent_data['Close'].iloc[-1]
-        profit = (exit_price - entry_price) / entry_price
-        trades.append(profit)
-    
-    # 计算7天指标
-    total_return_7d = recent_data['Cumulative_Strategy'].iloc[-1] - 1 if len(recent_data) > 0 else 0
-    win_rate_7d = (np.sum(np.array(trades) > 0) / len(trades)) * 100 if trades else 0
-    gross_profit = np.sum([p for p in trades if p > 0])
-    gross_loss = np.abs(np.sum([p for p in trades if p < 0]))
-    pf_7d = gross_profit / gross_loss if gross_loss > 0 else float('inf') if gross_profit > 0 else 0
-    
-    # 5大整体回测指标（使用最近backtest_days数据）
-    annual_return = (1 + total_return_7d) ** (252 / backtest_days) - 1 if total_return_7d > -1 else 0
-    sharpe_ratio = (recent_data['Strategy_Returns'].mean() / recent_data['Strategy_Returns'].std()) * np.sqrt(252) if recent_data['Strategy_Returns'].std() != 0 else 0
-    max_drawdown = ((recent_data['Cumulative_Strategy'].cummax() - recent_data['Cumulative_Strategy']) / recent_data['Cumulative_Strategy'].cummax()).max()
-    
-    # 输出结果
-    print(f"股票: {ticker}   回测最近约 {backtest_days} 个交易日")
-    print("="*50)
-    print(f"7天专用指标:")
-    print(f"  胜率 (7天): {win_rate_7d:.2f}%")
-    print(f"  PF7 (Profit Factor 7天): {pf_7d:.2f}" + (" (完美，无亏损)" if pf_7d == float('inf') else ""))
-    print(f"  总收益率 (7天): {total_return_7d * 100:.2f}%")
-    print("="*50)
-    print(f"5大核心指标 (基于7天回测):")
-    print(f"  1. 总收益率: {total_return_7d * 100:.2f}%")
-    print(f"  2. 年化收益率: {annual_return * 100:.2f}%")
-    print(f"  3. 夏普比率 (Sharpe Ratio): {sharpe_ratio:.2f}")
-    print(f"  4. 最大回撤 (Max Drawdown): {max_drawdown * 100:.2f}%")
-    print(f"  5. 胜率: {win_rate_7d:.2f}%")
-    print("="*50)
-    
-    # 绘图
-    plt.figure(figsize=(12, 8))
-    plt.plot(recent_data.index, recent_data['Cumulative_Strategy'], label='策略累计收益')
-    plt.plot(recent_data.index, recent_data['Cumulative_Market'], label='市场买入持有')
-    plt.title(f"{ticker} 双均线策略 vs 买入持有 (最近约{backtest_days}天)")
-    plt.legend()
-    plt.grid()
-    plt.show()
+# ==================== 核心常量 ====================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+}
 
-# 使用示例
-if __name__ == "__main__":
-    # 可修改股票代码和回测天数
-    backtest_strategy(ticker="AAPL", short_window=5, long_window=20, backtest_days=7)
-    # 其他股票示例：TSLA, MSFT, NVDA 等
+BACKTEST_CONFIG = {
+    "3个月": {"range": "3mo", "interval": "1d"},
+    "6个月": {"range": "6mo", "interval": "1d"},
+    "1年":  {"range": "1y",  "interval": "1d"},
+    "3年":  {"range": "3y",  "interval": "1d"},
+}
+
+# 移除已退市/异常的 SNDK，保留热门 ETF 和个股
+CORE_ETFS = ["SPY", "QQQ", "IWM", "DIA", "SLV", "GLD", "GDX", "TLT", "SOXX", "SMH", "KWEB", "BITO", "WDC", "NVDA", "AAPL"]
+
+# ==================== 核心算法 ====================
+def ema_np(x, span):
+    alpha = 2 / (span + 1)
+    ema = np.empty_like(x)
+    ema[0] = x[0]
+    for i in range(1, len(x)):
+        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+    return ema
+
+def macd_hist_np(close):
+    ema12, ema26 = ema_np(close, 12), ema_np(close, 26)
+    macd_line = ema12 - ema26
+    return macd_line - ema_np(macd_line, 9)
+
+def rsi_np(close, period=14):
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    alpha = 1 / period
+    g_ema, l_ema = np.empty_like(gain), np.empty_like(loss)
+    g_ema[0], l_ema[0] = gain[0], loss[0]
+    for i in range(1, len(gain)):
+        g_ema[i] = alpha * gain[i] + (1 - alpha) * g_ema[i-1]
+        l_ema[i] = alpha * loss[i] + (1 - alpha) * l_ema[i-1]
+    return 100 - (100 / (1 + (g_ema / (l_ema + 1e-9))))
+
+def rolling_mean_np(x, window):
+    # 改进：长度不足时前部分用 NaN，后续正常计算，避免全填充整体均值导致偏差
+    if len(x) < window:
+        return np.full_like(x, np.nan)
+    return pd.Series(x).rolling(window, min_periods=1).mean().values
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_yahoo_ohlcv(symbol, range_str):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range_str}&interval=1d"
+    for attempt in range(5):  # 重试机制防 429
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+            if resp.status_code == 429:
+                time.sleep(5 * (attempt + 1))
+                continue
+            resp.raise_for_status()
+            d = resp.json()["chart"]["result"][0]
+            q = d["indicators"]["quote"][0]
+            df = pd.DataFrame({"c": q["close"], "h": q["high"], "l": q["low"], "v": q["volume"]}).dropna()
+            return df[df['v'] > 0]
+        except Exception:
+            if attempt == 4:
+                return None
+            time.sleep(2)
+    return None
+
+def compute_metrics(symbol, cfg_key):
+    df = fetch_yahoo_ohlcv(symbol, BACKTEST_CONFIG[cfg_key]["range"])
+    if df is None or len(df) < 50: return None
+    c, h, l, v = df["c"].values, df["h"].values, df["l"].values, df["v"].values
+    
+    macd_h, rsi = macd_hist_np(c), rsi_np(c)
+    vol_ma20 = rolling_mean_np(v, 20)
+    price_ma20 = rolling_mean_np(c, 20)
+    
+    # 当前5大信号（最新一天）
+    sig_list = [
+        macd_h[-1] > 0,
+        v[-1] > vol_ma20[-1] * 1.1,
+        rsi[-1] >= 60,
+        c[-1] > price_ma20[-1],
+        (c[-1] - l[-1]) / (h[-1] - l[-1] + 1e-9) > 0.5
+    ]
+    score = sum(sig_list)
+    
+    # === 统一回测逻辑：历史也用全部5信号，得分 >=3 作为触发条件 ===
+    sig1_hist = (macd_h > 0)
+    sig2_hist = (v > vol_ma20 * 1.1)
+    sig3_hist = (rsi >= 60)
+    sig4_hist = (c > price_ma20)
+    sig5_hist = ((c - l) / (h - l + 1e-9) > 0.5)
+
+    score_hist_full = (sig1_hist.astype(int) + sig2_hist.astype(int) + sig3_hist.astype(int) +
+                       sig4_hist.astype(int) + sig5_hist.astype(int))
+
+    idx = np.where(score_hist_full[:-7] >= 3)[0]
+    # =====================================================================
+    
+    if len(idx) > 0:
+        rets = c[idx + 7] / c[idx] - 1
+        prob7 = (rets > 0).mean()
+        wins = rets[rets > 0].sum()
+        losses = abs(rets[rets <= 0].sum())
+        pf7 = wins / (losses + 1e-9)
+    else:
+        prob7, pf7 = 0.5, 1.0
+    
+    return {"symbol": symbol, "price": c[-1], "score": score, "prob7": prob7, "pf7": pf7, "signals": sig_list}
+
+# ==================== 侧边栏：单股深度穿透 ====================
+st.sidebar.header("🔍 单股深度穿透")
+single_sym = st.sidebar.text_input("输入代码 (如 NVDA/AAPL)", "").upper()
+if single_sym:
+    st.sidebar.markdown(f"### {single_sym} 多周期对比")
+    for p in ["3个月", "1年", "3年"]:
+        m = compute_metrics(single_sym, p)
+        if m:
+            st.sidebar.write(f"**{p}**: 得分:{m['score']} | 胜率:{m['prob7']*100:.1f}% | PF:{m['pf7']:.2f}")
+    
+    st.subheader(f"🔎 {single_sym} 当前指标状态 (1年周期)")
+    m_main = compute_metrics(single_sym, "1年")
+    if m_main:
+        cols = st.columns(5)
+        labels = ["趋势(MACD)", "动力(VOL)", "强弱(RSI)", "均线(MA20)", "收盘强弱"]
+        for i, col in enumerate(cols):
+            if m_main['signals'][i]: col.success(f"{labels[i]} ✅")
+            else: col.error(f"{labels[i]} ❌")
+st.sidebar.markdown("---")
+
+# ==================== 主逻辑：自动扫描 ====================
+mode = st.selectbox("全量扫描周期", list(BACKTEST_CONFIG.keys()), index=2)
+
+if 'high_prob' not in st.session_state: st.session_state.high_prob = []
+if 'scanned' not in st.session_state: st.session_state.scanned = set()
+
+@st.cache_data(ttl=86400)
+def get_all_tickers():
+    try:
+        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+        df = pd.read_csv(StringIO(requests.get(url).text))
+        return list(set(df['Symbol'].tolist() + CORE_ETFS))
+    except: 
+        return CORE_ETFS
+
+all_tickers = get_all_tickers()
+all_tickers.sort()
+
+# 批量扫描 + 防限流 + 进度显示
+if len(st.session_state.scanned) < len(all_tickers):
+    with st.spinner(f"扫描中... 已完成 {len(st.session_state.scanned)}/{len(all_tickers)}"):
+        remaining = [s for s in all_tickers if s not in st.session_state.scanned]
+        batch = remaining[:20]  # 每次处理20只，可根据服务器调整
+        for sym in batch:
+            res = compute_metrics(sym, mode)
+            if res:
+                st.session_state.high_prob.append(res)
+            st.session_state.scanned.add(sym)
+            time.sleep(0.3)  # 安全间隔
+        st.rerun()
+
+# ==================== 排序与展示 ====================
+if st.session_state.high_prob:
+    df = pd.DataFrame(st.session_state.high_prob)
+    
+    df_sorted = df.sort_values(
+        by=['score', 'prob7', 'pf7'], 
+        ascending=[False, False, False]
+    )
+    
+    # 筛选：得分>=3 或 胜率>=68%
+    df_prime = df_sorted[(df_sorted['score'] >= 3) | (df_sorted['prob7'] >= 0.68)].copy()
+
+    st.subheader(f"🔥 精选结果 (共 {len(df_prime)} 只) - 排序：得分 > 胜率 > PF7")
+    
+    progress = len(st.session_state.scanned) / len(all_tickers)
+    st.progress(progress)
+    st.write(f"扫描进度：{len(st.session_state.scanned)} / {len(all_tickers)} 只股票")
+    
+    for _, row in df_prime.iterrows():
+        # 得分越高边框越粗/颜色越亮
+        if row['score'] == 5:
+            border = "8px solid #00FF00"
+        elif row['score'] >= 3:
+            border = "6px solid #00FF00"
+        else:
+            border = "2px solid #31333F"
+        st.markdown(
+            f"""<div style="border-left: {border}; padding: 10px; margin: 10px 0; background-color: #f0f2f622;">
+                <span style="font-size:18px; font-weight:bold;">{row['symbol']}</span> | 
+                价格: ${row['price']:.2f} | 
+                <b>得分: {row['score']}/5</b> | 
+                7日胜率: {row['prob7']*100:.1f}% | 
+                PF7效率: {row['pf7']:.2f}
+            </div>""", unsafe_allow_html=True
+        )
+
+    # 导出报告
+    report_lines = ["--- 极品精选报告 (扫描周期: " + mode + ") ---"]
+    for _, row in df_prime.iterrows():
+        line = f"{row['symbol']}: 得分{row['score']} | 胜率{row['prob7']*100:.1f}% | PF7:{row['pf7']:.2f} | 价格${row['price']:.2f}"
+        report_lines.append(line)
+    
+    final_report = "\n".join(report_lines)
+    st.download_button("📥 导出精选报告", final_report.encode('utf-8'), f"极品短线_{mode}.txt")
+
+if st.button("🔄 重置扫描"):
+    st.session_state.high_prob, st.session_state.scanned = [], set()
+    st.rerun()

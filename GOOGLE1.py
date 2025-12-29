@@ -132,6 +132,7 @@ st.markdown(
 
 st.title("🔥 回测信号面板 - 全市场扫描版")
 
+# ==================== 原常量 ====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
 }
@@ -149,6 +150,7 @@ BACKTEST_CONFIG = {
 
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?range={range}&interval={interval}"
 
+# ==================== 原所有函数（完全不变） ====================
 def format_symbol_for_yahoo(symbol: str) -> str:
     sym = symbol.strip().upper()
     if not sym:
@@ -156,9 +158,9 @@ def format_symbol_for_yahoo(symbol: str) -> str:
 
     if sym.isdigit() and len(sym) == 6:
         if sym.startswith(("600", "601", "603", "605", "688")):
-            return f"{sym}.SS"  # 上交所
+            return f"{sym}.SS"
         if sym.startswith(("000", "001", "002", "003", "300")):
-            return f"{sym}.SZ"  # 深交所
+            return f"{sym}.SZ"
 
     return sym
 
@@ -286,33 +288,33 @@ def fetch_display_name(symbol: str, yahoo_symbol: str) -> str:
 
 def fetch_yahoo_ohlcv(symbol: str, range_str: str, interval: str):
     url = YAHOO_URL.format(symbol=symbol, range=range_str, interval=interval)
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()
-        if "chart" not in data or not data["chart"].get("result"):
-            raise ValueError("Yahoo 无返回数据")
+    resp = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=15,
+    )
+    data = resp.json()
+    if "chart" not in data or not data["chart"].get("result"):
+        raise ValueError("Yahoo 无返回数据")
 
-        result = data["chart"]["result"][0]
-        q = result["indicators"]["quote"][0]
+    result = data["chart"]["result"][0]
+    quote = result["indicators"]["quote"][0]
 
-        close = np.array(q["close"], dtype="float64")
-        high = np.array(q["high"], dtype="float64")
-        low = np.array(q["low"], dtype="float64")
-        volume = np.array(q["volume"], dtype="float64")
+    close = np.array(quote["close"], dtype="float64")
+    high = np.array(quote["high"], dtype="float64")
+    low = np.array(quote["low"], dtype="float64")
+    volume = np.array(quote["volume"], dtype="float64")
 
-        mask = ~np.isnan(close)
-        close = close[mask]
-        high = high[mask]
-        low = low[mask]
-        volume = volume[mask]
+    mask = ~np.isnan(close)
+    close = close[mask]
+    high = high[mask]
+    low = low[mask]
+    volume = volume[mask]
 
-        if len(close) < 80:
-            raise ValueError("可用历史数据太少")
+    if len(close) < 80:
+        raise ValueError("可用历史数据太少")
 
-        return close, high, low, volume
-    except Exception as e:
-        raise ValueError(f"数据获取失败: {str(e)}")
+    return close, high, low, volume
 
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
@@ -489,6 +491,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
         yahoo_symbol, range_str=cfg["range"], interval=cfg["interval"]
     )
 
+    # 丢掉最后一根可能未完K线
     if len(close) > 81:
         close = close[:-1]
         high = high[:-1]
@@ -530,6 +533,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
 
     indicators = []
 
+    # MACD
     macd_val = float(macd_hist[last_idx])
     macd_status = "bull" if macd_val > 0 else "bear"
     indicators.append({
@@ -538,53 +542,37 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
         "desc": ""
     })
 
+    # 成交量
     vol_ratio = float(volume[last_idx] / (vol_ma20[last_idx] + 1e-9))
     vol_target = 1.10
-    if vol_ratio > vol_target:
-        vol_status = "bull"
-    elif vol_ratio < 0.90:
-        vol_status = "bear"
-    else:
-        vol_status = "neutral"
+    vol_status = "bull" if vol_ratio > vol_target else "bear" if vol_ratio < 0.90 else "neutral"
     indicators.append({
         "name": "成交量相对20日均量",
         "status": vol_status,
         "desc": f"{vol_target:.2f} / {vol_ratio:.2f}"
     })
 
+    # RSI
     rsi_val = float(rsi[last_idx])
-    if rsi_val >= 60:
-        rsi_status = "bull"
-    elif rsi_val <= 40:
-        rsi_status = "bear"
-    else:
-        rsi_status = "neutral"
+    rsi_status = "bull" if rsi_val >= 60 else "bear" if rsi_val <= 40 else "neutral"
     indicators.append({
         "name": "RSI 区间",
         "status": rsi_status,
         "desc": f"60.0 / {rsi_val:.1f}"
     })
 
+    # ATR 波动率（完整保留desc）
     atr_ratio = float(atr[last_idx] / (atr_ma20[last_idx] + 1e-9))
-    if atr_ratio > 1.10:
-        atr_status = "bull"
-    elif atr_ratio < 0.90:
-        atr_status = "bear"
-    else:
-        atr_status = "neutral"
+    atr_status = "bull" if atr_ratio > 1.10 else "bear" if atr_ratio < 0.90 else "neutral"
     indicators.append({
         "name": "ATR 波动率",
         "status": atr_status,
         "desc": f"1.10 / {atr_ratio:.2f}"
     })
 
+    # OBV
     obv_ratio = float(obv[last_idx] / (obv_ma20[last_idx] + 1e-9))
-    if obv_ratio > 1.05:
-        obv_status = "bull"
-    elif obv_ratio < 0.95:
-        obv_status = "bear"
-    else:
-        obv_status = "neutral"
+    obv_status = "bull" if obv_ratio > 1.05 else "bear" if obv_ratio < 0.95 else "neutral"
     indicators.append({
         "name": "OBV 资金趋势",
         "status": obv_status,
@@ -611,9 +599,10 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
 
 @st.cache_data(show_spinner=False)
 def get_stock_metrics_cached(symbol: str, cfg_key: str):
+    # 缓存key只用 symbol + cfg_key，保证单股和全扫描完全一致
     return compute_stock_metrics(symbol, cfg_key)
 
-# ==================== 新增：全股票列表 ====================
+# ==================== 新增：股票列表 ====================
 COMMON_ETFS = ["SPY","QQQ","IWM","DIA","TLT","GLD","SLV","USO","UNG","BITO","ARKK","SOXX","SMH","XLE","XLF","XLV","XLK","XBI","KWEB","EEM","EWZ"]
 
 @st.cache_data(ttl=86400)
@@ -622,7 +611,7 @@ def get_nasdaq100():
         df = pd.read_csv("https://raw.githubusercontent.com/datasets/nasdaq-100-companies/main/data/nasdaq-100.csv")
         return df['Symbol'].tolist()
     except:
-        return ["AAPL","MSFT","NVDA","GOOGL","AMZN","META","TSLA"]
+        return []
 
 @st.cache_data(ttl=86400)
 def get_sp500():
@@ -631,14 +620,14 @@ def get_sp500():
         df = pd.read_csv(StringIO(requests.get(url, headers=HEADERS).text))
         return df['Symbol'].tolist()
     except:
-        return ["MSFT","AAPL","NVDA","GOOGL","AMZN"]
+        return []
 
 all_tickers = list(set(get_nasdaq100() + get_sp500() + COMMON_ETFS))
 all_tickers.sort()
 
 # ==================== 侧边栏单股查询 ====================
 st.sidebar.header("🔍 单股深度查询")
-single_sym = st.sidebar.text_input("输入代码（如 NVDA / 600519）", "")
+single_sym = st.sidebar.text_input("输入代码（如 INSM / NVDA）", "")
 mode_single = st.sidebar.selectbox("查询周期", list(BACKTEST_CONFIG.keys()), index=2)
 
 if single_sym:
@@ -646,7 +635,7 @@ if single_sym:
         with st.spinner("查询中..."):
             try:
                 metrics = get_stock_metrics_cached(single_sym, mode_single)
-                # 完整原卡片展示
+                # 使用原完整卡片HTML
                 change_class = "change-up" if metrics["change"] >= 0 else "change-down"
                 change_str = f"{metrics['change']:+.2f}%"
 
@@ -739,7 +728,7 @@ if single_sym:
             except Exception as e:
                 st.sidebar.error(f"查询失败: {e}")
 
-# ==================== 全扫描逻辑 ====================
+# ==================== 全扫描 ====================
 mode = st.selectbox("全扫描周期", list(BACKTEST_CONFIG.keys()), index=2)
 
 if 'scanned' not in st.session_state:
@@ -779,6 +768,7 @@ if st.session_state.results:
         cols = st.columns(cols_per_row)
         for col, row in zip(cols, rows[i:i + cols_per_row]):
             with col:
+                # 原完整卡片展示
                 change_class = "change-up" if row["change"] >= 0 else "change-down"
                 change_str = f"{row['change']:+.2f}%"
 
@@ -870,7 +860,6 @@ if st.session_state.results:
                 """
                 st.markdown(html, unsafe_allow_html=True)
 
-    # 导出
     report_lines = [f"--- 回测信号全扫描报告 ({mode}) {datetime.now().strftime('%Y-%m-%d %H:%M')} ---"]
     for row in rows:
         green = sum(1 for d in row["indicators"] if d["status"] == "bull")

@@ -1,96 +1,96 @@
-# ================================
-# 币圈信号筛选策略代码（4小时级别）
-# 策略名称：70%+2-3分 逻辑（4小时版）
-# 适用场景：加密货币短线轮动（每4小时运行一次筛选）
-# 作者：基于你的交易逻辑编写
-# 日期：2026年1月
-# ================================
-
+import ccxt
 import pandas as pd
-import numpy as np
-from typing import List, Dict, Optional
-import datetime
+import pandas_ta as ta
+import time
+from datetime import datetime, timedelta
 
-# 假设你的数据来源是一个DataFrame，每行代表一个币种（每4小时更新一次）
-# 必须包含以下列：
-# 'symbol'          : 币种名称（如 'BTC/USDT', 'ETH/USDT', 'SOL/USDT'）
-# 'prob_4h'         : 4小时上涨概率（百分比，如 76.4 表示 76.4%）
-# 'score_5'         : 五大指标得分（0/5, 1/5, 2/5, 3/5, 4/5, 5/5 中的一个整数）
-# 'price'           : 当前价格（可选，用于排序或计算权重）
-# 'timestamp'       : 数据时间戳（可选，用于记录）
-# 'pf_4h'           : 4小时PF值（可选，本策略不使用）
+# --- 配置区 ---
+ASSETS = ['SUI/USDT', 'SOL/USDT', 'ETH/USDT', 'DOGE/USDT', 'BNB/USDT'] # 您关注的币种
+TIMEFRAME = '4h'  # 4小时级别
+PROB_THRESHOLD = 70.0  # 概率门槛
+EXCHANGE = ccxt.binance()
 
-def filter_70plus_2to3_4h_strategy(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    核心筛选函数（4小时级别）：只返回满足 “4小时上涨概率 ≥ 70% 且 五大指标得分为 2/5 或 3/5” 的币种
-    
-    参数:
-        df (pd.DataFrame): 输入数据表，必须包含 prob_4h 和 score_5 列
+def fetch_data(symbol, limit=200):
+    """获取K线数据"""
+    bars = EXCHANGE.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
+    df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+def calculate_gemini_score(df):
+    """计算5大指标得分 (1-5分)"""
+    score = 0
+    # 1. 趋势得分: EMA12 > EMA34
+    ema12 = ta.ema(df['close'], length=12)
+    ema34 = ta.ema(df['close'], length=34)
+    if ema12.iloc[-1] > ema34.iloc[-1] and df['close'].iloc[-1] > ema12.iloc[-1]:
+        score += 1
         
-    返回:
-        pd.DataFrame: 筛选后的4小时建仓信号，按 prob_4h 降序排列
-    """
-    
-    # 数据清洗与类型转换
-    df = df.copy()
-    df['prob_4h'] = pd.to_numeric(df['prob_4h'], errors='coerce')
-    df['score_5'] = pd.to_numeric(df['score_5'], errors='coerce')
-    
-    # 核心条件
-    condition_prob = df['prob_4h'] >= 70.0
-    condition_score = df['score_5'].isin([2, 3])  # 只接受 2/5 或 3/5
-    
-    # 组合条件
-    signal_mask = condition_prob & condition_score
-    
-    # 筛选结果
-    signals = df[signal_mask].copy()
-    
-    # 添加信号说明和当前时间（4小时级别标识）
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    signals['signal_reason'] = f'4小时概率≥70% + 得分2-3/5 ({current_time})'
-    signals['timeframe'] = '4h'
-    
-    # 排序：概率越高越靠前
-    signals = signals.sort_values(by='prob_4h', ascending=False).reset_index(drop=True)
-    
-    return signals
+    # 2. 动能得分: MACD Hist 连续两根增长
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    hist = macd['MACDh_12_26_9']
+    if hist.iloc[-1] > hist.iloc[-2] and hist.iloc[-1] > 0:
+        score += 1
+        
+    # 3. 强弱得分: RSI 处于 45-68 强势非过热区
+    rsi = ta.rsi(df['close'], length=10)
+    if 45 < rsi.iloc[-1] < 68:
+        score += 1
+        
+    # 4. 成交量得分: 当前成交量 > 10周期均量
+    vol_sma = ta.sma(df['volume'], length=10)
+    if df['volume'].iloc[-1] > vol_sma.iloc[-1]:
+        score += 1
+        
+    # 5. 支撑得分: 价格在布林带中轨上方
+    bbands = ta.bbands(df['close'], length=20, std=2)
+    if df['close'].iloc[-1] > bbands['BBM_20_2.0'].iloc[-1]:
+        score += 1
+        
+    return score
 
-# ================================
-# 示例使用（模拟4小时数据）
-# ================================
+def calculate_7d_probability(df):
+    """
+    计算7日上涨概率: 
+    回测过去100个4H周期中，出现当前得分形态后，7天(42根4H线)后上涨的次数
+    """
+    lookback = 100
+    win_count = 0
+    # 7天对应 42 根 4H K线
+    future_window = 42 
+    
+    for i in range(len(df) - future_window - 5, len(df) - future_window):
+        if df['close'].iloc[i + future_window] > df['close'].iloc[i]:
+            win_count += 1
+            
+    # 简化模拟：基于近期胜率统计
+    prob = (win_count / 5) * 100 # 此处为演示逻辑，实战中会扫描更深的历史数据
+    return round(prob, 2)
+
+def main_scanner():
+    print(f"\n--- 2026 动力学扫描启动 ({datetime.now().strftime('%H:%M:%S')}) ---")
+    print(f"{'币种':<10} | {'7日概率':<10} | {'得分':<6} | {'建议动作'}")
+    print("-" * 50)
+    
+    for symbol in ASSETS:
+        try:
+            df = fetch_data(symbol)
+            score = calculate_gemini_score(df)
+            prob = calculate_7d_probability(df)
+            
+            # 执行您的逻辑：70%概率 + 2-3分建仓
+            if prob >= PROB_THRESHOLD and (score == 2 or score == 3):
+                action = "🔥 符合条件：建仓"
+            elif score != calculate_gemini_score(df.iloc[:-1]): # 分数变动
+                action = "⚠️ 分数变动：卖出"
+            else:
+                action = "---"
+                
+            print(f"{symbol:<10} | {prob:>8}% | {score:>5}/5 | {action}")
+            
+        except Exception as e:
+            print(f"扫描 {symbol} 失败: {e}")
 
 if __name__ == "__main__":
-    # 模拟一轮4小时数据（实际中从交易所API、你的信号源每4小时获取）
-    data = {
-        'symbol': ['TAO/USDT', 'SOL/USDT', 'RENDER/USDT', 'ETH/USDT', 'SUI/USDT', 
-                   'HYPE/USDT', 'BNB/USDT', 'DOGE/USDT', 'BTC/USDT', 'AAVE/USDT'],
-        'prob_4h': [78.5, 75.2, 72.8, 69.1, 73.9, 67.4, 71.5, 64.2, 76.8, 70.9],
-        'score_5': [3, 2, 1, 0, 3, 5, 2, 4, 2, 3],
-        'price': [458.2, 142.8, 18.5, 3055, 3.45, 26.1, 895, 0.282, 92000, 285],
-        'pf_4h': [6.8, 4.2, 3.9, 2.7, 4.1, 5.2, 3.1, 1.9, 4.5, 3.8]
-    }
-    
-    df = pd.DataFrame(data)
-    
-    print("=== 当前4小时数据（示例） ===")
-    print(df[['symbol', 'prob_4h', 'score_5', 'price']])
-    
-    print("\n=== 筛选后的4小时建仓信号（70%+2-3分） ===")
-    signals = filter_70plus_2to3_4h_strategy(df)
-    
-    if signals.empty:
-        print("本4小时周期无符合信号")
-    else:
-        print(signals[['symbol', 'prob_4h', 'score_5', 'price', 'signal_reason']])
-        
-        # 等权分配建议（总资金100万）
-        total_capital = 1000000
-        if len(signals) > 0:
-            capital_per_coin = total_capital / len(signals)
-            signals['allocation'] = capital_per_coin
-            signals['buy_amount'] = signals['allocation'] / signals['price']
-            print("\n等权建仓建议（总资金100万）：")
-            print(signals[['symbol', 'price', 'allocation', 'buy_amount']].round(2))
-            
-            print(f"\n建议操作：当前4小时周期建仓以上币种，持有至下一个4小时周期结束（或得分/概率触发卖出条件）")
+    # 每4小时运行一次，或手动运行
+    main_scanner()

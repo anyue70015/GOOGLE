@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-
 # ==================== 标的列表（可自行扩展） ====================
 NASDAQ100_TICKERS = [
     'AAPL', 'MSFT', 'GOOG', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'AVGO', 'COST',
@@ -94,3 +93,4 @@ if st.button("🔍 开始扫描", type="primary"):
         st.info("当前条件下未找到金叉信号，建议换周期或稍后再试。")
 
 st.caption("数据来源：Yahoo Finance | 金叉定义：EMA9 上穿 EMA21（最新K线确认）")
+

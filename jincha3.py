@@ -1,10 +1,10 @@
-﻿import streamlit as st
+import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta  # <-- Added this
+import pandas_ta as ta  # pip install pandas_ta
 from datetime import datetime
 
-# 你的 ticker 列表（同之前）
+# Hardcoded lists (update as needed)
 NASDAQ100_TICKERS = [
     'NVDA', 'AAPL', 'GOOG', 'GOOGL', 'MSFT', 'AMZN', 'META', 'AVGO', 'TSLA', 'NFLX',
     'PLTR', 'ASML', 'COST', 'AMD', 'MU', 'CSCO', 'AZN', 'APP', 'TMUS', 'LRCX',
@@ -134,28 +134,29 @@ def check_signals(ticker: str, timeframe: str = 'daily'):
         
         signals = []
         last = data.iloc[-1]
-        recent = data.iloc[-5:]  # 最近5根K线
+        recent = data.iloc[-5:]
         
-        # 1. 最近3-5根K线内是否有金叉
+        # 1. 最近5根内金叉（放宽：允许等于）
         cross_found = False
         cross_date = None
         for i in range(1, len(recent)):
             prev = recent.iloc[i-1]
             curr = recent.iloc[i]
             if prev['EMA9'] <= prev['EMA21'] and curr['EMA9'] > curr['EMA21']:
-                signals.append("最近5根K线内发生金叉")
+                signals.append("最近5根内发生金叉")
                 cross_found = True
                 cross_date = curr.name.strftime('%Y-%m-%d %H:%M') if hasattr(curr.name, 'strftime') else '-'
                 break
         
-        # 2. 当前处于金叉后强势状态
-        if last['EMA9'] > last['EMA21'] and last['Close'] > last['EMA9']:
-            signals.append("金叉后强势（EMA9 > EMA21 且价格在上方）")
+        # 2. 放宽版：只要 EMA9 > EMA21 就算当前多头趋势（最实用）
+        if last['EMA9'] > last['EMA21']:
+            price_pos = "价格在EMA9上方" if last['Close'] > last['EMA9'] else "价格在EMA9附近或下方"
+            signals.append(f"当前多头趋势 (EMA9 > EMA21, {price_pos})")
         
-        # 3. EMA9 从下方快速接近 EMA21
+        # 3. 即将金叉：放宽到差距 <5%
         if last['EMA9'] < last['EMA21']:
             gap_pct = (last['EMA21'] - last['EMA9']) / last['EMA21'] * 100
-            if gap_pct < 3:  # <3% 视为接近，可调整
+            if gap_pct < 5:  # 放宽到5%
                 ema9_change = data['EMA9'].diff().iloc[-3:].mean()
                 if ema9_change > 0:
                     signals.append(f"EMA9快速接近EMA21（差距 {gap_pct:.2f}%）")
@@ -164,7 +165,7 @@ def check_signals(ticker: str, timeframe: str = 'daily'):
             return {
                 'ticker': ticker.replace('-USD', '') if 'USD' in ticker else ticker,
                 'signals': "; ".join(signals),
-                'close_price': round(last['Close'], 2),
+                'close_price': round(last['Close'], 4 if 'USD' in ticker else 2),
                 'cross_date': cross_date if cross_found else '-'
             }
         return None
@@ -178,12 +179,15 @@ st.title("📈 高级 EMA 9/21 信号扫描器（支持更多周期）")
 st.markdown("""
 ### 功能说明：
 - **新周期**：添加1min, 5min, 15min, 1h（适合加密货币，股票仅开盘时有效）。
-- **信号类型**：最近5根内金叉；金叉后强势；即将金叉。
-- **提示**：短期周期信号更多，试试Crypto + 5min/15min。
+- **信号类型**：最近5根内金叉；当前多头趋势（放宽条件）；即将金叉（差距<5%）。
+- **提示**：短期周期信号更多，试试Crypto + 5min/15min。Crypto列表中无效ticker已忽略。
 """)
 
 market = st.selectbox("选择市场", ["NASDAQ 100", "S&P 500", "Crypto Top 100"])
 timeframe = st.selectbox("选择时间周期", ["1min", "5min", "15min", "1h", "4h", "daily", "weekly"])
+
+if timeframe in ["1min", "5min", "15min", "1h"] and market != "Crypto Top 100":
+    st.warning("⚠️ 股票市场当前可能未开盘（非交易时段无新K线），短期周期信号会很少或为零。建议在交易时段运行，或切换到Crypto市场测试。")
 
 if st.button("🔍 开始扫描多条件信号"):
     if market == "NASDAQ 100":
@@ -221,6 +225,6 @@ if st.button("🔍 开始扫描多条件信号"):
 st.caption("""
 - 数据来源：Yahoo Finance (yfinance)  
 - 短期周期数据有限（1min仅7天），适合波动大资产。  
-- 当前市场（2026年1月2日）牛市高位，新金叉少，但强势/即将信号多。  
+- 当前市场（2026年1月2日）牛市高位，新金叉少，但多头趋势信号多。  
 - 需要安装：pip install streamlit yfinance pandas pandas_ta  
 """)

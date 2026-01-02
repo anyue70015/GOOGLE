@@ -1,7 +1,8 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta  # 必须安装 pip install pandas_ta
+import pandas_ta as ta  # <-- Added this
+from datetime import datetime
 
 # 你的 ticker 列表（同之前）
 NASDAQ100_TICKERS = [
@@ -203,3 +204,4 @@ st.caption("""
 - 当前市场（2026年1月）处于牛市后期，多数资产已处于“金叉后强势”或无新信号  
 - 建议在市场回调后使用“即将金叉”功能捕捉新机会
 """)
+

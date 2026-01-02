@@ -2,3 +2,7 @@ streamlit
 yfinance
 pandas
 numpy
+streamlit
+yfinance==0.2.44
+pandas
+pandas-ta==0.3.14b0

@@ -88,17 +88,38 @@ CRYPTO_TICKERS = [f"{ticker}-USD" for ticker in CRYPTO_TOP100]
 
 def check_signals(ticker: str, timeframe: str = 'daily'):
     try:
+        # 时间周期映射：interval 和 period（yfinance 限制：1m max 7d, 5m/15m/1h max 60d 等）
+        interval_map = {
+            '1min': '1m',
+            '5min': '5m',
+            '15min': '15m',
+            '1h': '1h',
+            '4h': '1h',  # 从1h resample 到4h
+            'daily': '1d',
+            'weekly': '1wk'
+        }
+        period_map = {
+            '1min': '7d',
+            '5min': '60d',
+            '15min': '60d',
+            '1h': '90d',
+            '4h': '180d',
+            'daily': '2y',
+            'weekly': '5y'
+        }
+        
+        interval = interval_map.get(timeframe, '1d')
+        period = period_map.get(timeframe, '2y')
+        
+        data = yf.download(ticker, period=period, interval=interval, progress=False)
+        
         if timeframe == '4h':
-            data = yf.download(ticker, period='90d', interval='1h', progress=False)
-            if len(data) < 100:
+            if data.empty or len(data) < 100:
                 return None
             data = data.resample('4H').agg({
                 'Open': 'first', 'High': 'max', 'Low': 'min',
                 'Close': 'last', 'Volume': 'sum'
             }).dropna()
-        else:
-            interval_map = {'daily': '1d', 'weekly': '1wk'}
-            data = yf.download(ticker, period='2y', interval=interval_map[timeframe], progress=False)
         
         if len(data) < 50:
             return None
@@ -115,27 +136,26 @@ def check_signals(ticker: str, timeframe: str = 'daily'):
         last = data.iloc[-1]
         recent = data.iloc[-5:]  # 最近5根K线
         
-        # 1. 最近3-5根K线内是否有金叉（包括最近一根）
+        # 1. 最近3-5根K线内是否有金叉
         cross_found = False
         cross_date = None
         for i in range(1, len(recent)):
             prev = recent.iloc[i-1]
             curr = recent.iloc[i]
-            if prev['EMA9'] <= prev['EMA21'] and curr['EMA9'] > curr['EMA21']:  # 包含等于，避免遗漏
+            if prev['EMA9'] <= prev['EMA21'] and curr['EMA9'] > curr['EMA21']:
                 signals.append("最近5根K线内发生金叉")
                 cross_found = True
-                cross_date = curr.name.strftime('%Y-%m-%d')
+                cross_date = curr.name.strftime('%Y-%m-%d %H:%M') if hasattr(curr.name, 'strftime') else '-'
                 break
         
-        # 2. 当前处于金叉后强势状态：EMA9 > EMA21 且 Close > EMA9
+        # 2. 当前处于金叉后强势状态
         if last['EMA9'] > last['EMA21'] and last['Close'] > last['EMA9']:
             signals.append("金叉后强势（EMA9 > EMA21 且价格在上方）")
         
         # 3. EMA9 从下方快速接近 EMA21
         if last['EMA9'] < last['EMA21']:
             gap_pct = (last['EMA21'] - last['EMA9']) / last['EMA21'] * 100
-            if gap_pct < 3:  # 小于3%视为接近（可调整）
-                # 检查EMA9是否在上升（最近3根平均变化 >0）
+            if gap_pct < 3:  # <3% 视为接近，可调整
                 ema9_change = data['EMA9'].diff().iloc[-3:].mean()
                 if ema9_change > 0:
                     signals.append(f"EMA9快速接近EMA21（差距 {gap_pct:.2f}%）")
@@ -153,19 +173,19 @@ def check_signals(ticker: str, timeframe: str = 'daily'):
         return None
 
 st.set_page_config(page_title="高级 EMA9/21 信号扫描器", layout="wide")
-st.title("?? 高级 EMA 9/21 信号扫描器（多条件版）")
+st.title("📈 高级 EMA 9/21 信号扫描器（支持更多周期）")
 
 st.markdown("""
-### 新增功能：
-- **最近5根K线内金叉**（不再只看最新一根）
-- **金叉后强势资产**：EMA9 > EMA21 且价格在EMA9上方（当前多头趋势强势股）
-- **即将金叉**：EMA9 从下方快速接近 EMA21（差距<3% 且 EMA9上升）
+### 功能说明：
+- **新周期**：添加1min, 5min, 15min, 1h（适合加密货币，股票仅开盘时有效）。
+- **信号类型**：最近5根内金叉；金叉后强势；即将金叉。
+- **提示**：短期周期信号更多，试试Crypto + 5min/15min。
 """)
 
 market = st.selectbox("选择市场", ["NASDAQ 100", "S&P 500", "Crypto Top 100"])
-timeframe = st.selectbox("选择时间周期", ["daily", "weekly", "4h"])
+timeframe = st.selectbox("选择时间周期", ["1min", "5min", "15min", "1h", "4h", "daily", "weekly"])
 
-if st.button("?? 开始扫描多条件信号"):
+if st.button("🔍 开始扫描多条件信号"):
     if market == "NASDAQ 100":
         tickers = NASDAQ100_TICKERS
     elif market == "S&P 500":
@@ -186,21 +206,21 @@ if st.button("?? 开始扫描多条件信号"):
     progress_bar.empty()
     
     if results:
-        st.success(f"?? 找到 {len(results)} 个符合条件的资产！")
+        st.success(f"🎉 找到 {len(results)} 个符合条件的资产！")
         df = pd.DataFrame(results)
         df = df[['ticker', 'signals', 'close_price', 'cross_date']]
         df.columns = ['Ticker', '信号描述', '最新价格', '金叉日期（约）']
         st.dataframe(df.sort_values(by='信号描述'), use_container_width=True)
         
-        # 可选：导出CSV
-        csv = df.to_csv(index=False).encode()
-        st.download_button("?? 下载结果 CSV", csv, "ema_signals.csv", "text/csv")
+        # 导出CSV
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 下载结果 CSV", csv, "ema_signals.csv", "text/csv")
     else:
-        st.warning("?? 当前条件下未找到符合信号的资产（市场可能处于高位，多头已确立）")
+        st.warning("😔 当前条件下未找到信号。试试切换到Crypto市场 + 短期周期（如5min），或市场刚开盘时运行。")
 
 st.caption("""
-- 数据来源：Yahoo Finance  
-- '即将金叉' 阈值可自行调整（当前<3%差距）  
-- 当前市场（2026年1月）处于牛市后期，多数资产已处于“金叉后强势”或无新信号  
-- 建议在市场回调后使用“即将金叉”功能捕捉新机会
+- 数据来源：Yahoo Finance (yfinance)  
+- 短期周期数据有限（1min仅7天），适合波动大资产。  
+- 当前市场（2026年1月2日）牛市高位，新金叉少，但强势/即将信号多。  
+- 需要安装：pip install streamlit yfinance pandas pandas_ta  
 """)

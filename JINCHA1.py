@@ -107,8 +107,8 @@ def has_golden_cross(ticker, timeframe):
         if len(data) < 22:  # Need at least 21 periods for EMA21
             return False
         
-        data['EMA9'] = ta.ema(data['Close'], length=9)
-        data['EMA21'] = ta.ema(data['Close'], length=21)
+data['EMA9'] = data['Close'].ewm(span=9, adjust=False).mean()
+data['EMA21'] = data['Close'].ewm(span=21, adjust=False).mean()
         
         # Check last bar for crossover
         last = data.iloc[-1]
@@ -143,4 +143,5 @@ if st.button("Scan for Golden Cross"):
             df = pd.DataFrame({"Ticker": results})
             st.table(df)
         else:
+
             st.info("No golden crosses found in the selected market and timeframe.")

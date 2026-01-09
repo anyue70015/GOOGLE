@@ -1,114 +1,138 @@
 import streamlit as st
 import pandas as pd
 import ccxt
-from concurrent.futures import ThreadPoolExecutor
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 # --- 页面配置 ---
-st.set_page_config(page_title="多交易所小时级强势币扫描器", layout="wide")
+st.set_page_config(page_title="AI 智能选币狙击镜", layout="wide")
 
-class MultiExchangeScanner:
-    def __init__(self, proxy_url=None):
-        self.proxy = proxy_url
-        self.exchanges = {}
+class ProfessionalScanner:
+    def __init__(self, proxy=None):
+        config = {'timeout': 20000, 'enableRateLimit': True}
+        if proxy:
+            config.update({'httpProxy': proxy, 'httpsProxy': proxy})
         
-        # 初始化交易所配置
-        # 注意：币安连不上通常是因为代理没写对。这里使用了 ccxt 的 socksProxy/httpProxy 强制注入
-        common_config = {
-            'timeout': 30000,
-            'enableRateLimit': True,
-        }
-        
-        if proxy_url:
-            # 针对币安这种“难搞”的，尝试多重代理注入
-            common_config.update({
-                'httpProxy': proxy_url,
-                'httpsProxy': proxy_url,
-                'socksProxy': proxy_url.replace('http', 'socks5') if 'http' in proxy_url else proxy_url
-            })
+        self.binance = ccxt.binance(config)
+        self.btc_change_1h = 0.0
 
-        self.exchanges['Binance'] = ccxt.binance(common_config)
-        self.exchanges['OKX'] = ccxt.okx(common_config)
-        self.exchanges['Gate'] = ccxt.gateio(common_config)
-
-    def fetch_data(self, exchange_name, symbol):
-        """分析单个币种"""
+    def get_btc_status(self):
+        """先获取大盘（BTC）的走势作为基准"""
         try:
-            exch = self.exchanges[exchange_name]
-            # 统一小时线 '1h'
-            bars = exch.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-            if len(bars) < 50: return None
+            ohlcv = self.binance.fetch_ohlcv('BTC/USDT', '1h', limit=2)
+            self.btc_change_1h = (ohlcv[-1][4] - ohlcv[-2][4]) / ohlcv[-2][4] * 100
+            return True
+        except: return False
+
+    def analyze_coin(self, symbol):
+        """核心选币逻辑"""
+        try:
+            # 获取 100 小时数据
+            bars = self.binance.fetch_ohlcv(symbol, '1h', limit=100)
+            if len(bars) < 60: return None
             
             df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             
-            # 计算小时均线
+            # 1. 计算均线
             df['sma20'] = df['c'].rolling(20).mean()
             df['sma50'] = df['c'].rolling(50).mean()
+            df['vol_ma'] = df['v'].rolling(20).mean()
             
             curr = df.iloc[-1]
-            prev_24 = df.iloc[-24] if len(df) >= 24 else df.iloc[0]
+            prev = df.iloc[-2]
             
-            # 判断逻辑
-            is_strong = curr['c'] > curr['sma20'] > curr['sma50']
-            change_24h = (curr['c'] - prev_24['c']) / prev_24['c'] * 100
+            # --- 选币策略维度 ---
+            # A. 趋势强度 (1h 多头排列)
+            is_uptrend = curr['c'] > curr['sma20'] > curr['sma50']
             
-            return {
-                "来源": exchange_name,
-                "交易对": symbol,
-                "当前价": curr['c'],
-                "24h涨幅%": round(change_24h, 2),
-                "状态": "🔥强力多头" if is_strong else "☁️弱势/调整",
-                "偏离度%": round((curr['c'] - curr['sma20']) / curr['sma20'] * 100, 2),
-                "成交量(h)": round(curr['v'], 2)
-            }
-        except:
-            return None
+            # B. 相对强度 (是否跑赢 BTC)
+            change_1h = (curr['c'] - prev['c']) / prev['c'] * 100
+            is_outperforming_btc = change_1h > self.btc_change_1h
+            
+            # C. 量能爆发 (量比)
+            vol_ratio = curr['v'] / df['v'].tail(24).mean()
+            
+            # D. 位置判断 (偏离度：离 20 线多远)
+            bias = (curr['c'] - curr['sma20']) / curr['sma20'] * 100
+            
+            # --- 智能评分系统 (Score) ---
+            score = 0
+            tags = []
+            if is_uptrend: 
+                score += 2
+                tags.append("趋势向上")
+            if is_outperforming_btc: 
+                score += 3
+                tags.append("强于大盘")
+            if vol_ratio > 2.5: 
+                score += 3
+                tags.append("放量突破")
+            if 0 < bias < 2.5: 
+                score += 2
+                tags.append("回踩支撑") # 离均线近，风险收益比高
+            
+            # 24小时涨幅
+            change_24h = (curr['c'] - df['c'].iloc[-24]) / df['c'].iloc[-24] * 100
 
+            return {
+                "交易对": symbol,
+                "评分": score,
+                "标签": " | ".join(tags),
+                "24h涨幅%": round(change_24h, 2),
+                "1h涨幅%": round(change_1h, 2),
+                "量比": round(vol_ratio, 2),
+                "偏离度%": round(bias, 2),
+                "成交额(h)": round(curr['c'] * curr['v'], 0)
+            }
+        except: return None
+
+# --- Streamlit UI ---
 def main():
-    st.title("🛰️ 全球主流交易所 - 小时级实时扫描")
+    st.title("🎯 币安狙击手：寻找强势起爆币")
     
     with st.sidebar:
-        st.header("1. 连接设置")
-        # 如果你用的是 Clash，通常是 http://127.0.0.1:7890
-        user_proxy = st.text_input("代理地址", value="http://127.0.0.1:7890", help="国内务必填写代理，否则币安大概率超时")
-        
-        st.header("2. 筛选设置")
-        target_exchanges = st.multiselect("选择交易所", ["Binance", "OKX", "Gate"], default=["Binance", "OKX", "Gate"])
-        scan_btn = st.button("开始全市场大扫描", type="primary")
+        proxy = st.text_input("代理设置", value="http://127.0.0.1:7890")
+        min_score = st.slider("最低评分要求", 0, 10, 5)
+        min_vol = st.number_input("最小成交额 (USDT/小时)", value=100000)
+        run = st.button("开始精准扫描", type="primary")
 
-    if scan_btn:
-        scanner = MultiExchangeScanner(user_proxy)
-        all_results = []
-        
-        for name in target_exchanges:
-            st.write(f"正在读取 {name} 币种列表...")
-            try:
-                markets = scanner.exchanges[name].load_markets()
-                # 只选 USDT 计价的 现货
-                symbols = [s for s, m in markets.items() if s.endswith('/USDT') and m.get('spot', True) and m.get('active', True)]
-                st.info(f"{name} 共有 {len(symbols)} 个交易对")
-                
-                # 开始并发扫描该交易所
-                with st.spinner(f"正在扫描 {name}..."):
-                    with ThreadPoolExecutor(max_workers=40) as executor:
-                        tasks = [executor.submit(scanner.fetch_data, name, s) for s in symbols]
-                        for f in tasks:
-                            res = f.result()
-                            if res: all_results.append(res)
-            except Exception as e:
-                st.error(f"{name} 连接失败: {e}")
+    if run:
+        scanner = ProfessionalScanner(proxy)
+        if not scanner.get_btc_status():
+            st.error("连接失败！请检查代理是否开启。")
+            return
 
-        if all_results:
-            final_df = pd.DataFrame(all_results)
-            # 排序：先看状态，再看涨幅
-            final_df = final_df.sort_values(by=['状态', '24h涨幅%'], ascending=[False, False])
+        st.info(f"当前 BTC 1h 表现: {scanner.btc_change_1h:.2f}% (所有结果将以此为基准对比)")
+        
+        markets = scanner.binance.load_markets()
+        symbols = [s for s, m in markets.items() if s.endswith('/USDT') and m['spot'] and m['active']]
+        
+        results = []
+        progress = st.progress(0)
+        
+        with ThreadPoolExecutor(max_workers=30) as executor:
+            futures = [executor.submit(scanner.analyze_coin, s) for s in symbols]
+            for i, f in enumerate(futures):
+                res = f.result()
+                if res and res['评分'] >= min_score and res['成交额(h)'] > min_vol:
+                    results.append(res)
+                if i % 20 == 0: progress.progress(i / len(symbols))
+
+        if results:
+            df = pd.DataFrame(results).sort_values(by='评分', ascending=False)
             
-            st.success(f"扫描完成！全市场共找到 {len(final_df)} 个活跃币种")
+            # 使用颜色高亮
+            st.subheader("💎 筛选出的潜力币种")
+            st.dataframe(df, use_container_width=True)
             
-            # 显示结果表格
-            st.dataframe(final_df, use_container_width=True, height=800)
+            st.markdown("""
+            ### 💡 怎么看结果？
+            1. **评分 > 8 且 偏离度 < 2%**：这就是**最佳入场点**。说明它很强、在放量，但价格还没飞，就在均线支撑位。
+            2. **量比 > 5**：这种币有突发消息，适合短线追逐。
+            3. **强于大盘**：如果大盘在跌，这个标签就是你的救命稻草。
+            """)
         else:
-            st.warning("未找到有效数据，请检查代理设置或网络。")
+            st.warning("没找到高分币种，当前市场可能比较平淡或大盘太差。")
 
 if __name__ == "__main__":
     main()

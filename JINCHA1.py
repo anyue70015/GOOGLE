@@ -1,166 +1,114 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import ccxt
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
 import time
 
 # --- 页面配置 ---
-st.set_page_config(page_title="币安小时级强势币扫描器", layout="wide")
+st.set_page_config(page_title="多交易所小时级强势币扫描器", layout="wide")
 
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stMetric { background-color: #1e2130; padding: 15px; border-radius: 10px; }
-    .strong-signal { color: #00ff00; font-weight: bold; }
-    </style>
-    """, unsafe_allow_html=True)
-
-class BinanceScanner:
-    def __init__(self, proxy=None):
-        # 币安连接初始化
-        config = {
-            'timeout': 20000,
+class MultiExchangeScanner:
+    def __init__(self, proxy_url=None):
+        self.proxy = proxy_url
+        self.exchanges = {}
+        
+        # 初始化交易所配置
+        # 注意：币安连不上通常是因为代理没写对。这里使用了 ccxt 的 socksProxy/httpProxy 强制注入
+        common_config = {
+            'timeout': 30000,
             'enableRateLimit': True,
         }
-        if proxy:
-            config['proxies'] = {'http': proxy, 'https': proxy}
         
-        self.exchange = ccxt.binance(config)
+        if proxy_url:
+            # 针对币安这种“难搞”的，尝试多重代理注入
+            common_config.update({
+                'httpProxy': proxy_url,
+                'httpsProxy': proxy_url,
+                'socksProxy': proxy_url.replace('http', 'socks5') if 'http' in proxy_url else proxy_url
+            })
 
-    def fetch_ohlcv_safe(self, symbol):
-        """抓取并处理数据"""
+        self.exchanges['Binance'] = ccxt.binance(common_config)
+        self.exchanges['OKX'] = ccxt.okx(common_config)
+        self.exchanges['Gate'] = ccxt.gateio(common_config)
+
+    def fetch_data(self, exchange_name, symbol):
+        """分析单个币种"""
         try:
-            # 抓取 100 小时 K 线
-            bars = self.exchange.fetch_ohlcv(symbol, timeframe='1h', limit=100)
-            if len(bars) < 60: return None
+            exch = self.exchanges[exchange_name]
+            # 统一小时线 '1h'
+            bars = exch.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+            if len(bars) < 50: return None
             
-            df = pd.DataFrame(bars, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+            df = pd.DataFrame(bars, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
             
-            # 计算技术指标
-            df['sma20'] = df['close'].rolling(20).mean()
-            df['sma50'] = df['close'].rolling(50).mean()
-            df['vol_sma'] = df['volume'].rolling(20).mean() # 20小时平均成交量
+            # 计算小时均线
+            df['sma20'] = df['c'].rolling(20).mean()
+            df['sma50'] = df['c'].rolling(50).mean()
             
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
+            curr = df.iloc[-1]
+            prev_24 = df.iloc[-24] if len(df) >= 24 else df.iloc[0]
             
-            # --- 强势逻辑判断 ---
-            # 1. 多头排列：价格 > SMA20 > SMA50
-            is_strong = last['close'] > last['sma20'] > last['sma50']
+            # 判断逻辑
+            is_strong = curr['c'] > curr['sma20'] > curr['sma50']
+            change_24h = (curr['c'] - prev_24['c']) / prev_24['c'] * 100
             
-            # 2. 成交量异动：当前成交量是过去 20 小时平均值的几倍
-            vol_ratio = last['volume'] / last['vol_sma'] if last['vol_sma'] > 0 else 0
-            
-            # 3. 24h 涨幅
-            price_24h_ago = df['close'].iloc[-24] if len(df) >= 24 else df['close'].iloc[0]
-            change_24h = (last['close'] - price_24h_ago) / price_24h_ago * 100
-            
-            # 4. 偏离度：价格离 SMA20 多远 (太远容易回调)
-            bias = (last['close'] - last['sma20']) / last['sma20'] * 100
-
             return {
+                "来源": exchange_name,
                 "交易对": symbol,
-                "当前价": last['close'],
+                "当前价": curr['c'],
                 "24h涨幅%": round(change_24h, 2),
-                "量比": round(vol_ratio, 2),
-                "偏离度%": round(bias, 2),
-                "状态": "🔥 强力多头" if is_strong else "☁️ 震荡回调",
-                "成交额(h)": round(last['close'] * last['volume'], 2)
+                "状态": "🔥强力多头" if is_strong else "☁️弱势/调整",
+                "偏离度%": round((curr['c'] - curr['sma20']) / curr['sma20'] * 100, 2),
+                "成交量(h)": round(curr['v'], 2)
             }
         except:
             return None
 
 def main():
-    st.title("🚀 币安全币种智能扫描器 (小时级)")
+    st.title("🛰️ 全球主流交易所 - 小时级实时扫描")
     
-    # --- 侧边栏配置 ---
     with st.sidebar:
-        st.header("扫描设置")
-        proxy = st.text_input("代理服务器 (可选)", placeholder="例如 http://127.0.0.1:7890")
-        min_vol = st.number_input("最小小时成交额 (USDT)", value=50000, step=10000)
-        top_n = st.slider("显示涨幅前几名", 10, 100, 30)
+        st.header("1. 连接设置")
+        # 如果你用的是 Clash，通常是 http://127.0.0.1:7890
+        user_proxy = st.text_input("代理地址", value="http://127.0.0.1:7890", help="国内务必填写代理，否则币安大概率超时")
         
-        scan_btn = st.button("开始全市场扫描", type="primary", use_container_width=True)
+        st.header("2. 筛选设置")
+        target_exchanges = st.multiselect("选择交易所", ["Binance", "OKX", "Gate"], default=["Binance", "OKX", "Gate"])
+        scan_btn = st.button("开始全市场大扫描", type="primary")
 
     if scan_btn:
-        scanner = BinanceScanner(proxy)
+        scanner = MultiExchangeScanner(user_proxy)
+        all_results = []
         
-        with st.spinner("正在从币安获取活跃交易对..."):
+        for name in target_exchanges:
+            st.write(f"正在读取 {name} 币种列表...")
             try:
-                markets = scanner.exchange.load_markets()
-                symbols = [s for s, m in markets.items() if m['spot'] and s.endswith('/USDT') and m['active']]
-                st.success(f"成功获取 {len(symbols)} 个 USDT 交易对")
-            except Exception as e:
-                st.error(f"连接失败，请检查网络或代理: {e}")
-                return
-
-        # --- 并行执行 ---
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        results = []
-        
-        start_time = time.time()
-        
-        # 使用 30 个线程并发
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            future_to_symbol = {executor.submit(scanner.fetch_ohlcv_safe, s): s for s in symbols}
-            
-            for i, future in enumerate(future_to_symbol):
-                res = future.result()
-                if res and res['成交额(h)'] >= min_vol:
-                    results.append(res)
+                markets = scanner.exchanges[name].load_markets()
+                # 只选 USDT 计价的 现货
+                symbols = [s for s, m in markets.items() if s.endswith('/USDT') and m.get('spot', True) and m.get('active', True)]
+                st.info(f"{name} 共有 {len(symbols)} 个交易对")
                 
-                if i % 20 == 0:
-                    prog = (i + 1) / len(symbols)
-                    progress_bar.progress(prog)
-                    status_text.text(f"已扫描 {i+1}/{len(symbols)} 个币种...")
+                # 开始并发扫描该交易所
+                with st.spinner(f"正在扫描 {name}..."):
+                    with ThreadPoolExecutor(max_workers=40) as executor:
+                        tasks = [executor.submit(scanner.fetch_data, name, s) for s in symbols]
+                        for f in tasks:
+                            res = f.result()
+                            if res: all_results.append(res)
+            except Exception as e:
+                st.error(f"{name} 连接失败: {e}")
 
-        duration = time.time() - start_time
-        st.info(f"扫描耗时: {duration:.2f} 秒")
-
-        # --- 数据展示 ---
-        if results:
-            df = pd.DataFrame(results)
+        if all_results:
+            final_df = pd.DataFrame(all_results)
+            # 排序：先看状态，再看涨幅
+            final_df = final_df.sort_values(by=['状态', '24h涨幅%'], ascending=[False, False])
             
-            # 排序：按 24h 涨幅
-            df = df.sort_values(by='24h涨幅%', ascending=False).reset_index(drop=True)
+            st.success(f"扫描完成！全市场共找到 {len(final_df)} 个活跃币种")
             
-            # 指标概览
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("扫描币种总数", len(symbols))
-            with col2:
-                st.metric("多头排列币种", len(df[df['状态'] == "🔥 强力多头"]))
-            with col3:
-                st.metric("平均 24h 涨幅", f"{df['24h涨幅%'].mean():.2f}%")
-
-            st.divider()
-
-            # 结果表格
-            st.subheader(f"📊 实时涨幅榜 (前 {top_n} 名)")
-            
-            # 样式美化
-            def color_status(val):
-                color = '#00ff00' if val == "🔥 强力多头" else '#888888'
-                return f'color: {color}'
-
-            st.dataframe(
-                df.head(top_n).style.applymap(color_status, subset=['状态']),
-                use_container_width=True,
-                height=600
-            )
-            
-            # --- 避险提示 ---
-            st.warning("""
-                **⚠️ 避险操作指引：**
-                1. **看偏离度**：如果偏离度 > 10%，说明短线严重超买，此时扫出涨幅再高也别追，容易被针扎。
-                2. **看量比**：量比 > 2 代表有大资金正在突击。
-                3. **看状态**：只有“强力多头”才具备持有价值，如果只是 24h 涨幅高但状态是“震荡”，说明只是超跌反弹。
-            """)
+            # 显示结果表格
+            st.dataframe(final_df, use_container_width=True, height=800)
         else:
-            st.error("没有符合筛选条件的币种")
+            st.warning("未找到有效数据，请检查代理设置或网络。")
 
 if __name__ == "__main__":
     main()

@@ -6,7 +6,6 @@ import json
 from datetime import datetime, timedelta
 import warnings
 import sys
-import requests
 
 warnings.filterwarnings('ignore')
 
@@ -18,64 +17,23 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 定义代理设置（如果需要）
-PROXY_SETTINGS = {
-    'http': None,
-    'https': None,
-}
-
-# 尝试导入ccxt并配置代理
+# 尝试导入ccxt
 def setup_exchange():
     """设置交易所连接"""
     try:
         import ccxt
         
-        # 配置代理（如果需要）
-        proxies = PROXY_SETTINGS
-        
-        # 交易所配置
+        # 交易所配置（去掉代理）
         exchanges_config = {
-            'binance': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
-            },
             'okx': {
                 'enableRateLimit': True,
                 'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
-            },
-            'bybit': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
-            },
-            'kucoin': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
+                'timeout': 30000
             },
             'gateio': {
                 'enableRateLimit': True,
                 'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
-            },
-            'huobi': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
-            },
-            'coinbase': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000,
-                'proxies': proxies
+                'timeout': 30000
             }
         }
         
@@ -173,32 +131,32 @@ class CryptoScanner:
             error_msg = str(e)
             st.warning(f"在线获取失败，使用演示数据: {error_msg[:100]}")
             
-            # 尝试备用交易所
-            if self.exchange_id != 'okx':
-                st.info(f"尝试切换到OKX交易所...")
-                try:
-                    okx_config = exchanges_config['okx']
-                    okx_exchange = getattr(ccxt_module, 'okx')(okx_config)
-                    okx_exchange.load_markets()
+            # 尝试切换到另一个交易所
+            alt_exchange = 'gateio' if self.exchange_id == 'okx' else 'okx'
+            st.info(f"尝试切换到{alt_exchange.upper()}交易所...")
+            try:
+                alt_config = exchanges_config[alt_exchange]
+                alt_exchange_obj = getattr(ccxt_module, alt_exchange)(alt_config)
+                alt_exchange_obj.load_markets()
+                
+                symbols = []
+                count = 0
+                for symbol in alt_exchange_obj.symbols:
+                    if symbol.endswith(f'/{quote_currency}'):
+                        symbols.append(symbol)
+                        count += 1
+                        if count >= limit:
+                            break
+                
+                if symbols:
+                    st.success(f"{alt_exchange.upper()}交易所连接成功！")
+                    self.exchange = alt_exchange_obj
+                    self.exchange_id = alt_exchange
+                    self.mode = "online"
+                    return symbols
                     
-                    symbols = []
-                    count = 0
-                    for symbol in okx_exchange.symbols:
-                        if symbol.endswith(f'/{quote_currency}'):
-                            symbols.append(symbol)
-                            count += 1
-                            if count >= limit:
-                                break
-                    
-                    if symbols:
-                        st.success("OKX交易所连接成功！")
-                        self.exchange = okx_exchange
-                        self.exchange_id = 'okx'
-                        self.mode = "online"
-                        return symbols
-                        
-                except Exception as okx_error:
-                    st.warning(f"OKX也连接失败: {str(okx_error)[:100]}")
+            except Exception as alt_error:
+                st.warning(f"{alt_exchange.upper()}也连接失败: {str(alt_error)[:100]}")
             
             # 都失败了，返回演示数据
             symbols = [s for s in DEMO_SYMBOLS if s.endswith(f'/{quote_currency}')]
@@ -314,7 +272,6 @@ class CryptoScanner:
                 
             except Exception as fetch_error:
                 # 如果获取数据失败，使用模拟数据
-                st.warning(f"获取 {symbol} 数据失败，使用模拟数据")
                 price_base = current_price if current_price else np.random.uniform(0.1, 5000)
                 return {
                     'symbol': symbol,
@@ -409,17 +366,12 @@ def main():
     with st.sidebar:
         st.header("⚙️ 扫描配置")
         
-        # 交易所选择
+        # 交易所选择（只保留OKX和Gate.io）
         if ccxt_available:
-            exchange_options = ['okx', 'bybit', 'kucoin', 'gateio', 'huobi', 'binance', 'coinbase']
+            exchange_options = ['okx', 'gateio']
             exchange_descriptions = {
                 'okx': '✅ 推荐 - 稳定可靠',
-                'bybit': '✅ 稳定 - 支持良好',
-                'kucoin': '✅ 良好 - 币种丰富',
-                'gateio': '✅ 良好 - 小币种多',
-                'huobi': '⚠️ 可能受限',
-                'binance': '⚠️ 部分地区受限',
-                'coinbase': '⚠️ 国际版'
+                'gateio': '✅ 良好 - 小币种丰富'
             }
             
             selected_exchange = st.selectbox(
@@ -431,7 +383,7 @@ def main():
         else:
             selected_exchange = "demo"
             st.warning("演示模式：ccxt未安装")
-            st.info("安装命令: `pip install ccxt pandas numpy`")
+            st.info("安装命令: `pip install ccxt pandas numpy plotly`")
         
         quote = st.selectbox(
             "计价货币",
@@ -450,15 +402,13 @@ def main():
             '双均线策略': 'SMA10/SMA20交叉',
             'RSI策略': 'RSI超买超卖',
             '布林带策略': '布林带突破',
-            'MACD策略': 'MACD金叉死叉',
-            '动量策略': '价格动量追踪'
+            'MACD策略': 'MACD金叉死叉'
         }
         
         selected_strategy = st.selectbox(
             "交易策略",
             list(strategy_options.keys()),
-            index=0,
-            help=strategy_options[selected_strategy] if 'selected_strategy' in locals() else ''
+            index=0
         )
         
         # 显示策略说明
@@ -494,27 +444,18 @@ def main():
             st.error("❌ ccxt未安装")
             st.info("使用演示数据模式")
         else:
-            if selected_exchange == 'binance':
-                st.warning("⚠️ Binance可能受限")
-                st.info("推荐使用OKX或Bybit")
-            elif selected_exchange == 'okx':
-                st.success("✅ OKX - 推荐使用")
-            else:
-                st.info(f"🔄 {selected_exchange.upper()} - 准备连接")
+            st.info(f"🔄 {selected_exchange.upper()} - 准备连接")
         
         # 数据源说明
         with st.expander("📊 数据源说明"):
             st.markdown("""
-            **实时数据源（需要ccxt）:**
-            - OKX: 最稳定推荐
-            - Bybit: 稳定可靠
-            - KuCoin: 币种丰富
-            - Gate.io: 小币种多
+            **支持的交易所:**
+            - **OKX**: 最稳定推荐，主流币种齐全
+            - **Gate.io**: 小币种丰富，适合发现新机会
             
-            **演示数据:**
-            - 30个主流币种
-            - 模拟回测结果
-            - 用于功能演示
+            **演示模式:**
+            - 30个主流币种的模拟数据
+            - 无需网络连接即可使用
             """)
     
     # 初始化会话状态
@@ -552,7 +493,7 @@ def main():
             )
         
         if not symbols:
-            st.error("❌ 无法获取交易对列表，请检查连接或切换交易所")
+            st.error("❌ 无法获取交易对列表")
             st.session_state.scan_requested = False
             return
         
@@ -561,7 +502,7 @@ def main():
         
         if scanner.mode == "offline":
             st.warning("⚠️ 当前使用演示数据模式")
-            st.info("如需实时数据，请确保ccxt已安装且交易所连接正常")
+            st.info("如需实时数据，请确保ccxt已安装且网络连接正常")
         
         # 进度显示
         progress_bar = st.progress(0)
@@ -611,7 +552,7 @@ def main():
                         best_col4.metric("胜率", f"{best['win_rate']}%")
             
             # 短暂延迟避免API限制
-            if scanner.mode == "online" and st.session_state.selected_exchange not in ['demo', 'offline']:
+            if scanner.mode == "online":
                 time.sleep(0.05)  # 20次/秒
         
         # 扫描完成
@@ -698,35 +639,15 @@ def main():
         # 显示数据表格
         st.write(f"显示 {len(df_filtered)} 个结果（过滤后）")
         
-        # 创建格式化显示
-        display_df = df_filtered.copy()
-        
-        # 格式化函数
-        def color_positive_negative(val, col_type='return'):
-            if col_type == 'return':
-                color = 'green' if val > 0 else 'red' if val < 0 else 'gray'
-            elif col_type == 'sharpe':
-                if val > 1.5:
-                    color = 'green'
-                elif val > 0.5:
-                    color = 'blue'
-                elif val > 0:
-                    color = 'orange'
-                else:
-                    color = 'red'
-            elif col_type == 'volume':
-                color = 'green' if val > 0 else 'red' if val < 0 else 'gray'
-            else:
-                color = 'black'
-            
-            return f'color: {color}'
-        
         # 显示表格
         st.dataframe(
-            display_df.style
-            .applymap(lambda x: color_positive_negative(x, 'return'), subset=['total_return'])
-            .applymap(lambda x: color_positive_negative(x, 'sharpe'), subset=['sharpe'])
-            .applymap(lambda x: color_positive_negative(x, 'volume'), subset=['volume_change'])
+            df_filtered.style
+            .applymap(lambda x: 'color: green' if x > 0 else 'color: red' if x < 0 else 'color: gray', 
+                     subset=['total_return'])
+            .applymap(lambda x: 'color: green' if x > 1.5 else 'color: blue' if x > 0.5 else 'color: orange' if x > 0 else 'color: red', 
+                     subset=['sharpe'])
+            .applymap(lambda x: 'color: green' if x > 0 else 'color: red' if x < 0 else 'color: gray', 
+                     subset=['volume_change'])
             .format({
                 'total_return': '{:.1f}%',
                 'win_rate': '{:.1f}%',
@@ -857,4 +778,278 @@ def main():
                     df_normalized['sharpe_score'] * 0.3 +
                     df_normalized['win_rate_score'] * 0.2 +
                     df_normalized['volatility_score'] * 0.1
-               
+                )
+                
+                # 显示综合得分排行榜
+                df_sorted_score = df_normalized.sort_values('综合得分', ascending=False).head(10)
+                
+                fig6 = px.bar(
+                    df_sorted_score,
+                    x='symbol',
+                    y='综合得分',
+                    title='综合评分排行榜 (Top 10)',
+                    color='综合得分',
+                    color_continuous_scale='Viridis'
+                )
+                fig6.update_layout(
+                    height=400,
+                    xaxis_tickangle=45,
+                    xaxis_title="交易对",
+                    yaxis_title="综合得分"
+                )
+                st.plotly_chart(fig6, use_container_width=True)
+                
+                # 显示综合得分详情
+                st.dataframe(
+                    df_sorted_score[['symbol', '综合得分', 'total_return', 'sharpe', 'win_rate', 'volatility']]
+                    .style
+                    .background_gradient(subset=['综合得分'], cmap='YlOrRd')
+                    .format({
+                        '综合得分': '{:.1f}',
+                        'total_return': '{:.1f}%',
+                        'sharpe': '{:.2f}',
+                        'win_rate': '{:.1f}%',
+                        'volatility': '{:.1f}%'
+                    }),
+                    use_container_width=True
+                )
+
+        except ImportError:
+            st.warning("📊 可视化功能需要plotly库，请安装: `pip install plotly`")
+            
+            # 显示简单的文本分析
+            st.markdown("#### 📊 文本分析")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**收益统计**")
+                st.write(f"- 平均收益率: {avg_return:.1f}%")
+                st.write(f"- 中位数收益率: {df['total_return'].median():.1f}%")
+                st.write(f"- 收益率标准差: {df['total_return'].std():.1f}%")
+                st.write(f"- 最高收益率: {max_return:.1f}%")
+                st.write(f"- 最低收益率: {min_return:.1f}%")
+                
+            with col2:
+                st.markdown("**风险统计**")
+                st.write(f"- 平均夏普比率: {avg_sharpe:.2f}")
+                st.write(f"- 平均波动率: {avg_volatility:.1f}%")
+                st.write(f"- 平均胜率: {avg_win_rate:.1f}%")
+                st.write(f"- 正收益比例: {positive_rate:.1f}%")
+                st.write(f"- 平均交易次数: {df['num_trades'].mean():.1f}")
+        
+        # 详细分析
+        st.markdown("### 🔍 币种详细分析")
+        
+        selected_symbol = st.selectbox(
+            "选择币种查看详细分析",
+            df['symbol'].tolist()
+        )
+        
+        if selected_symbol:
+            coin_data = df[df['symbol'] == selected_symbol].iloc[0]
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric(
+                    "📈 总收益率", 
+                    f"{coin_data['total_return']}%", 
+                    delta="优秀" if coin_data['total_return'] > 50 else "良好" if coin_data['total_return'] > 20 else "一般" if coin_data['total_return'] > 0 else "亏损"
+                )
+                st.metric("🎯 胜率", f"{coin_data['win_rate']}%")
+                
+            with col2:
+                st.metric(
+                    "⚖️ 夏普比率", 
+                    f"{coin_data['sharpe']:.2f}",
+                    delta="优秀" if coin_data['sharpe'] > 1.5 else "良好" if coin_data['sharpe'] > 0.8 else "一般" if coin_data['sharpe'] > 0 else "较差"
+                )
+                st.metric("🌀 波动率", f"{coin_data['volatility']}%")
+                
+            with col3:
+                st.metric(
+                    "💰 价格区间", 
+                    f"{coin_data['min_price']:.4f} - {coin_data['max_price']:.4f}"
+                )
+                st.metric("📊 数据点数", f"{coin_data['data_points']}")
+            
+            # 交易建议
+            st.markdown("#### 💡 交易建议")
+            
+            advice = []
+            if coin_data['total_return'] > 50:
+                advice.append("✅ 高收益潜力，可考虑配置")
+            elif coin_data['total_return'] > 0:
+                advice.append("✅ 正向收益，适合关注")
+            else:
+                advice.append("⚠️ 负收益，需谨慎")
+            
+            if coin_data['sharpe'] > 1.5:
+                advice.append("✅ 风险调整后收益优秀")
+            elif coin_data['sharpe'] > 0.5:
+                advice.append("📊 风险收益比较为平衡")
+            else:
+                advice.append("⚠️ 风险收益比较低")
+            
+            if coin_data['volatility'] < 10:
+                advice.append("✅ 波动性较低，风险相对可控")
+            elif coin_data['volatility'] < 20:
+                advice.append("📊 中等波动，需注意风险控制")
+            else:
+                advice.append("⚠️ 高波动性，风险较大")
+            
+            for item in advice:
+                st.write(f"- {item}")
+        
+        # 数据导出
+        st.markdown("### 💾 数据导出")
+        
+        export_col1, export_col2, export_col3 = st.columns(3)
+        
+        with export_col1:
+            # CSV导出
+            csv = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+            st.download_button(
+                label="📥 下载CSV",
+                data=csv,
+                file_name=f"crypto_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                type="primary"
+            )
+        
+        with export_col2:
+            # JSON导出
+            json_str = df.to_json(orient='records', indent=2, force_ascii=False)
+            st.download_button(
+                label="📄 下载JSON",
+                data=json_str.encode('utf-8'),
+                file_name=f"crypto_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        
+        with export_col3:
+            # 报告生成
+            report_text = f"""
+加密货币扫描报告
+生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+交易所: {st.session_state.selected_exchange.upper()}
+策略: {st.session_state.selected_strategy}
+回测天数: {st.session_state.selected_days}
+扫描数量: {len(df)}
+
+整体表现:
+- 平均收益率: {avg_return:.1f}%
+- 最高收益率: {max_return:.1f}%
+- 正收益比例: {positive_rate:.1f}%
+- 平均夏普比率: {avg_sharpe:.2f}
+- 平均胜率: {avg_win_rate:.1f}%
+
+推荐关注币种:
+"""
+            
+            # 添加Top 5推荐
+            top5 = df.nlargest(5, 'total_return')
+            for i, (_, row) in enumerate(top5.iterrows(), 1):
+                report_text += f"{i}. {row['symbol']}: {row['total_return']}% (夏普: {row['sharpe']:.2f}, 胜率: {row['win_rate']}%)\n"
+            
+            st.download_button(
+                label="📋 下载报告",
+                data=report_text.encode('utf-8'),
+                file_name=f"crypto_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+    
+    elif not st.session_state.scan_requested:
+        # 欢迎页面
+        st.markdown("""
+        ## 🎯 欢迎使用加密货币智能扫描器
+        
+        这是一个专业的加密货币市场分析工具，基于Python开发，支持OKX和Gate.io交易所实时数据。
+        
+        ### ✨ 核心功能
+        
+        🔍 **智能扫描**
+        - 支持OKX和Gate.io交易所实时数据
+        - 自动切换备用交易所
+        - 智能错误处理和重试
+        
+        📊 **深度分析**
+        - 多策略回测（双均线、RSI、布林带、MACD）
+        - 风险收益综合评估
+        - 实时进度监控
+        
+        📈 **专业工具**
+        - 可视化图表分析
+        - 多格式数据导出
+        - 智能交易建议
+        
+        ### 🚀 快速开始
+        
+        1. 在左侧选择交易所（推荐使用OKX）
+        2. 配置扫描参数
+        3. 点击"开始智能扫描"
+        4. 查看分析结果并导出数据
+        
+        ### 🌐 支持交易所
+        
+        | 交易所 | 状态 | 推荐度 | 特点 |
+        |--------|------|--------|------|
+        | OKX | ✅ 稳定 | ★★★★★ | 最稳定可靠，主流币种齐全 |
+        | Gate.io | ✅ 良好 | ★★★★☆ | 小币种丰富，适合发现新机会 |
+        
+        ### 💡 使用建议
+        
+        1. **网络问题**: 如遇连接问题，应用会自动切换到演示模式
+        2. **数据模式**: 如无法连接，应用会自动使用演示模式
+        3. **扫描速度**: 扫描大量币种时可能需要较长时间
+        4. **结果分析**: 建议结合多个指标综合判断
+        
+        ---
+        
+        **技术栈**: Python + Streamlit + CCXT + Pandas + Plotly
+        
+        **版本**: v2.0 (支持OKX/Gate.io和离线模式)
+        """)
+        
+        # 系统信息
+        with st.expander("🔧 系统信息"):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Python版本", sys.version.split()[0])
+                
+            with col2:
+                st.metric("Streamlit版本", st.__version__)
+                
+            with col3:
+                st.metric("CCXT状态", "已安装" if ccxt_available else "未安装")
+            
+            # 连接测试
+            if st.button("🔗 测试交易所连接"):
+                with st.spinner("正在测试连接..."):
+                    test_scanner = CryptoScanner(exchange_id='okx')
+                    if test_scanner.mode == "online":
+                        st.success("✅ OKX交易所连接成功！")
+                    else:
+                        st.warning("⚠️ OKX连接失败，请检查网络或使用演示模式")
+        
+        # 快速开始演示
+        st.markdown("---")
+        st.markdown("### 🎬 快速演示")
+        
+        if st.button("🚀 快速演示扫描", type="secondary"):
+            st.session_state.scan_requested = True
+            st.session_state.scan_complete = False
+            st.session_state.selected_exchange = "okx"
+            st.session_state.selected_quote = "USDT"
+            st.session_state.selected_days = 180
+            st.session_state.selected_max_coins = 20
+            st.session_state.selected_strategy = "双均线策略"
+            st.rerun()
+
+if __name__ == "__main__":
+    main()

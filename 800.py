@@ -6,7 +6,7 @@ import pandas as pd
 from io import StringIO
 
 st.set_page_config(page_title="罗素2000 极品短线扫描工具", layout="wide")
-st.title("罗素2000 短线扫描工具（PF7≥3.6 或 7日≥68%）")
+st.title("罗素2000 短线扫描工具（PF7≥3.6 或 7日≥68%） - 实时版")
 
 # ==================== 核心常量 ====================
 HEADERS = {
@@ -24,7 +24,7 @@ BACKTEST_CONFIG = {
 }
 
 # ==================== 数据拉取 ====================
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)  # 缩短为60秒缓存，接近实时
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
     try:
@@ -45,8 +45,6 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
         raise ValueError(f"请求失败: {str(e)}")
 
 # ==================== 指标函数 ====================
-# (保持不变，与之前相同)
-
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -110,8 +108,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
     return win_rate, pf
 
-# ==================== 核心计算 ====================
-@st.cache_data(show_spinner=False)
+# ==================== 核心计算（移除缓存，实现实时） ====================
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     yahoo_symbol = symbol.upper()
     close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
@@ -160,35 +157,23 @@ def load_russell2000_tickers():
         resp = requests.get(url, headers=HEADERS, timeout=30)
         resp.raise_for_status()
         text = resp.text
-        # 找到实际持仓数据的起始行（通常在 "Ticker,Name,Sector,..." 之后）
         lines = text.splitlines()
         start_idx = next(i for i, line in enumerate(lines) if line.startswith("Ticker,") or "Ticker" in line)
         csv_text = "\n".join(lines[start_idx:])
         df = pd.read_csv(StringIO(csv_text))
-        if 'Ticker' not in df.columns:
-            # 如果仍无，尝试其他可能列名
-            possible_cols = [col for col in df.columns if 'Ticker' in col or 'Symbol' in col]
-            if possible_cols:
-                ticker_col = possible_cols[0]
-            else:
-                raise ValueError(f"无 Ticker 列，可用列: {list(df.columns)}")
-        else:
-            ticker_col = 'Ticker'
+        ticker_col = 'Ticker' if 'Ticker' in df.columns else [col for col in df.columns if 'Ticker' in col or 'Symbol' in col][0]
         tickers = df[ticker_col].dropna().astype(str).tolist()
         tickers = [t for t in tickers if t != '-' and t != 'nan' and len(t) <= 6]
         return sorted(set(tickers))
     except Exception as e:
-        st.error(f"加载 Russell 2000 成分股失败: {str(e)}")
-        st.info("尝试备用来源：stockanalysis.com")
+        st.error(f"加载失败: {str(e)}")
         try:
-            tables = pd.read_html("https://stockanalysis.com/etf/iwm/holdings/", flavor='bs4')  # 使用 bs4 避免 lxml 依赖
+            tables = pd.read_html("https://stockanalysis.com/etf/iwm/holdings/")
             df = tables[0]
-            if 'Symbol' not in df.columns:
-                raise ValueError("备用来源无 'Symbol' 列")
             tickers = df['Symbol'].astype(str).dropna().tolist()
             return sorted(set(tickers))
         except Exception as e2:
-            st.error(f"备用来源也失败: {str(e2)}")
+            st.error(f"备用来源失败: {str(e2)}")
             return []
 
 all_tickers = load_russell2000_tickers()
@@ -196,12 +181,27 @@ all_tickers = load_russell2000_tickers()
 if not all_tickers:
     st.stop()
 
-st.write(f"总计 {len(all_tickers)} 只股票（固定字母顺序） | Russell 2000 已更新至最新（基于 iShares IWM ETF 每日持仓）")
-
-# (其余代码保持不变：mode, sort_by, session_state, 结果显示, 自动扫描 等)
+st.write(f"总计 {len(all_tickers)} 只股票 | Russell 2000 已更新至最新（基于 iShares IWM ETF 每日持仓）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
+
+# 添加实时控制按钮
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🔄 实时刷新所有结果（强制重新计算）"):
+        st.cache_data.clear()
+        st.session_state.high_prob = []
+        st.session_state.scanned_symbols = set()
+        st.session_state.failed_count = 0
+        st.rerun()
+
+with col2:
+    if st.button("🔄 重置进度（从头开始扫描）"):
+        st.session_state.high_prob = []
+        st.session_state.scanned_symbols = set()
+        st.session_state.failed_count = 0
+        st.rerun()
 
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
@@ -216,7 +216,6 @@ status_text = st.empty()
 
 if st.session_state.high_prob:
     df_all = pd.DataFrame(st.session_state.high_prob)
-    
     filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
     
     if filtered_df.empty:
@@ -241,8 +240,6 @@ if st.session_state.high_prob:
                     f"得分: {row['score']}/5 - "
                     f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
-        
-        # 导出部分保持不变...
 
 st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
 
@@ -261,14 +258,8 @@ with st.spinner("自动扫描中（保持页面打开）..."):
             st.session_state.failed_count += 1
             st.warning(f"{sym} 失败: {str(e)}")
             st.session_state.scanned_symbols.add(sym)
-        time.sleep(8)
+        time.sleep(3)  # 缩短为3秒，加速扫描（注意Yahoo限流风险）
 
-st.success("所有股票扫描完成！结果已更新")
+st.success("所有股票扫描完成！点击“实时刷新所有结果”可强制更新最新数据")
 
-if st.button("🔄 重置所有进度（从头开始）"):
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.rerun()
-
-st.caption("2025最新版 | Russell 2000 小盘股 | PF7≥3.6 或 7日≥68% | 简洁专注短线")
+st.caption("2026实时版 | Russell 2000 小盘股 | PF7≥3.6 或 7日≥68% | 简洁专注短线 | 盘中刷新页面或点击按钮即可获取最新数据")

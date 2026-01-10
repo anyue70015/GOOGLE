@@ -18,7 +18,7 @@ if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.session_state.scanning = False
     st.rerun()
 
-st.write("点击下方「开始扫描」按钮后，扫描会自动持续进行（每50只刷新一次页面，确保进度实时同步，不会停）。速度约每只3-6秒，总800+只约需40-80分钟。请保持页面打开，不要关闭。")
+st.write("点击下方「开始扫描」按钮后，扫描会自动持续进行（每50只刷新一次页面，确保进度实时同步，不会停）。速度已再提升一倍（每只约1.5-3秒），总800+只约需20-40分钟。请保持页面打开，不要关闭。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -35,7 +35,7 @@ BACKTEST_CONFIG = {
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(3, 6))
+        time.sleep(random.uniform(1.5, 3))  # 速度再加一倍（原来3-6秒 → 现在1.5-3秒）
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=10)
         if df.empty or len(df) < 50:
@@ -275,7 +275,7 @@ sp500 = load_sp500_tickers()
 all_tickers = list(set(sp500 + ndx100 + extra_etfs + crypto_tickers))
 all_tickers.sort()
 
-st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF + 加密币） | 2026年1月最新")
+st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF + 加密币） | 加密币实际 {len(crypto_tickers)} 只（两个交易所top200去重后196只，正常，因为主流币重复很多） | 2026年1月最新")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
@@ -306,8 +306,8 @@ if st.session_state.high_prob:
         # 股票优质显示
         stock_filtered = stock_df[(stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)].copy()
         
-        # 加密币全部显示
-        crypto_all = crypto_df.copy()
+        # 加密币显示7日概率 > 50%
+        crypto_filtered = crypto_df[crypto_df['prob7'] > 0.5].copy()
         
         if not stock_filtered.empty:
             df_display = stock_filtered.copy()
@@ -337,8 +337,8 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
                 )
         
-        if not crypto_all.empty:
-            df_display = crypto_all.copy()
+        if not crypto_filtered.empty:
+            df_display = crypto_filtered.copy()
             df_display['price'] = df_display['price'].round(2)
             df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
             df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
@@ -349,7 +349,7 @@ if st.session_state.high_prob:
             else:
                 df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
             
-            st.subheader(f"🔹 所有加密币（共 {len(df_display)} 只，有数据的全部显示，不管指标）")
+            st.subheader(f"🔹 短线优质加密币（7日概率 > 50%） 共 {len(df_display)} 只")
             for _, row in df_display.iterrows():
                 details = row['sig_details']
                 detail_str = " | ".join([
@@ -365,8 +365,8 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
                 )
         
-        if stock_filtered.empty and crypto_all.empty:
-            st.warning("当前无任何结果")
+        if stock_filtered.empty and crypto_filtered.empty:
+            st.warning("当前无任何满足条件的标的")
 
 st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败/跳过: {st.session_state.failed_count} | 已获取结果: {len(st.session_state.high_prob)}")
 
@@ -414,4 +414,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.scanning = False
     st.rerun()
 
-st.caption("2026年1月最终稳定版 | 点击开始后自动持续跑完 | 加密币全显示 | 每50只刷新一次 | 不会卡住 | 完整列表无省略")
+st.caption("2026年1月极速版 | 速度再加一倍（1.5-3秒/只） | 加密币7日概率>50%显示 | 去重后196只正常 | 自动持续运行 | 稳定不卡")

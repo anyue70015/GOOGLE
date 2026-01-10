@@ -17,7 +17,7 @@ if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.session_state.fully_scanned = False
     st.rerun()
 
-st.write("点击上方按钮可强制获取最新数据（尤其在美股刚收盘后推荐使用）")
+st.write("点击下方「开始扫描」按钮后，页面会自动跑完所有标的（不再需要手动点任何东西），请保持页面打开，耐心等待完成（总共800+只，可能需要20-40分钟，取决于网络）。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -194,7 +194,7 @@ def load_sp500_tickers():
         "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
         "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
         "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
-        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK", "FISV",
+        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", C "STT", "UAL", "SNDK", "FISV",
         "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
         "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
         "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
@@ -290,9 +290,10 @@ if 'failed_count' not in st.session_state:
 if 'fully_scanned' not in st.session_state:
     st.session_state.fully_scanned = False
 
-result_container = st.container()
+# 进度条和状态文本（用于动态更新，不rerun）
 progress_bar = st.progress(0)
 status_text = st.empty()
+result_container = st.container()
 
 # ==================== 显示结果 ====================
 if st.session_state.high_prob:
@@ -302,12 +303,13 @@ if st.session_state.high_prob:
         stock_df = df_all[~df_all['is_crypto']]
         crypto_df = df_all[df_all['is_crypto']]
         
-        # 股票：严格条件
+        # 股票：严格筛选 PF7≥3.6 或 prob≥68%
         stock_filtered = stock_df[(stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)].copy()
-        # 加密币：宽松条件
-        crypto_filtered = crypto_df[(crypto_df['pf7'] > 1.0) | (crypto_df['prob7'] > 0.5)].copy()
         
-        # 股票显示
+        # 加密币：全部显示（只要有数据）
+        crypto_all = crypto_df.copy()
+        
+        # 股票优质显示
         if not stock_filtered.empty:
             df_display = stock_filtered.copy()
             df_display['price'] = df_display['price'].round(2)
@@ -336,9 +338,9 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
                 )
         
-        # 加密币显示
-        if not crypto_filtered.empty:
-            df_display = crypto_filtered.copy()
+        # 加密币全部显示
+        if not crypto_all.empty:
+            df_display = crypto_all.copy()
             df_display['price'] = df_display['price'].round(2)
             df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
             df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
@@ -349,7 +351,7 @@ if st.session_state.high_prob:
             else:
                 df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
             
-            st.subheader(f"🔹 短线优质加密币（PF7>1 或 7日>50%） 共 {len(df_display)} 只")
+            st.subheader(f"🔹 所有加密币（共 {len(df_display)} 只，有数据的全部显示）")
             for _, row in df_display.iterrows():
                 details = row['sig_details']
                 detail_str = " | ".join([
@@ -365,15 +367,15 @@ if st.session_state.high_prob:
                     f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
                 )
         
-        if stock_filtered.empty and crypto_filtered.empty:
-            st.warning("当前扫描中暂无满足条件的标的（股票或加密币）")
+        if stock_filtered.empty and crypto_all.empty:
+            st.warning("当前无任何结果（可能还在扫描中）")
 
-st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败/跳过: {st.session_state.failed_count} | 优质标的: {len(st.session_state.high_prob)}")
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败/跳过: {st.session_state.failed_count} | 已获取结果: {len(st.session_state.high_prob)}")
 
-# ==================== 扫描逻辑 ====================
+# ==================== 扫描逻辑（点一次按钮自动跑完，不rerun） ====================
 if not st.session_state.fully_scanned:
-    if st.button("🚀 开始/继续全量扫描（时间较长，保持页面打开）"):
-        with st.spinner("自动扫描中（保持页面打开，不要关闭）..."):
+    if st.button("🚀 开始/继续全量扫描（点一次后自动跑完，保持页面打开）"):
+        with st.spinner("扫描进行中...（进度会实时更新，不需要任何操作）"):
             for sym in all_tickers:
                 if sym in st.session_state.scanned_symbols:
                     continue
@@ -383,19 +385,16 @@ if not st.session_state.fully_scanned:
                     metrics = compute_stock_metrics(sym, mode)
                     if metrics is None:
                         st.session_state.failed_count += 1
-                        st.warning(f"{sym} 无数据或数据不足，跳过")
                     else:
                         st.session_state.high_prob.append(metrics)
                     st.session_state.scanned_symbols.add(sym)
-                    st.rerun()
                 except Exception as e:
                     st.session_state.failed_count += 1
-                    st.warning(f"{sym} 计算异常: {str(e)}，跳过")
                     st.session_state.scanned_symbols.add(sym)
                 time.sleep(12)
             st.session_state.fully_scanned = True
-            st.success("所有标的扫描完成！结果已更新")
-            st.rerun()
+            st.success("所有标的扫描完成！结果已全部更新")
+            st.rerun()  # 最后一次rerun刷新页面显示完整结果
 else:
     st.success("已完成全扫描！如需重新扫描，请点击上方强制刷新按钮。")
 
@@ -406,4 +405,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.fully_scanned = False
     st.rerun()
 
-st.caption("2026年1月最终完整版 | 加密币自动加-USD | 无数据自动跳过 | 加密币宽松筛选 PF>1 或 7日>50% | 稳定运行")
+st.caption("2026年1月最终版 | 点一次按钮自动跑完 | 加密币有数据就全部显示 | 实时进度条 | 稳定运行")

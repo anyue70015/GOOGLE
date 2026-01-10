@@ -194,7 +194,7 @@ def load_sp500_tickers():
         "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
         "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
         "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
-        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", C "STT", "UAL", "SNDK", "FISV",
+        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK", "FISV",
         "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
         "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
         "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
@@ -405,4 +405,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.fully_scanned = False
     st.rerun()
 
-st.caption("2026年1月最终版 | 点一次按钮自动跑完 | 加密币有数据就全部显示 | 实时进度条 | 稳定运行")
+st.caption("2026年1月最终版 | 点一次按钮自动跑完 | 加密币有数据就全部显示 | 实时进度条 | 语法错误已修复 | 稳定运行")

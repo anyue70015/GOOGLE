@@ -1,9 +1,10 @@
 import streamlit as st
-import requests
+import yfinance as yf  # 替换 requests 为 yfinance，防限流更好
 import numpy as np
 import time
 import pandas as pd
 from io import StringIO
+import random  # 加随机延时
 
 st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF 极品短线扫描工具", layout="wide")
 st.title("标普500 + 纳斯达克100 + 热门ETF 短线扫描工具（PF7≥3.6 或 7日≥68%）")
@@ -14,15 +15,12 @@ if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False  # 重置扫描标志
     st.rerun()
 
 st.write("点击上方按钮可强制获取最新数据（尤其在美股刚收盘后推荐使用）")
 
 # ==================== 核心常量 ====================
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-}
-
 BACKTEST_CONFIG = {
     "3个月": {"range": "3mo", "interval": "1d"},
     "6个月": {"range": "6mo", "interval": "1d"},
@@ -34,25 +32,25 @@ BACKTEST_CONFIG = {
 }
 
 # ==================== 数据拉取 ====================
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)  # 缓存延长到30分钟
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        data = resp.json()["chart"]["result"][0]
-        quote = data["indicators"]["quote"][0]
-        close = np.array(quote["close"], dtype=float)
-        high = np.array(quote["high"], dtype=float)
-        low = np.array(quote["low"], dtype=float)
-        volume = np.array(quote["volume"], dtype=float)
+        # 随机延时 10-18 秒防限流
+        time.sleep(random.uniform(10, 18))
+        
+        ticker = yf.Ticker(yahoo_symbol)
+        df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False)
+        if df.empty or len(df) < 100:
+            raise ValueError("数据不足")
+        close = df['Close'].values.astype(float)
+        high = df['High'].values.astype(float)
+        low = df['Low'].values.astype(float)
+        volume = df['Volume'].values.astype(float)
         mask = ~np.isnan(close)
         close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
-        if len(close) < 100:
-            raise ValueError("数据不足")
         return close, high, low, volume
     except Exception as e:
-        raise ValueError(f"请求失败: {str(e)}")
+        raise ValueError(f"yfinance失败: {str(e)}")
 
 # ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
@@ -283,6 +281,8 @@ if 'scanned_symbols' not in st.session_state:
     st.session_state.scanned_symbols = set()
 if 'failed_count' not in st.session_state:
     st.session_state.failed_count = 0
+if 'fully_scanned' not in st.session_state:
+    st.session_state.fully_scanned = False
 
 result_container = st.container()
 progress_bar = st.progress(0)
@@ -364,29 +364,37 @@ if st.session_state.high_prob:
 
 st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
 
-with st.spinner("自动扫描中（保持页面打开）..."):
-    for sym in all_tickers:
-        if sym in st.session_state.scanned_symbols:
-            continue
-        status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
-        progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
-        try:
-            metrics = compute_stock_metrics(sym, mode)
-            st.session_state.scanned_symbols.add(sym)
-            st.session_state.high_prob.append(metrics)
+# 改成按钮触发扫描，避免部署时自动跑循环卡死
+if not st.session_state.fully_scanned:
+    if st.button("🚀 开始/继续全量扫描（时间较长，保持页面打开）"):
+        with st.spinner("自动扫描中（保持页面打开，不要关闭）..."):
+            for sym in all_tickers:
+                if sym in st.session_state.scanned_symbols:
+                    continue
+                status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+                progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
+                try:
+                    metrics = compute_stock_metrics(sym, mode)
+                    st.session_state.scanned_symbols.add(sym)
+                    st.session_state.high_prob.append(metrics)
+                    st.rerun()
+                except Exception as e:
+                    st.session_state.failed_count += 1
+                    st.warning(f"{sym} 失败: {str(e)}")
+                    st.session_state.scanned_symbols.add(sym)
+                # 加大延时到12秒
+                time.sleep(12)
+            st.session_state.fully_scanned = True
+            st.success("所有股票扫描完成！结果已更新")
             st.rerun()
-        except Exception as e:
-            st.session_state.failed_count += 1
-            st.warning(f"{sym} 失败: {str(e)}")
-            st.session_state.scanned_symbols.add(sym)
-        time.sleep(8)
-
-st.success("所有股票扫描完成！结果已更新")
+else:
+    st.success("已完成全扫描！如需重新扫描，请点击上方强制刷新按钮。")
 
 if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
     st.rerun()
 
-st.caption("2025最新版 | 完整534只硬编码 | 已加入热门ETF | PF7≥3.6 或 7日≥68% | 稳定运行")
+st.caption("2026年1月完整修复版 | 完整534只硬编码 | 已加入热门ETF + 加密币 | PF7≥3.6 或 7日≥68% | 防限流 + 按钮触发 | 稳定运行")

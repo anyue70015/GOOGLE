@@ -1,13 +1,12 @@
 import streamlit as st
-import yfinance as yf  # 替换 requests 为 yfinance，防限流更好
+import yfinance as yf
 import numpy as np
 import time
 import pandas as pd
-from io import StringIO
-import random  # 加随机延时
+import random
 
-st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF 极品短线扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 + 热门ETF 短线扫描工具（PF7≥3.6 或 7日≥68%）")
+st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF + 加密币 短线扫描工具", layout="wide")
+st.title("标普500 + 纳斯达克100 + 热门ETF + 加密币 短线扫描工具")
 
 # ── 新增清缓存按钮 ──
 if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
@@ -15,7 +14,7 @@ if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False  # 重置扫描标志
+    st.session_state.fully_scanned = False
     st.rerun()
 
 st.write("点击上方按钮可强制获取最新数据（尤其在美股刚收盘后推荐使用）")
@@ -31,26 +30,26 @@ BACKTEST_CONFIG = {
     "10年": {"range": "10y", "interval": "1d"},
 }
 
-# ==================== 数据拉取 ====================
-@st.cache_data(ttl=1800, show_spinner=False)  # 缓存延长到30分钟
+# ==================== 数据拉取（不抛异常，返回 None） ====================
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        # 随机延时 10-18 秒防限流
-        time.sleep(random.uniform(10, 18))
-        
+        time.sleep(random.uniform(12, 20))  # 加大随机延时防限流
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False)
-        if df.empty or len(df) < 100:
-            raise ValueError("数据不足")
+        if df.empty or len(df) < 50:  # crypto历史可能短，降低阈值
+            return None, None, None, None
         close = df['Close'].values.astype(float)
         high = df['High'].values.astype(float)
         low = df['Low'].values.astype(float)
         volume = df['Volume'].values.astype(float)
         mask = ~np.isnan(close)
         close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
+        if len(close) < 50:
+            return None, None, None, None
         return close, high, low, volume
-    except Exception as e:
-        raise ValueError(f"yfinance失败: {str(e)}")
+    except Exception:
+        return None, None, None, None
 
 # ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
@@ -119,8 +118,13 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
 # ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
-    yahoo_symbol = symbol.upper()
+    # 判断是否加密币 → 加 -USD 后缀
+    yahoo_symbol = f"{symbol.upper()}-USD" if symbol.upper() in crypto_set else symbol.upper()
+    
     close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
+    
+    if close is None:
+        return None
 
     macd_hist = macd_hist_np(close)
     rsi = rsi_np(close)
@@ -130,7 +134,6 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     atr_ma20 = rolling_mean_np(atr, 20)
     obv_ma20 = rolling_mean_np(obv, 20)
 
-    # 5个指标的具体判断 + 记录详情
     sig_macd = macd_hist[-1] > 0
     sig_vol = volume[-1] > vol_ma20[-1] * 1.1
     sig_rsi = rsi[-1] >= 60
@@ -166,13 +169,13 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "score": score,
         "prob7": prob7,
         "pf7": pf7,
-        "sig_details": sig_details
+        "sig_details": sig_details,
+        "is_crypto": symbol.upper() in crypto_set
     }
 
-# ==================== 完整硬编码成分股 + 热门ETF ====================
+# ==================== 完整硬编码成分股 + 热门ETF + 加密币 ====================
 @st.cache_data(ttl=86400)
 def load_sp500_tickers():
-    # 2025年12月完整S&P500成分股（503只，每行15个，共34行）
     return [
         "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
         "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
@@ -225,7 +228,6 @@ extra_etfs = [
     "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
 ]
 
-# 新增：GATE.io 交易量前200币种（基于2026年1月数据，常见top crypto ticker）
 gate_top200 = [
     "BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
     "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
@@ -246,7 +248,6 @@ gate_top200 = [
     "DG"
 ]
 
-# 新增：OKX 交易量前200币种（基于2026年1月数据，常见top crypto ticker，部分与Gate重叠）
 okx_top200 = [
     "BTC", "ETH", "USDT", "SOL", "XRP", "BNB", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
     "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
@@ -266,15 +267,20 @@ okx_top200 = [
     "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT", "DG"
 ]
 
+# 定义加密币集合
+crypto_tickers = list(set(gate_top200 + okx_top200))
+crypto_set = set(c.upper() for c in crypto_tickers)
+
 sp500 = load_sp500_tickers()
-all_tickers = list(set(sp500 + ndx100 + extra_etfs + gate_top200 + okx_top200))
+all_tickers = list(set(sp500 + ndx100 + extra_etfs + crypto_tickers))
 all_tickers.sort()
 
-st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF + GATE & OKX top 200 币种） | 2026年1月最新")
+st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF + 加密币） | 2026年1月最新")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
+# session_state 初始化
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -288,27 +294,33 @@ result_container = st.container()
 progress_bar = st.progress(0)
 status_text = st.empty()
 
+# ==================== 显示结果 ====================
 if st.session_state.high_prob:
-    df_all = pd.DataFrame(st.session_state.high_prob)
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
     
-    filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
-    
-    if filtered_df.empty:
-        st.warning("当前扫描中暂无满足 PF7≥3.6 或 7日概率≥68% 的股票，继续扫描中...")
-    else:
-        df_display = filtered_df.copy()
-        df_display['price'] = df_display['price'].round(2)
-        df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
-        df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
-        df_display['pf7'] = df_display['pf7'].round(2)
+    if not df_all.empty:
+        stock_df = df_all[~df_all['is_crypto']]
+        crypto_df = df_all[df_all['is_crypto']]
         
-        if sort_by == "PF7 (盈利因子)":
-            df_display = df_display.sort_values("pf7", ascending=False)
-        else:
-            df_display = df_display.sort_values("prob7", ascending=False)
+        # 股票：严格条件
+        stock_filtered = stock_df[(stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)].copy()
+        # 加密币：宽松条件
+        crypto_filtered = crypto_df[(crypto_df['pf7'] > 1.0) | (crypto_df['prob7'] > 0.5)].copy()
         
-        with result_container:
-            st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只  |  排序：{sort_by}")
+        # 股票显示
+        if not stock_filtered.empty:
+            df_display = stock_filtered.copy()
+            df_display['price'] = df_display['price'].round(2)
+            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df_display['pf7'] = df_display['pf7'].round(2)
+            
+            if sort_by == "PF7 (盈利因子)":
+                df_display = df_display.sort_values("pf7", ascending=False)
+            else:
+                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
+            
+            st.subheader(f"🔹 短线优质股票（PF7≥3.6 或 7日≥68%） 共 {len(df_display)} 只")
             for _, row in df_display.iterrows():
                 details = row['sig_details']
                 detail_str = " | ".join([
@@ -318,53 +330,47 @@ if st.session_state.high_prob:
                     f"ATR放大: {'是' if details['ATR放大'] else '否'}",
                     f"OBV上升: {'是' if details['OBV上升'] else '否'}"
                 ])
-                
                 st.markdown(
                     f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
-                    f"得分: {row['score']}/5 - "
-                    f"{detail_str} - "
-                    f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
                 )
         
-        csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📄 导出结果为 CSV",
-            data=csv_data,
-            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
+        # 加密币显示
+        if not crypto_filtered.empty:
+            df_display = crypto_filtered.copy()
+            df_display['price'] = df_display['price'].round(2)
+            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df_display['pf7'] = df_display['pf7'].round(2)
+            
+            if sort_by == "PF7 (盈利因子)":
+                df_display = df_display.sort_values("pf7", ascending=False)
+            else:
+                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
+            
+            st.subheader(f"🔹 短线优质加密币（PF7>1 或 7日>50%） 共 {len(df_display)} 只")
+            for _, row in df_display.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                st.markdown(
+                    f"**{row['symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
+                )
         
-        txt_lines = []
-        txt_lines.append(f"短线优质股票扫描结果")
-        txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
-        txt_lines.append(f"筛选条件：PF7 ≥ 3.6  或  7日上涨概率 ≥ 68%")
-        txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
-        txt_lines.append(f"符合股票数量：{len(df_display)} 只")
-        txt_lines.append("=" * 60)
-        txt_lines.append("")
-        
-        for _, row in df_display.iterrows():
-            txt_lines.append(
-                f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
-                f"得分 {row['score']}/5 | "
-                f"7日概率 {row['prob7']:>6}  |  PF7 {row['pf7']:>5}"
-            )
-        
-        txt_content = "\n".join(txt_lines)
-        
-        st.download_button(
-            label="📜 导出结果为 TXT（推荐，清晰对齐）",
-            data=txt_content.encode('utf-8'),
-            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.txt",
-            mime="text/plain"
-        )
-        
-        with st.expander("🔍 TXT 预览"):
-            st.text(txt_content)
+        if stock_filtered.empty and crypto_filtered.empty:
+            st.warning("当前扫描中暂无满足条件的标的（股票或加密币）")
 
-st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败/跳过: {st.session_state.failed_count} | 优质标的: {len(st.session_state.high_prob)}")
 
-# 改成按钮触发扫描，避免部署时自动跑循环卡死
+# ==================== 扫描逻辑 ====================
 if not st.session_state.fully_scanned:
     if st.button("🚀 开始/继续全量扫描（时间较长，保持页面打开）"):
         with st.spinner("自动扫描中（保持页面打开，不要关闭）..."):
@@ -375,17 +381,20 @@ if not st.session_state.fully_scanned:
                 progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
                 try:
                     metrics = compute_stock_metrics(sym, mode)
+                    if metrics is None:
+                        st.session_state.failed_count += 1
+                        st.warning(f"{sym} 无数据或数据不足，跳过")
+                    else:
+                        st.session_state.high_prob.append(metrics)
                     st.session_state.scanned_symbols.add(sym)
-                    st.session_state.high_prob.append(metrics)
                     st.rerun()
                 except Exception as e:
                     st.session_state.failed_count += 1
-                    st.warning(f"{sym} 失败: {str(e)}")
+                    st.warning(f"{sym} 计算异常: {str(e)}，跳过")
                     st.session_state.scanned_symbols.add(sym)
-                # 加大延时到12秒
                 time.sleep(12)
             st.session_state.fully_scanned = True
-            st.success("所有股票扫描完成！结果已更新")
+            st.success("所有标的扫描完成！结果已更新")
             st.rerun()
 else:
     st.success("已完成全扫描！如需重新扫描，请点击上方强制刷新按钮。")
@@ -397,4 +406,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.fully_scanned = False
     st.rerun()
 
-st.caption("2026年1月完整修复版 | 完整534只硬编码 | 已加入热门ETF + 加密币 | PF7≥3.6 或 7日≥68% | 防限流 + 按钮触发 | 稳定运行")
+st.caption("2026年1月最终完整版 | 加密币自动加-USD | 无数据自动跳过 | 加密币宽松筛选 PF>1 或 7日>50% | 稳定运行")

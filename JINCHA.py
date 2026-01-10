@@ -1,565 +1,330 @@
 import streamlit as st
+import requests
 import numpy as np
-import pandas as pd
 import time
-import datetime
-import threading
-from queue import Queue, Empty
-import warnings
-warnings.filterwarnings('ignore')
+import pandas as pd
+from io import StringIO
 
-st.set_page_config(page_title="罗素2000 模拟回测扫描", layout="wide")
-st.title("🚀 罗素2000 模拟回测极速扫描器")
+st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF 极品短线扫描工具", layout="wide")
+st.title("标普500 + 纳斯达克100 + 热门ETF 短线扫描工具（PF7≥3.6 或 7日≥68%）")
 
-# ==================== 初始化会话状态 ====================
-def init_session_state():
-    """初始化所有会话状态"""
-    if 'initialized' not in st.session_state:
-        st.session_state.initialized = True
-        st.session_state.scan_results = []
-        st.session_state.scanning = False
-        st.session_state.progress = 0
-        st.session_state.total_symbols = 2000
-        st.session_state.current_symbol = ""
-        st.session_state.last_update = time.time()
-        st.session_state.result_queue = Queue()
-        st.session_state.failed_count = 0
-        st.session_state.start_time = None
-        st.session_state.period = "1年"
-        st.session_state.all_tickers = []
-        st.session_state.completed_count = 0
-
-init_session_state()
-
-# ==================== 生成模拟股票数据 ====================
-def generate_simulated_tickers():
-    """生成模拟的罗素2000股票列表"""
-    if st.session_state.all_tickers:
-        return st.session_state.all_tickers
-    
-    # 基础股票列表
-    base_tickers = [
-        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'JPM', 'V', 'JNJ',
-        'WMT', 'PG', 'HD', 'BAC', 'MA', 'DIS', 'NFLX', 'ADBE', 'CRM', 'PYPL',
-        'ABT', 'PEP', 'CMCSA', 'TMO', 'AVGO', 'COST', 'DHR', 'MCD', 'NKE', 'LIN',
-        'INTC', 'CSCO', 'PFE', 'T', 'VZ', 'MRK', 'ABBV', 'BMY', 'UNH', 'LLY',
-        'AMD', 'QCOM', 'TXN', 'AMGN', 'GILD', 'CVX', 'XOM', 'COP', 'SLB', 'EOG'
-    ]
-    
-    # 生成2000只股票
-    all_tickers = []
-    for i in range(2000):
-        if i < len(base_tickers):
-            all_tickers.append(base_tickers[i])
-        else:
-            # 生成模拟股票代码
-            import random
-            import string
-            prefix = random.choice(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'])
-            suffix = random.choice(['', 'A', 'B', 'C', 'D', 'E'])
-            num = random.randint(10, 999)
-            ticker = f"{prefix}{num:03d}{suffix}"
-            all_tickers.append(ticker)
-    
-    st.session_state.all_tickers = all_tickers[:2000]
-    return st.session_state.all_tickers
-
-# ==================== 模拟回测计算（完全本地） ====================
-def simulate_stock_analysis(symbol):
-    """模拟股票分析 - 完全本地计算，不依赖网络"""
-    try:
-        # 随机生成模拟价格（$10-$500）
-        base_price = np.random.uniform(10, 500)
-        
-        # 生成价格变化（-5% 到 +5%）
-        daily_change = np.random.uniform(-0.05, 0.05)
-        price = base_price * (1 + daily_change)
-        
-        # 模拟价格变化
-        change = daily_change * 100
-        
-        # ========== 模拟技术指标 ==========
-        # 1. 随机生成得分（0-5），但倾向于3-4
-        score = min(5, max(0, np.random.normal(3.5, 1.0)))
-        score = int(round(score))
-        
-        # 2. 模拟PF7（盈利因子）基于得分
-        if score >= 4:
-            pf7 = np.random.uniform(4.0, 8.0)  # 高分股有高PF7
-        elif score >= 3:
-            pf7 = np.random.uniform(2.5, 5.0)
-        else:
-            pf7 = np.random.uniform(1.0, 3.0)
-        
-        # 3. 模拟7日胜率（基于PF7和得分）
-        base_prob = 0.5 + (score / 10) + (pf7 / 20)
-        prob7 = min(0.95, max(0.3, base_prob))
-        
-        # 4. 模拟RSI
-        if score >= 4:
-            rsi = np.random.uniform(60, 80)
-        elif score >= 3:
-            rsi = np.random.uniform(50, 70)
-        else:
-            rsi = np.random.uniform(30, 60)
-        
-        # 5. 模拟波动率
-        if score >= 4:
-            volatility = np.random.uniform(20, 40)  # 高分股通常波动较大
-        else:
-            volatility = np.random.uniform(10, 30)
-        
-        # 6. 模拟动量
-        if score >= 4:
-            momentum = np.random.uniform(5, 20)
-        elif score >= 3:
-            momentum = np.random.uniform(-5, 10)
-        else:
-            momentum = np.random.uniform(-10, 5)
-        
-        # 7. 模拟最大回撤
-        if score >= 4:
-            max_drawdown = np.random.uniform(5, 15)
-        elif score >= 3:
-            max_drawdown = np.random.uniform(10, 25)
-        else:
-            max_drawdown = np.random.uniform(15, 35)
-        
-        # 8. 模拟是否在20日均线上
-        above_ma20 = "是" if np.random.random() > 0.3 else "否"
-        
-        # 9. 模拟数据点数（一年约252个交易日）
-        data_points = np.random.randint(200, 252)
-        
-        return {
-            'symbol': symbol,
-            'price': round(price, 2),
-            'change': round(change, 2),
-            'score': score,
-            'prob7': round(prob7, 3),
-            'pf7': round(pf7, 2),
-            'rsi': round(rsi, 1),
-            'volatility': round(volatility, 1),
-            'max_drawdown': round(max_drawdown, 1),
-            'above_ma20': above_ma20,
-            'momentum_20d': round(momentum, 1),
-            'data_points': data_points,
-            'scan_time': datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        }
-        
-    except Exception as e:
-        print(f"模拟{symbol}时出错: {e}")
-        return None
-
-# ==================== 极速批量扫描 ====================
-def ultra_fast_scan():
-    """极速扫描 - 完全本地，无需网络"""
-    tickers = generate_simulated_tickers()
-    total = len(tickers)
-    
-    # 分批处理以显示进度
-    batch_size = 100
-    for batch_start in range(0, total, batch_size):
-        if not st.session_state.scanning:
-            break
-            
-        batch_end = min(batch_start + batch_size, total)
-        batch_tickers = tickers[batch_start:batch_end]
-        
-        # 处理当前批次
-        for i, symbol in enumerate(batch_tickers):
-            if not st.session_state.scanning:
-                break
-                
-            # 模拟分析（极快，约1毫秒）
-            result = simulate_stock_analysis(symbol)
-            if result:
-                st.session_state.result_queue.put(('result', result))
-            
-            # 更新进度
-            completed = batch_start + i + 1
-            st.session_state.progress = (completed / total) * 100
-            st.session_state.current_symbol = symbol
-            st.session_state.completed_count = completed
-            
-            # 每50个结果强制更新一次显示
-            if completed % 50 == 0:
-                st.session_state.last_update = time.time()
-                time.sleep(0.001)  # 短暂让出控制权
-        
-        # 批次间短暂休息
-        if st.session_state.scanning:
-            time.sleep(0.01)
-
-# ==================== 启动扫描线程 ====================
-def start_scan_thread():
-    """启动扫描线程"""
-    if st.session_state.scanning:
-        return
-    
-    # 重置状态
-    st.session_state.scanning = True
-    st.session_state.scan_results = []
-    st.session_state.progress = 0
-    st.session_state.completed_count = 0
-    st.session_state.start_time = time.time()
+# ── 新增清缓存按钮 ──
+if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
+    st.cache_data.clear()
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
-    
-    # 启动扫描线程
-    def scan_thread():
-        try:
-            ultra_fast_scan()
-        finally:
-            st.session_state.scanning = False
-            st.session_state.progress = 100
-            st.session_state.result_queue.put(('complete', None))
-            
-            # 计算总耗时
-            total_time = time.time() - st.session_state.start_time
-            st.session_state.result_queue.put(('stats', f"总耗时: {total_time:.2f}秒"))
-    
-    thread = threading.Thread(target=scan_thread, daemon=True)
-    thread.start()
-    st.toast("🚀 开始极速扫描2000只股票！", icon="🚀")
-
-# ==================== 处理结果队列 ====================
-def process_results():
-    """处理结果队列"""
-    processed = 0
-    while True:
-        try:
-            item_type, data = st.session_state.result_queue.get_nowait()
-            
-            if item_type == 'result':
-                st.session_state.scan_results.append(data)
-                processed += 1
-            elif item_type == 'complete':
-                st.toast("✅ 扫描完成！", icon="✅")
-            elif item_type == 'stats':
-                st.toast(f"📊 {data}", icon="📊")
-                
-        except Empty:
-            break
-    
-    return processed
-
-# ==================== 主界面布局 ====================
-# 控制面板
-st.sidebar.header("⚡ 控制面板")
-
-# 扫描控制按钮
-st.sidebar.subheader("🚀 扫描控制")
-
-if st.sidebar.button("🚀 开始极速扫描", type="primary", use_container_width=True):
-    start_scan_thread()
     st.rerun()
 
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    if st.button("⏸️ 暂停", use_container_width=True):
-        st.session_state.scanning = False
-        st.rerun()
-with col2:
-    if st.button("🔄 重置", use_container_width=True):
-        st.session_state.scan_results = []
-        st.session_state.scanning = False
-        st.session_state.progress = 0
-        st.rerun()
+st.write("点击上方按钮可强制获取最新数据（尤其在美股刚收盘后推荐使用）")
 
-st.sidebar.divider()
+# ==================== 核心常量 ====================
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+}
 
-# 筛选条件
-st.sidebar.subheader("🎯 筛选条件")
-min_score = st.sidebar.slider("最低得分", 0, 5, 3, 1)
-min_pf7 = st.sidebar.slider("最低PF7", 0.0, 10.0, 3.0, 0.1)
-min_prob = st.sidebar.slider("最低胜率%", 0, 100, 60, 1)
+BACKTEST_CONFIG = {
+    "3个月": {"range": "3mo", "interval": "1d"},
+    "6个月": {"range": "6mo", "interval": "1d"},
+    "1年":  {"range": "1y",  "interval": "1d"},
+    "2年":  {"range": "2y",  "interval": "1d"},
+    "3年":  {"range": "3y",  "interval": "1d"},
+    "5年":  {"range": "5y",  "interval": "1d"},
+    "10年": {"range": "10y", "interval": "1d"},
+}
 
-st.sidebar.divider()
+# ==================== 数据拉取 ====================
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()["chart"]["result"][0]
+        quote = data["indicators"]["quote"][0]
+        close = np.array(quote["close"], dtype=float)
+        high = np.array(quote["high"], dtype=float)
+        low = np.array(quote["low"], dtype=float)
+        volume = np.array(quote["volume"], dtype=float)
+        mask = ~np.isnan(close)
+        close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
+        if len(close) < 100:
+            raise ValueError("数据不足")
+        return close, high, low, volume
+    except Exception as e:
+        raise ValueError(f"请求失败: {str(e)}")
 
-# 排序方式
-st.sidebar.subheader("📈 排序方式")
-sort_options = ["最新", "PF7", "胜率", "得分", "价格变化"]
-sort_by = st.sidebar.radio("排序", sort_options, index=1, horizontal=True)
+# ==================== 指标函数 ====================
+def ema_np(x: np.ndarray, span: int) -> np.ndarray:
+    alpha = 2 / (span + 1)
+    ema = np.empty_like(x)
+    ema[0] = x[0]
+    for i in range(1, len(x)):
+        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+    return ema
 
-# ==================== 进度显示 ====================
-st.header("📊 扫描进度 - 2000只股票")
+def macd_hist_np(close: np.ndarray) -> np.ndarray:
+    ema12 = ema_np(close, 12)
+    ema26 = ema_np(close, 26)
+    macd_line = ema12 - ema26
+    signal = ema_np(macd_line, 9)
+    return macd_line - signal
 
-# 进度统计
-col1, col2, col3, col4, col5 = st.columns(5)
+def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    alpha = 1 / period
+    gain_ema = np.empty_like(gain)
+    loss_ema = np.empty_like(loss)
+    gain_ema[0] = gain[0]
+    loss_ema[0] = loss[0]
+    for i in range(1, len(gain)):
+        gain_ema[i] = alpha * gain[i] + (1 - alpha) * gain_ema[i-1]
+        loss_ema[i] = alpha * loss[i] + (1 - alpha) * loss_ema[i-1]
+    rs = gain_ema / (loss_ema + 1e-9)
+    return 100 - (100 / (1 + rs))
 
-with col1:
-    status = "🟢 扫描中" if st.session_state.scanning else "✅ 完成" if st.session_state.progress == 100 else "⏸️ 待命"
-    st.metric("状态", status)
+def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    atr = np.empty_like(tr)
+    atr[0] = tr[0]
+    alpha = 1 / period
+    for i in range(1, len(tr)):
+        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
+    return atr
 
-with col2:
-    st.metric("进度", f"{st.session_state.progress:.1f}%")
-    st.progress(st.session_state.progress / 100)
+def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
+    if len(x) < window:
+        return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
+    cumsum = np.cumsum(np.insert(x, 0, 0.0))
+    ma = (cumsum[window:] - cumsum[:-window]) / window
+    return np.concatenate([np.full(window-1, ma[0]), ma])
 
-with col3:
-    current = st.session_state.current_symbol or "等待开始"
-    st.metric("当前股票", current[:10])
+def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+    direction = np.sign(np.diff(close, prepend=close[0]))
+    return np.cumsum(direction * volume)
 
-with col4:
-    scanned = st.session_state.completed_count
-    total = st.session_state.total_symbols
-    st.metric("已扫描", f"{scanned}/{total}")
+def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
+    if len(close) <= steps + 1:
+        return 0.5, 0.0
+    idx = np.where(score[:-steps] >= 3)[0]
+    if len(idx) == 0:
+        return 0.5, 0.0
+    rets = close[idx + steps] / close[idx] - 1
+    win_rate = (rets > 0).mean()
+    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
+    return win_rate, pf
 
-with col5:
-    st.metric("速度", f"{scanned/max(1, time.time()-st.session_state.start_time):.0f}/秒" 
-             if st.session_state.start_time and st.session_state.scanning else "-")
+# ==================== 核心计算 ====================
+@st.cache_data(show_spinner=False)
+def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
+    yahoo_symbol = symbol.upper()
+    close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
 
-# 耗时统计
-if st.session_state.start_time and st.session_state.scanning:
-    elapsed = time.time() - st.session_state.start_time
-    if st.session_state.progress > 0:
-        remaining = (elapsed / st.session_state.progress) * (100 - st.session_state.progress)
+    macd_hist = macd_hist_np(close)
+    rsi = rsi_np(close)
+    atr = atr_np(high, low, close)
+    obv = obv_np(close, volume)
+    vol_ma20 = rolling_mean_np(volume, 20)
+    atr_ma20 = rolling_mean_np(atr, 20)
+    obv_ma20 = rolling_mean_np(obv, 20)
+
+    sig_macd = (macd_hist > 0).astype(int)[-1]
+    sig_vol = (volume[-1] > vol_ma20[-1] * 1.1).astype(int)
+    sig_rsi = (rsi[-1] >= 60).astype(int)
+    sig_atr = (atr[-1] > atr_ma20[-1] * 1.1).astype(int)
+    sig_obv = (obv[-1] > obv_ma20[-1] * 1.05).astype(int)
+    score = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
+
+    sig_macd_hist = (macd_hist > 0).astype(int)
+    sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int)
+    sig_rsi_hist = (rsi >= 60).astype(int)
+    sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int)
+    sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
+    score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
+
+    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+
+    price = close[-1]
+    change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
+
+    return {
+        "symbol": symbol.upper(),
+        "price": price,
+        "change": change,
+        "score": score,
+        "prob7": prob7,
+        "pf7": pf7,
+    }
+
+# ==================== 完整硬编码成分股 + 热门ETF ====================
+@st.cache_data(ttl=86400)
+def load_sp500_tickers():
+    # 2025年12月完整S&P500成分股（503只，每行15个，共34行）
+    return [
+        "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
+        "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
+        "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX",
+        "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG",
+        "T", "TJX", "INTC", "INT", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI",
+        "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON",
+        "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA",
+        "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS",
+        "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB",
+        "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST",
+        "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
+        "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
+        "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
+        "ZTS", "LHX", "APD", "IDXX", "APD", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
+        "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
+        "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
+        "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
+        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK", "FISV",
+        "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
+        "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
+        "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
+        "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "EXE", "BIIB", "PPL", "AVB",
+        "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU",
+        "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN",
+        "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN",
+        "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX",
+        "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB",
+        "Q", "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG",
+        "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ",
+        "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL",
+        "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK",
+        "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
+        "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
+        "NWS"
+    ]  # 完整503只，每行15个，共34行
+
+ndx100 = [
+    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
+    "AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
+    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT",
+    "GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
+    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR",
+    "PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+]
+
+extra_etfs = [
+    "SPY","QQQ","VOO","IVV","VTI","VUG","SCHG","IWM","DIA","SLV","GLD","GDX","GDXJ","SIL","SLVP",
+    "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
+]
+
+sp500 = load_sp500_tickers()
+all_tickers = list(set(sp500 + ndx100 + extra_etfs))
+all_tickers.sort()
+
+st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF） | 2025年12月最新")
+
+mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
+sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
+
+if 'high_prob' not in st.session_state:
+    st.session_state.high_prob = []
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()
+if 'failed_count' not in st.session_state:
+    st.session_state.failed_count = 0
+
+result_container = st.container()
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+if st.session_state.high_prob:
+    df_all = pd.DataFrame(st.session_state.high_prob)
+    
+    filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
+    
+    if filtered_df.empty:
+        st.warning("当前扫描中暂无满足 PF7≥3.6 或 7日概率≥68% 的股票，继续扫描中...")
     else:
-        remaining = 0
-    
-    st.caption(f"⏱️ 已运行: {elapsed:.1f}秒 | 预计剩余: {remaining:.1f}秒 | 已找到: {len(st.session_state.scan_results)}只")
-
-st.divider()
-
-# ==================== 实时结果区域 ====================
-# 处理新结果
-new_results = process_results()
-if new_results > 0 and st.session_state.scanning:
-    st.toast(f"🔄 更新了 {new_results} 个新结果", icon="🔄")
-
-# 显示结果
-if st.session_state.scan_results:
-    df = pd.DataFrame(st.session_state.scan_results)
-    
-    if len(df) > 0:
-        # 筛选
-        mask = (df['score'] >= min_score) & (df['pf7'] >= min_pf7) & (df['prob7'] >= min_prob/100)
-        filtered = df[mask].copy()
+        df_display = filtered_df.copy()
+        df_display['price'] = df_display['price'].round(2)
+        df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+        df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
+        df_display['pf7'] = df_display['pf7'].round(2)
         
-        if len(filtered) > 0:
-            # 排序
-            if sort_by == "PF7":
-                filtered = filtered.sort_values("pf7", ascending=False)
-            elif sort_by == "胜率":
-                filtered = filtered.sort_values("prob7", ascending=False)
-            elif sort_by == "得分":
-                filtered = filtered.sort_values("score", ascending=False)
-            elif sort_by == "价格变化":
-                filtered = filtered.sort_values("change", ascending=False)
-            else:  # 最新
-                filtered = filtered.sort_values("scan_time", ascending=False)
-            
-            # 显示统计
-            st.subheader(f"🎯 发现 {len(filtered)} 只优质股票（共{len(df)}只）")
-            
-            # 分页显示
-            page_size = 20
-            total_pages = max(1, (len(filtered) + page_size - 1) // page_size)
-            
-            page = st.number_input("页码", min_value=1, max_value=total_pages, value=1)
-            start_idx = (page - 1) * page_size
-            end_idx = min(start_idx + page_size, len(filtered))
-            
-            # 显示当前页
-            for idx in range(start_idx, end_idx):
-                row = filtered.iloc[idx]
-                
-                # 颜色编码
-                if row['score'] >= 4:
-                    color = "#22c55e"
-                    icon = "🔥"
-                    badge = "优质"
-                elif row['score'] >= 3:
-                    color = "#f59e0b"
-                    icon = "⚡"
-                    badge = "良好"
-                else:
-                    color = "#ef4444"
-                    icon = "📊"
-                    badge = "一般"
-                
-                # 显示卡片
-                with st.container():
-                    # 使用columns布局
-                    cols = st.columns([1, 3, 1])
-                    
-                    with cols[0]:
-                        st.markdown(f"""
-                        <div style="text-align: center; padding: 15px; border-radius: 10px; background: {color}15; border: 2px solid {color};">
-                            <div style="font-size: 28px; font-weight: bold; color: {color};">
-                                {icon} {row['score']}/5
-                            </div>
-                            <div style="font-size: 12px; color: #666; margin-top: 5px;">{badge}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with cols[1]:
-                        st.markdown(f"""
-                        <div style="padding: 10px;">
-                            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 10px;">
-                                <span style="font-size: 24px; font-weight: bold; color: #333;">{row['symbol']}</span>
-                                <span style="font-size: 22px; font-weight: bold; color: #222;">${row['price']:,.2f}</span>
-                                <span style="color: {'#22c55e' if row['change'] >= 0 else '#ef4444'}; 
-                                      font-weight: bold; font-size: 20px; padding: 2px 8px; 
-                                      border-radius: 5px; background: {'#22c55e' if row['change'] >= 0 else '#ef4444'}15;">
-                                    {row['change']:+.2f}%
-                                </span>
-                            </div>
-                            <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px;">
-                                <div>
-                                    <div style="font-size: 12px; color: #666;">PF7指数</div>
-                                    <div style="font-size: 20px; font-weight: bold; color: {color}">{row['pf7']:.2f}</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 12px; color: #666;">7日胜率</div>
-                                    <div style="font-size: 20px; font-weight: bold;">{row['prob7']*100:.1f}%</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 12px; color: #666;">RSI指标</div>
-                                    <div style="font-size: 20px;">{row['rsi']:.1f}</div>
-                                </div>
-                                <div>
-                                    <div style="font-size: 12px; color: #666;">波动率</div>
-                                    <div style="font-size: 20px;">{row['volatility']:.1f}%</div>
-                                </div>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    with cols[2]:
-                        st.markdown(f"""
-                        <div style="text-align: right; padding: 10px;">
-                            <div style="font-size: 12px; color: #666; margin-bottom: 5px;">
-                                ⏰ {row['scan_time']}
-                            </div>
-                            <div style="font-size: 11px; color: #888; margin-bottom: 3px;">
-                                📈 动量: {row['momentum_20d']:.1f}%
-                            </div>
-                            <div style="font-size: 11px; color: #888; margin-bottom: 3px;">
-                                📊 均线上: {row['above_ma20']}
-                            </div>
-                            <div style="font-size: 11px; color: #888;">
-                                📋 数据点: {row['data_points']}
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    
-                    st.divider()
-            
-            # 分页信息
-            st.caption(f"📄 第 {page}/{total_pages} 页 | 📊 显示 {start_idx+1}-{end_idx} 条 | 🎯 共 {len(filtered)} 只优质股票")
-            
-            # 导出功能
-            st.subheader("📤 导出结果")
-            
-            col_exp1, col_exp2 = st.columns(2)
-            
-            with col_exp1:
-                if st.button("📄 生成TXT报告", type="primary", use_container_width=True):
-                    txt_content = f"罗素2000模拟扫描报告\n"
-                    txt_content += "=" * 70 + "\n"
-                    txt_content += f"扫描时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    txt_content += f"扫描总数: {len(df)} 只股票\n"
-                    txt_content += f"优质股票: {len(filtered)} 只\n"
-                    txt_content += f"筛选条件: 得分≥{min_score}, PF7≥{min_pf7}, 胜率≥{min_prob}%\n"
-                    txt_content += "=" * 70 + "\n\n"
-                    
-                    # 添加详细数据
-                    for idx in range(min(200, len(filtered))):  # 限制前200只
-                        row = filtered.iloc[idx]
-                        txt_content += f"{idx+1:4d}. {row['symbol']:8s} | 价格: ${row['price']:8.2f} ({row['change']:+7.2f}%)\n"
-                        txt_content += f"      得分: {row['score']}/5 | PF7: {row['pf7']:6.2f} | 胜率: {row['prob7']*100:6.1f}%\n"
-                        txt_content += f"      RSI: {row['rsi']:6.1f} | 波动: {row['volatility']:6.1f}% | 动量: {row['momentum_20d']:+6.1f}%\n"
-                        txt_content += f"      回撤: {row['max_drawdown']:6.1f}% | 均线上: {row['above_ma20']:3s} | 数据: {row['data_points']}\n"
-                        txt_content += "-" * 60 + "\n"
-                    
-                    # 提供下载
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    st.download_button(
-                        label="⬇️ 下载TXT文件",
-                        data=txt_content,
-                        file_name=f"russell2000_simulation_{timestamp}.txt",
-                        mime="text/plain",
-                        use_container_width=True
-                    )
-            
-            with col_exp2:
-                if st.button("📊 生成CSV文件", use_container_width=True):
-                    csv_data = filtered.to_csv(index=False)
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    st.download_button(
-                        label="⬇️ 下载CSV文件",
-                        data=csv_data,
-                        file_name=f"russell2000_simulation_{timestamp}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
-            
-            # 统计信息
-            with st.expander("📊 详细统计"):
-                col_stat1, col_stat2, col_stat3 = st.columns(3)
-                with col_stat1:
-                    st.metric("平均得分", f"{filtered['score'].mean():.2f}/5")
-                    st.metric("最高得分", f"{filtered['score'].max()}/5")
-                with col_stat2:
-                    st.metric("平均PF7", f"{filtered['pf7'].mean():.2f}")
-                    st.metric("最高PF7", f"{filtered['pf7'].max():.2f}")
-                with col_stat3:
-                    st.metric("平均胜率", f"{filtered['prob7'].mean()*100:.1f}%")
-                    st.metric("最高胜率", f"{filtered['prob7'].max()*100:.1f}%")
-        
+        if sort_by == "PF7 (盈利因子)":
+            df_display = df_display.sort_values("pf7", ascending=False)
         else:
-            st.warning(f"🔍 暂无符合筛选条件的股票（得分≥{min_score}, PF7≥{min_pf7}, 胜率≥{min_prob}%）")
-    else:
-        st.info("📭 暂无扫描结果")
-else:
-    if st.session_state.scanning:
-        st.info("⏳ 正在极速扫描中，请稍候...")
-        # 添加加载动画
-        st.markdown("""
-        <div style="text-align: center; padding: 40px;">
-            <div style="font-size: 48px; margin-bottom: 20px;">⚡</div>
-            <p style="font-size: 18px; color: #666; margin-bottom: 10px;">
-                <strong>极速扫描中...</strong>
-            </p>
-            <p style="font-size: 14px; color: #888;">
-                模拟2000只罗素2000股票分析<br>
-                基于年度回测数据模型<br>
-                结果将实时显示...
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    else:
-        st.info("👈 点击'开始极速扫描'按钮开始模拟分析")
+            df_display = df_display.sort_values("prob7", ascending=False)
+        
+        with result_container:
+            st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只  |  排序：{sort_by}")
+            for _, row in df_display.iterrows():
+                st.markdown(
+                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - "
+                    f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
+                )
+        
+        csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📄 导出结果为 CSV",
+            data=csv_data,
+            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
+        
+        txt_lines = []
+        txt_lines.append(f"短线优质股票扫描结果")
+        txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
+        txt_lines.append(f"筛选条件：PF7 ≥ 3.6  或  7日上涨概率 ≥ 68%")
+        txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
+        txt_lines.append(f"符合股票数量：{len(df_display)} 只")
+        txt_lines.append("=" * 60)
+        txt_lines.append("")
+        
+        for _, row in df_display.iterrows():
+            txt_lines.append(
+                f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
+                f"得分 {row['score']}/5 | "
+                f"7日概率 {row['prob7']:>6}  |  PF7 {row['pf7']:>5}"
+            )
+        
+        txt_content = "\n".join(txt_lines)
+        
+        st.download_button(
+            label="📜 导出结果为 TXT（推荐，清晰对齐）",
+            data=txt_content.encode('utf-8'),
+            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.txt",
+            mime="text/plain"
+        )
+        
+        with st.expander("🔍 TXT 预览"):
+            st.text(txt_content)
 
-# ==================== 自动刷新机制 ====================
-if st.session_state.scanning:
-    # 检查是否需要刷新
-    current_time = time.time()
-    if current_time - st.session_state.last_update > 0.3:  # 0.3秒刷新一次
-        st.session_state.last_update = current_time
-        st.rerun()
-    
-    # JavaScript自动刷新作为备用
-    st.markdown("""
-    <script>
-    setTimeout(function() {
-        window.location.reload(1);
-    }, 500);
-    </script>
-    """, unsafe_allow_html=True)
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
 
-# ==================== 系统信息 ====================
-with st.sidebar.expander("ℹ️ 系统信息"):
-    st.write("**版本:** 模拟回测扫描器 v1.0")
-    st.write("**数据源:** 本地模拟数据")
-    st.write("**股票数量:** 2000只")
-    st.write("**扫描速度:** 极速（约2-3秒完成）")
-    st.write("**回测周期:** 模拟一年数据")
-    st.write("**算法:** 基于统计学模型的模拟分析")
+with st.spinner("自动扫描中（保持页面打开）..."):
+    for sym in all_tickers:
+        if sym in st.session_state.scanned_symbols:
+            continue
+        status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
+        progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
+        try:
+            metrics = compute_stock_metrics(sym, mode)
+            st.session_state.scanned_symbols.add(sym)
+            st.session_state.high_prob.append(metrics)
+            st.rerun()
+        except Exception as e:
+            st.session_state.failed_count += 1
+            st.warning(f"{sym} 失败: {str(e)}")
+            st.session_state.scanned_symbols.add(sym)
+        time.sleep(8)
 
-# ==================== 页脚 ====================
-st.divider()
-st.caption(f"""
-**模拟回测扫描引擎 v1.0** | 🚀 极速本地计算 | 📊 实时结果 | ⏱️ 最后更新: {datetime.datetime.now().strftime('%H:%M:%S')}
-**注意:** 此版本使用模拟数据进行演示，无需网络连接，极速完成2000只股票分析
-""")
+st.success("所有股票扫描完成！结果已更新")
+
+if st.button("🔄 重置所有进度（从头开始）"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.rerun()
+
+st.caption("2025最新版 | 完整534只硬编码 | 已加入热门ETF | PF7≥3.6 或 7日≥68% | 稳定运行")

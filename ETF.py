@@ -8,6 +8,16 @@ from io import StringIO
 st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF 极品短线扫描工具", layout="wide")
 st.title("标普500 + 纳斯达克100 + 热门ETF 短线扫描工具（PF7≥3.6 或 7日≥68%）")
 
+# ── 新增清缓存按钮 ──
+if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
+    st.cache_data.clear()
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.rerun()
+
+st.write("点击上方按钮可强制获取最新数据（尤其在美股刚收盘后推荐使用）")
+
 # ==================== 核心常量 ====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
@@ -24,7 +34,7 @@ BACKTEST_CONFIG = {
 }
 
 # ==================== 数据拉取 ====================
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
     try:
@@ -122,12 +132,22 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     atr_ma20 = rolling_mean_np(atr, 20)
     obv_ma20 = rolling_mean_np(obv, 20)
 
-    sig_macd = (macd_hist > 0).astype(int)[-1]
-    sig_vol = (volume[-1] > vol_ma20[-1] * 1.1).astype(int)
-    sig_rsi = (rsi[-1] >= 60).astype(int)
-    sig_atr = (atr[-1] > atr_ma20[-1] * 1.1).astype(int)
-    sig_obv = (obv[-1] > obv_ma20[-1] * 1.05).astype(int)
-    score = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
+    # 5个指标的具体判断 + 记录详情
+    sig_macd = macd_hist[-1] > 0
+    sig_vol = volume[-1] > vol_ma20[-1] * 1.1
+    sig_rsi = rsi[-1] >= 60
+    sig_atr = atr[-1] > atr_ma20[-1] * 1.1
+    sig_obv = obv[-1] > obv_ma20[-1] * 1.05
+
+    score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
+
+    sig_details = {
+        "MACD>0": sig_macd,
+        "放量": sig_vol,
+        "RSI≥60": sig_rsi,
+        "ATR放大": sig_atr,
+        "OBV上升": sig_obv
+    }
 
     sig_macd_hist = (macd_hist > 0).astype(int)
     sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int)
@@ -148,6 +168,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "score": score,
         "prob7": prob7,
         "pf7": pf7,
+        "sig_details": sig_details
     }
 
 # ==================== 完整硬编码成分股 + 热门ETF ====================
@@ -168,7 +189,7 @@ def load_sp500_tickers():
         "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
         "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
         "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
-        "ZTS", "LHX", "APD", "IDXX", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
+        "ZTS", "LHX", "APD", "IDXX", "APD", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
         "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
         "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
         "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
@@ -189,7 +210,7 @@ def load_sp500_tickers():
         "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
         "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
         "NWS"
-    ]  # 完整503只，每行15个，共34行
+    ]
 
 ndx100 = [
     "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
@@ -206,11 +227,52 @@ extra_etfs = [
     "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
 ]
 
+# 新增：GATE.io 交易量前200币种（基于2026年1月数据，常见top crypto ticker）
+gate_top200 = [
+    "BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
+    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
+    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
+    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
+    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
+    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
+    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
+    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KSM", "LRC", "OSMO", "DASH", "HOT",
+    "ZRO", "CRV", "CELO", "KDA", "ENJ", "BAT", "QTUM", "ELF", "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL",
+    "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP", "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF",
+    "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY", "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC",
+    "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY", "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT",
+    "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP", "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR",
+    "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX", "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP",
+    "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI", "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC",
+    "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT", "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT",
+    "DG"
+]
+
+# 新增：OKX 交易量前200币种（基于2026年1月数据，常见top crypto ticker，部分与Gate重叠）
+okx_top200 = [
+    "BTC", "ETH", "USDT", "SOL", "XRP", "BNB", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
+    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
+    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
+    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
+    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
+    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
+    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
+    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KDA", "ENJ", "BAT", "QTUM", "ELF",
+    "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL", "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP",
+    "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF", "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY",
+    "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC", "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY",
+    "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT", "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP",
+    "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR", "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX",
+    "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP", "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI",
+    "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC", "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT",
+    "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT", "DG"
+]
+
 sp500 = load_sp500_tickers()
-all_tickers = list(set(sp500 + ndx100 + extra_etfs))
+all_tickers = list(set(sp500 + ndx100 + extra_etfs + gate_top200 + okx_top200))
 all_tickers.sort()
 
-st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF） | 2025年12月最新")
+st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF + GATE & OKX top 200 币种） | 2026年1月最新")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
@@ -248,9 +310,19 @@ if st.session_state.high_prob:
         with result_container:
             st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只  |  排序：{sort_by}")
             for _, row in df_display.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                
                 st.markdown(
                     f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
                     f"得分: {row['score']}/5 - "
+                    f"{detail_str} - "
                     f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
                 )
         

@@ -35,7 +35,7 @@ BACKTEST_CONFIG = {
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(3, 6))  # 稳定速度，防限流
+        time.sleep(random.uniform(3, 6))
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=10)
         if df.empty or len(df) < 50:
@@ -49,7 +49,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
         if len(close) < 50:
             return None, None, None, None
         return close, high, low, volume
-    except Exception as e:
+    except Exception:
         return None, None, None, None
 
 # ==================== 指标函数 ====================
@@ -213,7 +213,59 @@ def load_sp500_tickers():
         "NWS"
     ]
 
-# (ndx100, extra_etfs, gate_top200, okx_top200 保持你原来的完整列表，这里省略以节省空间，直接复制你原来的)
+ndx100 = [
+    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
+    "AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
+    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT",
+    "GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
+    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR",
+    "PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+]
+
+extra_etfs = [
+    "SPY","QQQ","VOO","IVV","VTI","VUG","SCHG","IWM","DIA","SLV","GLD","GDX","GDXJ","SIL","SLVP",
+    "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
+]
+
+gate_top200 = [
+    "BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
+    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
+    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
+    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
+    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
+    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
+    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
+    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KSM", "LRC", "OSMO", "DASH", "HOT",
+    "ZRO", "CRV", "CELO", "KDA", "ENJ", "BAT", "QTUM", "ELF", "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL",
+    "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP", "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF",
+    "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY", "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC",
+    "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY", "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT",
+    "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP", "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR",
+    "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX", "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP",
+    "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI", "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC",
+    "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT", "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT",
+    "DG"
+]
+
+okx_top200 = [
+    "BTC", "ETH", "USDT", "SOL", "XRP", "BNB", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
+    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
+    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
+    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
+    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
+    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
+    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
+    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KDA", "ENJ", "BAT", "QTUM", "ELF",
+    "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL", "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP",
+    "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF", "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY",
+    "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC", "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY",
+    "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT", "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP",
+    "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR", "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX",
+    "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP", "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI",
+    "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC", "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT",
+    "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT", "DG"
+]
 
 # 定义加密币集合
 crypto_tickers = list(set(gate_top200 + okx_top200))
@@ -244,11 +296,81 @@ progress_bar = st.progress(0)
 status_text = st.empty()
 
 # ==================== 显示结果 ====================
-# (保持原来的显示逻辑，股票优质 + 加密币全部)
+if st.session_state.high_prob:
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
+    
+    if not df_all.empty:
+        stock_df = df_all[~df_all['is_crypto']]
+        crypto_df = df_all[df_all['is_crypto']]
+        
+        # 股票优质显示
+        stock_filtered = stock_df[(stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)].copy()
+        
+        # 加密币全部显示
+        crypto_all = crypto_df.copy()
+        
+        if not stock_filtered.empty:
+            df_display = stock_filtered.copy()
+            df_display['price'] = df_display['price'].round(2)
+            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df_display['pf7'] = df_display['pf7'].round(2)
+            
+            if sort_by == "PF7 (盈利因子)":
+                df_display = df_display.sort_values("pf7", ascending=False)
+            else:
+                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
+            
+            st.subheader(f"🔹 短线优质股票（PF7≥3.6 或 7日≥68%） 共 {len(df_display)} 只")
+            for _, row in df_display.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                st.markdown(
+                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
+                )
+        
+        if not crypto_all.empty:
+            df_display = crypto_all.copy()
+            df_display['price'] = df_display['price'].round(2)
+            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
+            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df_display['pf7'] = df_display['pf7'].round(2)
+            
+            if sort_by == "PF7 (盈利因子)":
+                df_display = df_display.sort_values("pf7", ascending=False)
+            else:
+                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
+            
+            st.subheader(f"🔹 所有加密币（共 {len(df_display)} 只，有数据的全部显示，不管指标）")
+            for _, row in df_display.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                st.markdown(
+                    f"**{row['symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**"
+                )
+        
+        if stock_filtered.empty and crypto_all.empty:
+            st.warning("当前无任何结果")
 
 st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败/跳过: {st.session_state.failed_count} | 已获取结果: {len(st.session_state.high_prob)}")
 
-# ==================== 扫描逻辑（核心修复：使用scanning标志持续运行） ====================
+# ==================== 扫描逻辑 ====================
 if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
     st.session_state.scanning = True
 
@@ -279,7 +401,7 @@ if st.session_state.scanning and not st.session_state.fully_scanned:
             st.session_state.fully_scanned = True
             st.session_state.scanning = False
             st.success("扫描完成！")
-        st.rerun()  # 每50只rerun，继续下一批
+        st.rerun()
 
 if st.session_state.fully_scanned:
     st.success("已完成全扫描！结果已全部更新")
@@ -292,4 +414,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.scanning = False
     st.rerun()
 
-st.caption("2026年1月持续运行版 | 点击开始后自动每50只一批持续跑完 | 不会停在10或50 | 稳定防卡 | 加密币全显示")
+st.caption("2026年1月最终稳定版 | 点击开始后自动持续跑完 | 加密币全显示 | 每50只刷新一次 | 不会卡住 | 完整列表无省略")

@@ -5,71 +5,67 @@ import time
 import pandas as pd
 import random
 import requests
-import json
-import os
 from io import StringIO
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os
+import json
 
-# ==================== 核心配置与存档机制 ====================
-PROGRESS_FILE = "scan_progress.json"
+st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具", layout="wide")
+st.title("标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具")
 
-def save_progress(scanned_set, results, failed_count):
-    """保存进度到本地文件"""
-    data = {
-        "scanned": list(scanned_set),
-        "results": results,
-        "failed": failed_count
-    }
-    with open(PROGRESS_FILE, "w") as f:
-        json.dump(data, f)
+# ── 持久化进度文件（解决断线/刷新/重启后进度丢失问题） ──
+progress_file = "scan_progress.json"
 
-def load_progress():
-    """从本地文件加载进度"""
-    if os.path.exists(PROGRESS_FILE):
+# 只加载一次进度
+if 'progress_loaded' not in st.session_state:
+    st.session_state.progress_loaded = True
+    if os.path.exists(progress_file):
         try:
-            with open(PROGRESS_FILE, "r") as f:
+            with open(progress_file, "r") as f:
                 data = json.load(f)
-            return set(data["scanned"]), data["results"], data["failed"]
-        except:
-            return set(), [], 0
-    return set(), [], 0
+            st.session_state.high_prob = data.get("high_prob", [])
+            st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
+            st.session_state.failed_count = data.get("failed_count", 0)
+            st.session_state.fully_scanned = data.get("fully_scanned", False)
+            st.success("检测到历史进度，已自动加载（可继续扫描）")
+        except Exception as e:
+            st.warning(f"加载进度失败: {e}，将从头开始")
 
-def clear_progress():
-    """清除本地存档"""
-    if os.path.exists(PROGRESS_FILE):
-        os.remove(PROGRESS_FILE)
+def save_progress():
+    data = {
+        "high_prob": st.session_state.high_prob,
+        "scanned_symbols": list(st.session_state.scanned_symbols),
+        "failed_count": st.session_state.failed_count,
+        "fully_scanned": st.session_state.fully_scanned
+    }
+    try:
+        with open(progress_file, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
 
-# ==================== 页面初始化 ====================
-st.set_page_config(page_title="极速版 - 标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 扫描", layout="wide")
-st.title("⚡ 极速断点续传版 - 短线扫描工具")
-
-# 初始化 Session State (优先读取本地存档)
-saved_scanned, saved_results, saved_failed = load_progress()
-
-if 'high_prob' not in st.session_state:
-    st.session_state.high_prob = saved_results
-if 'scanned_symbols' not in st.session_state:
-    st.session_state.scanned_symbols = saved_scanned
-if 'failed_count' not in st.session_state:
-    st.session_state.failed_count = saved_failed
-if 'fully_scanned' not in st.session_state:
-    st.session_state.fully_scanned = False
-if 'scanning' not in st.session_state:
-    # 如果有存档且没扫完，自动设为 True 以便用户点击继续
-    st.session_state.scanning = False 
-
-# ── 清缓存/重置按钮 ──
-if st.button("🔄 彻底重置（删除存档 + 重新开始）"):
+# ── 清缓存 + 重置按钮（同时清除进度文件） ──
+if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.cache_data.clear()
-    clear_progress() # 删除本地文件
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
     st.session_state.fully_scanned = False
     st.session_state.scanning = False
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
     st.rerun()
 
-st.write("🚀 **极速版说明**：已启用多线程并发。**扫描进度会自动保存到服务器/本地**。如果意外断线或刷新页面，无需担心，再次点击「开始扫描」会瞬间跳过已扫描部分，继续工作。")
+if st.button("🔄 重置所有进度（从头开始）"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+    st.rerun()
+
+st.write("支持完整罗素2000（动态从iShares官网下载最新持仓CSV，约2000只）。点击「开始扫描」一次后会自动持续运行（每100只刷新一次页面，不会停）。低流动性标的会保留并标注⚠️。")
 
 # ==================== 扫描范围选择 ====================
 scan_mode = st.selectbox("选择扫描范围", 
@@ -85,12 +81,15 @@ def load_russell2000_tickers():
         resp.raise_for_status()
         df = pd.read_csv(StringIO(resp.text), skiprows=9)
         if 'Ticker' not in df.columns:
+            st.error("CSV格式变化，使用备用列表")
             return ["IWM"]
         tickers = df['Ticker'].dropna().astype(str).tolist()
         tickers = [t.strip().upper() for t in tickers if t.strip() != '-' and t.strip() != 'TICKER' and len(t.strip()) <= 5 and t.strip().isalnum()]
         tickers = list(set(tickers))
+        st.success(f"成功加载罗素2000最新持仓（{len(tickers)} 只）")
         return tickers
-    except Exception:
+    except Exception as e:
+        st.error(f"加载罗素2000失败: {str(e)}，使用IWM代表")
         return ["IWM"]
 
 # ==================== 核心常量 ====================
@@ -104,13 +103,13 @@ BACKTEST_CONFIG = {
     "10年": {"range": "10y", "interval": "1d"},
 }
 
-# ==================== 数据拉取 (优化版：减少等待) ====================
+# ==================== 数据拉取（轻量delay，稳定提速） ====================
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        # 移除过长的随机等待，利用并发提升速度，仅保留极短间隔防封
-        time.sleep(0.05) 
+        time.sleep(random.uniform(0.15, 0.45))  # 轻量delay，防Yahoo限速，速度仍很快
         ticker = yf.Ticker(yahoo_symbol)
-        df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=10)
+        df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
         if df.empty or len(df) < 50:
             return None, None, None, None
         close = df['Close'].values.astype(float)
@@ -125,7 +124,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     except Exception:
         return None, None, None, None
 
-# ==================== 指标函数 (保持不变) ====================
+# ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -190,7 +189,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     return win_rate, pf
 
 # ==================== 核心计算 ====================
-# 注意：移除了 @st.cache_data，因为多线程下缓存可能导致问题，且我们已经有文件级缓存
+@st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     is_crypto = symbol.upper() in crypto_set
     yahoo_symbol = f"{symbol.upper()}-USD" if is_crypto else symbol.upper()
@@ -253,33 +252,120 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "is_low_liquidity": is_low_liquidity
     }
 
-# ==================== 列表数据 ====================
-sp500 = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL", "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH", "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX", "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG", "T", "TJX", "INTC", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI", "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON", "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA", "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS", "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB", "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST", "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG", "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG", "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX", "ZTS", "LHX", "APD", "IDXX", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO", "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE", "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO", "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG", "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK", "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT", "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG", "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX", "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "BIIB", "PPL", "AVB", "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU", "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN", "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN", "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX", "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB", "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG", "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ", "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL", "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK", "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL", "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW", "NWS"]
-ndx100 = ["ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML","AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA","CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT","GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL","MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR","PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS","TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS","WMT"]
-extra_etfs = ["SPY","QQQ","VOO","IVV","VTI","VUG","SCHG","IWM","DIA","SLV","GLD","GDX","GDXJ","SIL","SLVP","RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"]
-gate_top200 = ["BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH", "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI", "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM", "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS", "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY", "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER", "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KSM", "LRC", "OSMO", "DASH", "HOT", "ZRO", "CRV", "CELO", "KDA", "ENJ", "BAT", "QTUM", "ELF", "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL", "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP", "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF", "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY", "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC", "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY", "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT", "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP", "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR", "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX", "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP", "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI", "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC", "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT", "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT", "DG"]
+# ==================== 完整硬编码成分股 + 热门ETF + 加密币 ====================
+sp500 = [
+    "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
+    "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
+    "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX",
+    "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG",
+    "T", "TJX", "INTC", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI",
+    "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON",
+    "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA",
+    "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS",
+    "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB",
+    "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST",
+    "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
+    "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
+    "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
+    "ZTS", "LHX", "APD", "IDXX", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
+    "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
+    "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
+    "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
+    "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK",
+    "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
+    "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
+    "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
+    "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "BIIB", "PPL", "AVB",
+    "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU",
+    "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN",
+    "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN",
+    "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX",
+    "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB",
+    "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG",
+    "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ",
+    "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL",
+    "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK",
+    "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
+    "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
+    "NWS"
+]
+
+ndx100 = [
+    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
+    "AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
+    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT",
+    "GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
+    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR",
+    "PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS","WMT"
+]
+
+extra_etfs = [
+    "SPY","QQQ","VOO","IVV","VTI","VUG","SCHG","IWM","DIA","SLV","GLD","GDX","GDXJ","SIL","SLVP",
+    "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
+]
+
+gate_top200 = [
+    "BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
+    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
+    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
+    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
+    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
+    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
+    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
+    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KSM", "LRC", "OSMO", "DASH", "HOT",
+    "ZRO", "CRV", "CELO", "KDA", "ENJ", "BAT", "QTUM", "ELF", "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL",
+    "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP", "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF",
+    "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY", "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC",
+    "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY", "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT",
+    "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP", "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR",
+    "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX", "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP",
+    "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI", "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC",
+    "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT", "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT",
+    "DG"
+]
 
 crypto_tickers = list(set(gate_top200))
 crypto_set = set(c.upper() for c in crypto_tickers)
+
 stock_etf_tickers = list(set(sp500 + ndx100 + extra_etfs))
+
 all_tickers = list(set(stock_etf_tickers + crypto_tickers))
 all_tickers.sort()
 
 # 根据选择设置扫描列表
 if scan_mode == "全部":
     tickers_to_scan = all_tickers
+    st.write(f"扫描范围：全部（总计 {len(all_tickers)} 只）")
 elif scan_mode == "只扫币圈":
     tickers_to_scan = crypto_tickers
+    st.write(f"扫描范围：只扫币圈（{len(crypto_tickers)} 只）")
 elif scan_mode == "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)":
     tickers_to_scan = stock_etf_tickers
+    st.write(f"扫描范围：只扫美股大盘（{len(stock_etf_tickers)} 只）")
 elif scan_mode == "只扫罗素2000 (完整~2000只)":
     tickers_to_scan = load_russell2000_tickers()
+    st.write(f"扫描范围：罗素2000（完整 {len(tickers_to_scan)} 只，动态最新）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
+# session_state 初始化
+if 'high_prob' not in st.session_state:
+    st.session_state.high_prob = []
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()
+if 'failed_count' not in st.session_state:
+    st.session_state.failed_count = 0
+if 'fully_scanned' not in st.session_state:
+    st.session_state.fully_scanned = False
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+
 # ==================== 显示结果 ====================
-st.divider()
 if st.session_state.high_prob:
     df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
     
@@ -287,8 +373,10 @@ if st.session_state.high_prob:
         stock_df = df_all[~df_all['is_crypto']].copy()
         crypto_df = df_all[df_all['is_crypto']].copy()
         
+        # 超级优质（单独拎出来）
         super_stock = stock_df[(stock_df['pf7'] > 4.0) & (stock_df['prob7'] > 0.70)].copy()
         normal_stock = stock_df[((stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)) & ~stock_df['symbol'].isin(super_stock['symbol'])].copy()
+        
         crypto_filtered = crypto_df[crypto_df['prob7'] > 0.5].copy()
         
         def format_and_sort(df):
@@ -303,6 +391,7 @@ if st.session_state.high_prob:
                 df = df.sort_values("prob7", ascending=False)
             return df
         
+        # 超级优质股票
         if not super_stock.empty:
             df_s = format_and_sort(super_stock)
             st.subheader(f"🔥 超级优质股票（PF>4 & 7日>70%） 共 {len(df_s)} 只")
@@ -312,6 +401,7 @@ if st.session_state.high_prob:
                 liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(f"**🔥 {row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
+        # 普通优质股票
         if not normal_stock.empty:
             df_n = format_and_sort(normal_stock)
             st.subheader(f"🔹 优质股票 共 {len(df_n)} 只")
@@ -321,6 +411,7 @@ if st.session_state.high_prob:
                 liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(f"**{row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
+        # 优质加密币
         if not crypto_filtered.empty:
             df_c = format_and_sort(crypto_filtered)
             st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_c)} 只")
@@ -329,64 +420,56 @@ if st.session_state.high_prob:
                 detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
                 liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(f"**{row['display_symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
-
-        if super_stock.empty and normal_stock.empty and crypto_filtered.empty:
-            st.info("暂无高分标的，正在继续扫描...")
-
-progress_bar = st.progress(0)
-status_text = st.empty()
-
-# 计算总进度
-total_count = len(tickers_to_scan)
-scanned_count = len(st.session_state.scanned_symbols)
-progress_val = scanned_count / total_count if total_count > 0 else 0
-progress_bar.progress(progress_val)
-status_text.text(f"进度: {scanned_count}/{total_count} | 已发现机会: {len(st.session_state.high_prob)}")
-
-# ==================== 扫描逻辑 (多线程并发版) ====================
-# 检查是否应该开始或继续
-if st.button("🚀 开始/继续全量扫描") or st.session_state.scanning:
-    st.session_state.scanning = True
-    
-    if not st.session_state.fully_scanned:
-        # 找出还未扫描的
-        remaining_tickers = [t for t in tickers_to_scan if t not in st.session_state.scanned_symbols]
         
-        if not remaining_tickers:
+        if super_stock.empty and normal_stock.empty and crypto_filtered.empty:
+            st.warning("当前无任何满足条件的标的")
+
+st.info(f"总扫描标的: {len(tickers_to_scan)} | 已扫描: {len(st.session_state.scanned_symbols)} | 有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
+
+# ==================== 扫描逻辑 ====================
+if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
+    st.session_state.scanning = True
+
+if st.session_state.scanning and not st.session_state.fully_scanned:
+    with st.spinner("扫描进行中（每100只刷新一次页面，速度快且稳定）..."):
+        batch_size = 100
+        processed_in_this_run = 0
+        
+        remaining_tickers = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
+        
+        for sym in remaining_tickers:
+            if processed_in_this_run >= batch_size:
+                break
+                
+            status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols) + processed_in_this_run + 1}/{len(tickers_to_scan)})")
+            progress = (len(st.session_state.scanned_symbols) + processed_in_this_run + 1) / len(tickers_to_scan)
+            progress_bar.progress(progress)
+            
+            try:
+                metrics = compute_stock_metrics(sym, mode)
+                if metrics is not None:
+                    st.session_state.high_prob.append(metrics)
+                else:
+                    st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            except Exception as e:
+                st.warning(f"{sym} 异常: {str(e)}")
+                st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+                
+            processed_in_this_run += 1
+        
+        save_progress()
+        
+        if len(st.session_state.scanned_symbols) >= len(tickers_to_scan):
             st.session_state.fully_scanned = True
             st.session_state.scanning = False
-            st.success("全部扫描完成！")
-            st.rerun()
+            save_progress()
+            st.success("扫描完成！")
         
-        # 批量设置：每次并发处理 20 个，处理完后刷新保存
-        batch_size = 20 
-        current_batch = remaining_tickers[:batch_size]
-        
-        status_text.text(f"🚀 正在并发扫描: {', '.join(current_batch)} ...")
-        
-        # 使用 ThreadPoolExecutor 进行并发请求 (速度核心)
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            future_to_symbol = {executor.submit(compute_stock_metrics, sym, mode): sym for sym in current_batch}
-            
-            for future in as_completed(future_to_symbol):
-                sym = future_to_symbol[future]
-                try:
-                    metrics = future.result()
-                    if metrics is not None:
-                        st.session_state.high_prob.append(metrics)
-                    else:
-                        st.session_state.failed_count += 1
-                except Exception as e:
-                    st.session_state.failed_count += 1
-                
-                # 无论成功失败，都算已扫描
-                st.session_state.scanned_symbols.add(sym)
-
-        # 本批次结束，保存进度到文件
-        save_progress(st.session_state.scanned_symbols, st.session_state.high_prob, st.session_state.failed_count)
-        
-        # 刷新页面继续下一批
         st.rerun()
 
-    else:
-        st.success("✅ 扫描已全部完成！如果想重新扫，请点击上方的「彻底重置」按钮。")
+if st.session_state.fully_scanned:
+    st.success("已完成全扫描！结果已全部更新")
+
+st.caption("2026年1月最终完整版 | 速度稳定提升（轻量delay防封） + 断线自动续扫 | 直接复制运行，无需改动")

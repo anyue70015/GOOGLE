@@ -12,7 +12,7 @@ import json
 st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具", layout="wide")
 st.title("标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具")
 
-# ── 持久化进度文件（解决断线/刷新/重启后进度丢失问题） ──
+# ── 持久化进度文件 ──
 progress_file = "scan_progress.json"
 
 # 只加载一次进度
@@ -43,7 +43,7 @@ def save_progress():
     except:
         pass
 
-# ── 清缓存 + 重置按钮（同时清除进度文件） ──
+# ── 清缓存 + 重置按钮 ──
 if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.cache_data.clear()
     st.session_state.high_prob = []
@@ -103,11 +103,11 @@ BACKTEST_CONFIG = {
     "10年": {"range": "10y", "interval": "1d"},
 }
 
-# ==================== 数据拉取（轻量delay，稳定提速） ====================
+# ==================== 数据拉取 ====================
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(0.15, 0.45))  # 轻量delay，防Yahoo限速，速度仍很快
+        time.sleep(random.uniform(0.15, 0.45))
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
         if df.empty or len(df) < 50:
@@ -252,7 +252,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "is_low_liquidity": is_low_liquidity
     }
 
-# ==================== 完整硬编码成分股 + 热门ETF + 加密币 ====================
+# ==================== 完整成分股列表 ====================
 sp500 = [
     "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
     "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
@@ -350,6 +350,22 @@ elif scan_mode == "只扫罗素2000 (完整~2000只)":
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
+# ==================== 参数变更处理 ====================
+tickers_set = set(tickers_to_scan)
+total = len(tickers_to_scan)
+
+if st.session_state.get("prev_mode") != mode:
+    st.session_state.high_prob = []
+    st.session_state.fully_scanned = False
+    st.info("🔄 回测周期已变更，已清除旧结果（需重新计算）")
+
+if st.session_state.get("prev_scan_mode") != scan_mode:
+    st.session_state.fully_scanned = False
+    st.info("🔄 扫描范围已变更，已重置完成状态")
+
+st.session_state.prev_mode = mode
+st.session_state.prev_scan_mode = scan_mode
+
 # session_state 初始化
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
@@ -362,18 +378,22 @@ if 'fully_scanned' not in st.session_state:
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 
+# ==================== 进度条（严格clamp 0-1） ====================
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# ==================== 显示结果 ====================
+current_completed = len(st.session_state.scanned_symbols.intersection(tickers_set))
+progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
+progress_bar.progress(progress_val)
+
+# ==================== 显示结果（只显示当前范围） ====================
 if st.session_state.high_prob:
-    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in tickers_set])
     
     if not df_all.empty:
         stock_df = df_all[~df_all['is_crypto']].copy()
         crypto_df = df_all[df_all['is_crypto']].copy()
         
-        # 超级优质（单独拎出来）
         super_stock = stock_df[(stock_df['pf7'] > 4.0) & (stock_df['prob7'] > 0.70)].copy()
         normal_stock = stock_df[((stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)) & ~stock_df['symbol'].isin(super_stock['symbol'])].copy()
         
@@ -391,7 +411,6 @@ if st.session_state.high_prob:
                 df = df.sort_values("prob7", ascending=False)
             return df
         
-        # 超级优质股票
         if not super_stock.empty:
             df_s = format_and_sort(super_stock)
             st.subheader(f"🔥 超级优质股票（PF>4 & 7日>70%） 共 {len(df_s)} 只")
@@ -401,7 +420,6 @@ if st.session_state.high_prob:
                 liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(f"**🔥 {row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
-        # 普通优质股票
         if not normal_stock.empty:
             df_n = format_and_sort(normal_stock)
             st.subheader(f"🔹 优质股票 共 {len(df_n)} 只")
@@ -411,7 +429,6 @@ if st.session_state.high_prob:
                 liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(f"**{row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
-        # 优质加密币
         if not crypto_filtered.empty:
             df_c = format_and_sort(crypto_filtered)
             st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_c)} 只")
@@ -422,15 +439,15 @@ if st.session_state.high_prob:
                 st.markdown(f"**{row['display_symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
         if super_stock.empty and normal_stock.empty and crypto_filtered.empty:
-            st.warning("当前无任何满足条件的标的")
+            st.warning("当前无任何满足条件的标的（当前范围）")
 
-st.info(f"总扫描标的: {len(tickers_to_scan)} | 已扫描: {len(st.session_state.scanned_symbols)} | 有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
+st.info(f"当前范围总标的: {total} | 已完成当前范围: {current_completed} | 累计有结果（所有历史）: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-# ==================== 扫描逻辑 ====================
+# ==================== 扫描逻辑（严格防进度条超限） ====================
 if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
     st.session_state.scanning = True
 
-if st.session_state.scanning and not st.session_state.fully_scanned:
+if st.session_state.scanning and current_completed < total:
     with st.spinner("扫描进行中（每100只刷新一次页面，速度快且稳定）..."):
         batch_size = 100
         processed_in_this_run = 0
@@ -440,10 +457,13 @@ if st.session_state.scanning and not st.session_state.fully_scanned:
         for sym in remaining_tickers:
             if processed_in_this_run >= batch_size:
                 break
-                
-            status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols) + processed_in_this_run + 1}/{len(tickers_to_scan)})")
-            progress = (len(st.session_state.scanned_symbols) + processed_in_this_run + 1) / len(tickers_to_scan)
-            progress_bar.progress(progress)
+            
+            # 严格clamp的进度计算（+1是为了显示“正在计算”）
+            anticipated_completed = current_completed + processed_in_this_run + 1
+            progress_val = min(1.0, max(0.0, anticipated_completed / total)) if total > 0 else 0.0
+            
+            status_text.text(f"正在计算 {sym} ({anticipated_completed}/{total})")
+            progress_bar.progress(progress_val)
             
             try:
                 metrics = compute_stock_metrics(sym, mode)
@@ -456,20 +476,24 @@ if st.session_state.scanning and not st.session_state.fully_scanned:
                 st.warning(f"{sym} 异常: {str(e)}")
                 st.session_state.failed_count += 1
                 st.session_state.scanned_symbols.add(sym)
-                
+            
             processed_in_this_run += 1
         
         save_progress()
         
-        if len(st.session_state.scanned_symbols) >= len(tickers_to_scan):
+        # 刷新后重新计算准确进度
+        new_completed = len(st.session_state.scanned_symbols.intersection(tickers_set))
+        accurate_progress = min(1.0, max(0.0, new_completed / total)) if total > 0 else 0.0
+        progress_bar.progress(accurate_progress)
+        
+        if new_completed >= total:
             st.session_state.fully_scanned = True
             st.session_state.scanning = False
-            save_progress()
             st.success("扫描完成！")
         
         st.rerun()
 
-if st.session_state.fully_scanned:
-    st.success("已完成全扫描！结果已全部更新")
+if current_completed >= total:
+    st.success("已完成当前范围全扫描！结果已全部更新")
 
-st.caption("2026年1月最终完整版 | 速度稳定提升（轻量delay防封） + 断线自动续扫 | 直接复制运行，无需改动")
+st.caption("2026年1月最终版 | 彻底解决进度条错误（扫描中途不会>1） + 切换范围/周期智能处理 | 直接复制运行")

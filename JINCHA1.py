@@ -20,29 +20,27 @@ if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.session_state.scanning = False
     st.rerun()
 
-st.write("支持完整罗素2000（动态从iShares官网下载最新持仓CSV，约2000只）。点击「开始扫描」一次后会自动持续运行（每50只刷新一次页面，不会停）。速度约每只1.5-3秒。保持页面打开即可。低流动性标的会保留并标注⚠️。")
+st.write("支持完整罗素2000（动态从iShares官网下载最新持仓CSV，约2000只）。点击「开始扫描」一次后会自动持续运行（每50只刷新一次页面，不会停）。低流动性标的会保留并标注⚠️。")
 
 # ==================== 扫描范围选择 ====================
 scan_mode = st.selectbox("选择扫描范围", 
                          ["全部", "只扫币圈", "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)", "只扫罗素2000 (完整~2000只)"])
 
 # ==================== 动态加载罗素2000 ====================
-@st.cache_data(ttl=86400)  # 每天更新一次
+@st.cache_data(ttl=86400)
 def load_russell2000_tickers():
     url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"}
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(StringIO(resp.text), skiprows=9)
         if 'Ticker' not in df.columns:
-            st.error("CSV格式变化，无法解析Ticker，使用备用列表")
+            st.error("CSV格式变化，使用备用列表")
             return ["IWM"]
         tickers = df['Ticker'].dropna().astype(str).tolist()
         tickers = [t.strip().upper() for t in tickers if t.strip() != '-' and t.strip() != 'TICKER' and len(t.strip()) <= 5 and t.strip().isalnum()]
-        tickers = list(set(tickers))  # 去重
+        tickers = list(set(tickers))
         st.success(f"成功加载罗素2000最新持仓（{len(tickers)} 只）")
         return tickers
     except Exception as e:
@@ -64,7 +62,7 @@ BACKTEST_CONFIG = {
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(0.8, 1.8))  # 缩短sleep加速
+        time.sleep(random.uniform(0.8, 1.8))
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=10)
         if df.empty or len(df) < 50:
@@ -148,7 +146,8 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
 # ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
-    yahoo_symbol = f"{symbol.upper()}-USD" if symbol.upper() in crypto_set else symbol.upper()
+    is_crypto = symbol.upper() in crypto_set
+    yahoo_symbol = f"{symbol.upper()}-USD" if is_crypto else symbol.upper()
     
     close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
     
@@ -191,9 +190,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     price = close[-1]
     change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
 
-    # 新增：近1个月日均交易额（用于标记）
-    # 为了计算，需要重新拉取最近数据（这里简化用全周期近30天近似）
-    # 如果你有更精确需求，可再加 fetch
+    # 近1个月平均日交易额（用于标注）
     avg_daily_dollar_vol_recent = (volume[-30:] * close[-30:]).mean() if len(close) >= 30 else 0
     is_low_liquidity = avg_daily_dollar_vol_recent < 50_000_000
     liquidity_note = " (低流动性⚠️)" if is_low_liquidity else ""
@@ -207,49 +204,47 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "prob7": prob7,
         "pf7": pf7,
         "sig_details": sig_details,
-        "is_crypto": symbol.upper() in crypto_set,
+        "is_crypto": is_crypto,
         "is_low_liquidity": is_low_liquidity
     }
 
-# ==================== 成分股 + ETF + 加密币 ====================
-@st.cache_data(ttl=86400)
-def load_sp500_tickers():
-    return [
-        "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
-        "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
-        "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX",
-        "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG",
-        "T", "TJX", "INTC", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI",
-        "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON",
-        "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA",
-        "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS",
-        "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB",
-        "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST",
-        "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
-        "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
-        "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
-        "ZTS", "LHX", "APD", "IDXX", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
-        "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
-        "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
-        "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
-        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "FISV",
-        "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
-        "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
-        "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
-        "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "BIIB", "PPL", "AVB",
-        "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU",
-        "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN",
-        "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN",
-        "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX",
-        "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB",
-        "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG",
-        "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ",
-        "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL",
-        "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK",
-        "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
-        "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
-        "NWS"
-    ]
+# ==================== 完整硬编码成分股 + 热门ETF + 加密币 ====================
+sp500 = [
+    "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
+    "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
+    "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX",
+    "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG",
+    "T", "TJX", "INTC", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI",
+    "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON",
+    "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA",
+    "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS",
+    "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB",
+    "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST",
+    "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
+    "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
+    "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
+    "ZTS", "LHX", "APD", "IDXX", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
+    "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
+    "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
+    "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
+    "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK",
+    "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
+    "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
+    "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
+    "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "BIIB", "PPL", "AVB",
+    "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU",
+    "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN",
+    "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN",
+    "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX",
+    "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB",
+    "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG",
+    "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ",
+    "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL",
+    "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK",
+    "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
+    "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
+    "NWS"
+]
 
 ndx100 = [
     "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
@@ -258,7 +253,7 @@ ndx100 = [
     "GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
     "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR",
     "PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
-    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS","WMT"
 ]
 
 extra_etfs = [
@@ -289,7 +284,7 @@ gate_top200 = [
 crypto_tickers = list(set(gate_top200))
 crypto_set = set(c.upper() for c in crypto_tickers)
 
-stock_etf_tickers = list(set(load_sp500_tickers() + ndx100 + extra_etfs))
+stock_etf_tickers = list(set(sp500 + ndx100 + extra_etfs))
 
 all_tickers = list(set(stock_etf_tickers + crypto_tickers))
 all_tickers.sort()
@@ -331,111 +326,61 @@ if st.session_state.high_prob:
     df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
     
     if not df_all.empty:
-        stock_df = df_all[~df_all['is_crypto']]
-        crypto_df = df_all[df_all['is_crypto']]
+        stock_df = df_all[~df_all['is_crypto']].copy()
+        crypto_df = df_all[df_all['is_crypto']].copy()
         
-        # 股票优质显示
-        stock_filtered = stock_df[(stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)].copy()
+        # 超级优质（单独拎出来）
+        super_stock = stock_df[(stock_df['pf7'] > 4.0) & (stock_df['prob7'] > 0.70)].copy()
+        normal_stock = stock_df[((stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)) & ~stock_df['symbol'].isin(super_stock['symbol'])].copy()
         
-        # 加密币显示7日概率 > 50%
         crypto_filtered = crypto_df[crypto_df['prob7'] > 0.5].copy()
         
-        # 优质股票单独拎出来（超级优质）
-        super_stock = stock_filtered[(stock_filtered['pf7'] > 4.0) & (stock_filtered['prob7'] > 0.70)].copy()
-        normal_stock = stock_filtered[~stock_filtered['symbol'].isin(super_stock['symbol'])].copy()
+        def format_and_sort(df):
+            df = df.copy()
+            df['price'] = df['price'].round(2)
+            df['change'] = df['change'].apply(lambda x: f"{x:+.2f}%")
+            df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df['pf7'] = df['pf7'].round(2)
+            if sort_by == "PF7 (盈利因子)":
+                df = df.sort_values("pf7", ascending=False)
+            else:
+                df = df.sort_values("prob7", ascending=False)
+            return df
         
+        # 超级优质股票
         if not super_stock.empty:
-            df_display = super_stock.copy()
-            df_display['price'] = df_display['price'].round(2)
-            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
-            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
-            df_display['pf7'] = df_display['pf7'].round(2)
-            
-            if sort_by == "PF7 (盈利因子)":
-                df_display = df_display.sort_values("pf7", ascending=False)
-            else:
-                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
-            
-            st.subheader(f"🔥 超级优质股票（PF7>4 & 7日>70%） 共 {len(df_display)} 只")
-            for _, row in df_display.iterrows():
+            df_s = format_and_sort(super_stock)
+            st.subheader(f"🔥 超级优质股票（PF>4 & 7日>70%） 共 {len(df_s)} 只")
+            for _, row in df_s.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([
-                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
-                    f"放量: {'是' if details['放量'] else '否'}",
-                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
-                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
-                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
-                ])
-                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row.get('is_low_liquidity', False) else ""
-                st.markdown(
-                    f"**🔥 {row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
-                    f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**{liquidity_warning}"
-                )
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+                st.markdown(f"**🔥 {row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
+        # 普通优质股票
         if not normal_stock.empty:
-            df_display = normal_stock.copy()
-            df_display['price'] = df_display['price'].round(2)
-            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
-            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
-            df_display['pf7'] = df_display['pf7'].round(2)
-            
-            if sort_by == "PF7 (盈利因子)":
-                df_display = df_display.sort_values("pf7", ascending=False)
-            else:
-                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
-            
-            st.subheader(f"🔹 优质股票（PF7≥3.6 或 7日≥68%） 共 {len(df_display)} 只")
-            for _, row in df_display.iterrows():
+            df_n = format_and_sort(normal_stock)
+            st.subheader(f"🔹 优质股票 共 {len(df_n)} 只")
+            for _, row in df_n.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([
-                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
-                    f"放量: {'是' if details['放量'] else '否'}",
-                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
-                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
-                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
-                ])
-                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row.get('is_low_liquidity', False) else ""
-                st.markdown(
-                    f"**{row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
-                    f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**{liquidity_warning}"
-                )
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+                st.markdown(f"**{row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
-        # 加密部分
+        # 优质加密币
         if not crypto_filtered.empty:
-            df_display = crypto_filtered.copy()
-            df_display['price'] = df_display['price'].round(2)
-            df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
-            df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
-            df_display['pf7'] = df_display['pf7'].round(2)
-            
-            if sort_by == "PF7 (盈利因子)":
-                df_display = df_display.sort_values("pf7", ascending=False)
-            else:
-                df_display = df_display.sort_values("prob7", ascending=False, key=lambda x: x.str.rstrip('%').astype(float))
-            
-            st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_display)} 只")
-            for _, row in df_display.iterrows():
+            df_c = format_and_sort(crypto_filtered)
+            st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_c)} 只")
+            for _, row in df_c.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([
-                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
-                    f"放量: {'是' if details['放量'] else '否'}",
-                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
-                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
-                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
-                ])
-                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row.get('is_low_liquidity', False) else ""
-                st.markdown(
-                    f"**{row['display_symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
-                    f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7']} | PF7: {row['pf7']}**{liquidity_warning}"
-                )
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+                st.markdown(f"**{row['display_symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
         
-        if stock_filtered.empty and crypto_filtered.empty:
+        if super_stock.empty and normal_stock.empty and crypto_filtered.empty:
             st.warning("当前无任何满足条件的标的")
 
-st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(tickers_to_scan)} | 失败/跳过: {st.session_state.failed_count} | 已获取结果: {len(st.session_state.high_prob)}")
+st.info(f"总扫描标的: {len(tickers_to_scan)} | 已扫描: {len(st.session_state.scanned_symbols)} | 有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
 # ==================== 扫描逻辑 ====================
 if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
@@ -454,10 +399,10 @@ if st.session_state.scanning and not st.session_state.fully_scanned:
             progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(tickers_to_scan))
             try:
                 metrics = compute_stock_metrics(sym, mode)
-                if metrics is None:
-                    st.session_state.failed_count += 1
-                else:
+                if metrics is not None:
                     st.session_state.high_prob.append(metrics)
+                else:
+                    st.session_state.failed_count += 1
                 st.session_state.scanned_symbols.add(sym)
             except Exception as e:
                 st.warning(f"{sym} 异常: {str(e)}")
@@ -481,4 +426,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.scanning = False
     st.rerun()
 
-st.caption("2026年1月完整最终版 | 低流动性保留+标注⚠️ | 优质单独拎出 | 直接复制使用")
+st.caption("2026年1月最终完整版 | 低流动性保留+标注⚠️ | 超级优质单独拎出 | 直接复制运行，无需改动")

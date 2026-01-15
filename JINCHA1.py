@@ -15,7 +15,7 @@ import threading
 st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具", layout="wide")
 st.title("标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具")
 
-# 清缓存按钮
+# ── 清缓存按钮 ──
 if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.cache_data.clear()
     st.session_state.high_prob = []
@@ -25,34 +25,36 @@ if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.session_state.scanning = False
     st.rerun()
 
-st.write("支持完整罗素2000（动态加载）。并发多线程加速。流动性过滤：**近1个月日均交易额 < 5000万美元**。")
+st.write("支持完整罗素2000（动态从iShares官网下载最新持仓CSV，约2000只）。点击「开始扫描」一次后会自动持续运行（并发多线程加速）。速度视网络和Yahoo限流而定，建议max_workers=8~12。流动性低于5000万美元/日会保留，但标注 **(低流动性⚠️)**。")
 
-# 扫描范围选择
+# ==================== 扫描范围选择 ====================
 scan_mode = st.selectbox("选择扫描范围", 
                          ["全部", "只扫币圈", "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)", "只扫罗素2000 (完整~2000只)"])
 
-# 动态加载罗素2000
-@st.cache_data(ttl=86400)
+# ==================== 动态加载罗素2000 ====================
+@st.cache_data(ttl=86400)  # 每天更新一次
 def load_russell2000_tickers():
     url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         df = pd.read_csv(StringIO(resp.text), skiprows=9)
         if 'Ticker' not in df.columns:
-            st.error("CSV格式变化，使用备用")
+            st.error("CSV格式变化，无法解析Ticker，使用备用列表")
             return ["IWM"]
         tickers = df['Ticker'].dropna().astype(str).tolist()
         tickers = [t.strip().upper() for t in tickers if t.strip() != '-' and t.strip() != 'TICKER' and len(t.strip()) <= 5 and t.strip().isalnum()]
-        tickers = list(set(tickers))
-        st.success(f"罗素2000加载成功：{len(tickers)} 只")
+        tickers = list(set(tickers))  # 去重
+        st.success(f"成功加载罗素2000最新持仓（{len(tickers)} 只）")
         return tickers
     except Exception as e:
-        st.error(f"加载失败: {e}，使用IWM")
+        st.error(f"加载罗素2000失败: {str(e)}，使用IWM代表")
         return ["IWM"]
 
-# 回测周期配置
+# ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
     "3个月": {"days": 90},
     "6个月": {"days": 180},
@@ -63,26 +65,27 @@ BACKTEST_CONFIG = {
     "10年": {"days": 3650},
 }
 
-# 数据拉取（加重试 + 缩短sleep）
+# ==================== 数据拉取（加重试） ====================
 @retry(
     stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=1, min=3, max=45),
+    wait=wait_exponential(multiplier=1, min=4, max=60),
     retry=retry_if_exception_type((requests.exceptions.RequestException, Exception)),
     reraise=True
 )
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_long_history(yahoo_symbol: str):
     try:
-        time.sleep(random.uniform(0.6, 1.8))  # 加速设置
+        time.sleep(random.uniform(0.6, 1.8))  # 并发后sleep缩短
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period="5y", interval="1d", auto_adjust=True, prepost=False, timeout=15)
         if df.empty or len(df) < 100:
             return None
-        return df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
+        df = df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
+        return df
     except Exception:
         return None
 
-# 指标函数（不变）
+# ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -146,7 +149,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
     return win_rate, pf
 
-# 核心计算（流动性过滤：近1个月）
+# ==================== 核心计算（关键改动：低流动性保留 + 标记） ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     is_crypto = symbol.upper() in crypto_set
@@ -167,13 +170,11 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     low = df['Low'].values.astype(float)
     volume = df['Volume'].values.astype(float)
     
-    # 近1个月平均日交易额
+    # 近1个月平均日交易额（用于标记，不丢弃）
     recent_df = df_long.tail(30)
     if len(recent_df) < 15:
         return None
     avg_daily_dollar_vol_recent = (recent_df['Volume'] * recent_df['Close']).mean()
-    if avg_daily_dollar_vol_recent < 50_000_000:
-        return None
     
     macd_hist = macd_hist_np(close)
     rsi = rsi_np(close)
@@ -211,18 +212,26 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     price = close[-1]
     change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
 
+    # 低流动性标记
+    is_low_liquidity = avg_daily_dollar_vol_recent < 50_000_000
+    liquidity_note = " (低流动性⚠️)" if is_low_liquidity else ""
+    display_symbol = symbol.upper() + liquidity_note
+
     return {
         "symbol": symbol.upper(),
+        "display_symbol": display_symbol,
         "price": price,
         "change": change,
         "score": score,
         "prob7": prob7,
         "pf7": pf7,
         "sig_details": sig_details,
-        "is_crypto": is_crypto
+        "is_crypto": is_crypto,
+        "is_low_liquidity": is_low_liquidity,
+        "avg_daily_dollar_vol_recent": avg_daily_dollar_vol_recent
     }
 
-# 成分股列表
+# ==================== 完整硬编码成分股 + 热门ETF + 加密币 ====================
 sp500 = [
     "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
     "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
@@ -301,39 +310,39 @@ stock_etf_tickers = list(set(sp500 + ndx100 + extra_etfs))
 all_tickers = list(set(stock_etf_tickers + crypto_tickers))
 all_tickers.sort()
 
-# 设置扫描列表
+# 根据选择设置扫描列表
 if scan_mode == "全部":
     tickers_to_scan = all_tickers
-    st.write(f"扫描范围：全部（{len(all_tickers)} 只）")
+    st.write(f"扫描范围：全部（总计 {len(all_tickers)} 只）")
 elif scan_mode == "只扫币圈":
     tickers_to_scan = crypto_tickers
-    st.write(f"扫描范围：币圈（{len(crypto_tickers)} 只）")
+    st.write(f"扫描范围：只扫币圈（{len(crypto_tickers)} 只）")
 elif scan_mode == "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)":
     tickers_to_scan = stock_etf_tickers
-    st.write(f"扫描范围：美股大盘（{len(stock_etf_tickers)} 只）")
+    st.write(f"扫描范围：只扫美股大盘（{len(stock_etf_tickers)} 只）")
 elif scan_mode == "只扫罗素2000 (完整~2000只)":
     tickers_to_scan = load_russell2000_tickers()
-    st.write(f"扫描范围：罗素2000（{len(tickers_to_scan)} 只）")
+    st.write(f"扫描范围：罗素2000（完整 {len(tickers_to_scan)} 只，动态最新）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
-sort_by = st.selectbox("排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
+sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-# session_state
-for k in ['high_prob', 'scanned_symbols', 'failed_count', 'fully_scanned', 'scanning']:
-    if k not in st.session_state:
-        if k == 'high_prob':
-            st.session_state[k] = []
-        elif k == 'scanned_symbols':
-            st.session_state[k] = set()
-        elif k == 'failed_count':
-            st.session_state[k] = 0
-        else:
-            st.session_state[k] = False
+# session_state 初始化
+if 'high_prob' not in st.session_state:
+    st.session_state.high_prob = []
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()
+if 'failed_count' not in st.session_state:
+    st.session_state.failed_count = 0
+if 'fully_scanned' not in st.session_state:
+    st.session_state.fully_scanned = False
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
 
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# 显示结果
+# ==================== 显示结果 ====================
 if st.session_state.high_prob:
     df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
     
@@ -359,98 +368,133 @@ if st.session_state.high_prob:
                 df = df.sort_values("prob7", ascending=False)
             return df
         
+        # 显示超级股票
         if not super_stock.empty:
-            df_s = format_and_sort(super_stock)
-            st.subheader(f"🔥 超级优质股票（PF>4 & 7日>70%） 共 {len(df_s)} 只")
-            for _, row in df_s.iterrows():
+            df_super_s = format_and_sort(super_stock)
+            st.subheader(f"🔥 超级优质股票（PF>4 & 7日概率>70%） 共 {len(df_super_s)} 只")
+            for _, row in df_super_s.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                symbol_display = row['display_symbol']
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(
-                    f"**🔥 {row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"**🔥 {symbol_display}** - 价格: ${row['price']:.2f} ({row['change']}) - "
                     f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}"
                 )
         
+        # 普通股票
         if not normal_stock.empty:
-            df_n = format_and_sort(normal_stock)
-            st.subheader(f"🔹 优质股票（PF≥3.6 或 7日≥68%） 共 {len(df_n)} 只")
-            for _, row in df_n.iterrows():
+            df_normal_s = format_and_sort(normal_stock)
+            st.subheader(f"🔹 优质股票（PF≥3.6 或 7日≥68%） 共 {len(df_normal_s)} 只")
+            for _, row in df_normal_s.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                symbol_display = row['display_symbol']
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(
-                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"**{symbol_display}** - 价格: ${row['price']:.2f} ({row['change']}) - "
                     f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}"
                 )
         
+        # 超级加密
         if not super_crypto.empty:
-            df_sc = format_and_sort(super_crypto)
-            st.subheader(f"🔥 超级优质加密币（PF>4 & 7日>70%） 共 {len(df_sc)} 只")
-            for _, row in df_sc.iterrows():
+            df_super_c = format_and_sort(super_crypto)
+            st.subheader(f"🔥 超级优质加密币（PF>4 & 7日概率>70%） 共 {len(df_super_c)} 只")
+            for _, row in df_super_c.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                symbol_display = row['display_symbol']
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(
-                    f"**🔥 {row['symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"**🔥 {symbol_display} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
                     f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}"
                 )
         
+        # 普通加密
         if not normal_crypto.empty:
-            df_nc = format_and_sort(normal_crypto)
-            st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_nc)} 只")
-            for _, row in df_nc.iterrows():
+            df_normal_c = format_and_sort(normal_crypto)
+            st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_normal_c)} 只")
+            for _, row in df_normal_c.iterrows():
                 details = row['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                detail_str = " | ".join([
+                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
+                    f"放量: {'是' if details['放量'] else '否'}",
+                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
+                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
+                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
+                ])
+                symbol_display = row['display_symbol']
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
                 st.markdown(
-                    f"**{row['symbol']} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"**{symbol_display} (加密币)** - 价格: ${row['price']:.2f} ({row['change']}) - "
                     f"得分: {row['score']}/5 - {detail_str} - "
-                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}"
                 )
         
         if super_stock.empty and normal_stock.empty and super_crypto.empty and normal_crypto.empty:
-            st.warning("当前无任何满足条件的标的")
+            st.warning("当前无任何满足条件的标的（包括低流动性）")
 
 st.info(f"总扫描标的: {len(tickers_to_scan)} | 已扫描: {len(st.session_state.scanned_symbols)} | 通过流动性过滤并有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-# 并发扫描 - 方案A（使用 futures + queue + lock 计数，避免 nonlocal 语法错误）
-if st.button("🚀 开始/继续扫描"):
+# ==================== 并发扫描逻辑（方案A） ====================
+if st.button("🚀 开始/继续并发扫描（点击后自动持续运行）"):
     st.session_state.scanning = True
 
 if st.session_state.scanning and not st.session_state.fully_scanned:
-    with st.spinner("并发扫描中（近1个月流动性过滤 + 加速设置）..."):
-        remaining = [s for s in tickers_to_scan if s not in st.session_state.scanned_symbols]
+    with st.spinner("并发扫描进行中（多线程，每批处理中...）"):
+        remaining = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
         if not remaining:
             st.session_state.fully_scanned = True
             st.session_state.scanning = False
             st.success("扫描完成！")
             st.rerun()
 
-        batch = remaining[:250]
-        q = Queue()
-
+        batch = remaining[:250]  # 每轮并发上限
+        results_queue = Queue()
+        processed = [0]  # 用list包装计数器
         lock = threading.Lock()
-        processed = [0]  # 用 list 包装，实现可变计数器（避免 nonlocal 问题）
 
-        def task(sym):
+        def worker(sym):
             try:
-                m = compute_stock_metrics(sym, mode)
-                q.put((sym, m))
-            except Exception:
-                q.put((sym, None))
+                metrics = compute_stock_metrics(sym, mode)
+                results_queue.put((sym, metrics))
+            except Exception as e:
+                results_queue.put((sym, None))
             finally:
                 with lock:
                     processed[0] += 1
                     if processed[0] % 20 == 0:
                         progress_bar.progress(len(st.session_state.scanned_symbols) / len(tickers_to_scan))
-                        status_text.text(f"进度：{len(st.session_state.scanned_symbols)} / {len(tickers_to_scan)}")
+                        status_text.text(f"正在处理 {processed[0]} / {len(batch)} (总进度 {len(st.session_state.scanned_symbols)} / {len(tickers_to_scan)})")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-            futures = [executor.submit(task, sym) for sym in batch]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:  # 12是平衡值，可调
+            futures = [executor.submit(worker, sym) for sym in batch]
 
             done_count = 0
             while done_count < len(batch):
                 try:
-                    sym, metrics = q.get(timeout=1.2)
+                    sym, metrics = results_queue.get(timeout=1.5)
                     st.session_state.scanned_symbols.add(sym)
                     if metrics is not None:
                         st.session_state.high_prob.append(metrics)
@@ -464,13 +508,13 @@ if st.session_state.scanning and not st.session_state.fully_scanned:
                     st.rerun()
 
         progress_bar.progress(len(st.session_state.scanned_symbols) / len(tickers_to_scan))
-        status_text.text(f"本批完成 → 已扫描 {len(st.session_state.scanned_symbols)} / {len(tickers_to_scan)}")
+        status_text.text(f"批次完成 → 已扫描 {len(st.session_state.scanned_symbols)} / {len(tickers_to_scan)}")
         st.rerun()
 
 if st.session_state.fully_scanned:
-    st.success("扫描全部完成")
+    st.success("已完成全扫描！结果已全部更新")
 
-if st.button("重置进度"):
+if st.button("🔄 重置所有进度（从头开始）"):
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
@@ -478,4 +522,4 @@ if st.button("重置进度"):
     st.session_state.scanning = False
     st.rerun()
 
-st.caption("2026-01-15 方案A 完整版 | 近1个月流动性过滤 | 并发15线程 + 缩短sleep | 直接运行")
+st.caption("2026年1月完整最终版 | 低流动性保留+标注⚠️ | 并发加速 | 直接复制使用")

@@ -1,1055 +1,452 @@
 import streamlit as st
-import pandas as pd
+import yfinance as yf
 import numpy as np
 import time
-import json
-from datetime import datetime, timedelta
-import warnings
-import sys
+import pandas as pd
+import random
+import requests
+from io import StringIO
 
-warnings.filterwarnings('ignore')
+st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具", layout="wide")
+st.title("标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具")
 
-# 设置页面配置为第一行
-st.set_page_config(
-    page_title="加密货币智能扫描器",
-    page_icon="🚀",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# 清缓存按钮
+if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
+    st.cache_data.clear()
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    st.rerun()
 
-# 尝试导入ccxt
-def setup_exchange():
-    """设置交易所连接"""
+st.write("支持完整罗素2000（动态从iShares官网下载最新持仓CSV，约2000只）。点击「开始扫描」一次后会自动持续运行（每50只刷新一次页面，不会停）。速度约每只1.5-3秒。保持页面打开即可。")
+
+# 扫描范围选择
+scan_mode = st.selectbox("选择扫描范围", 
+                         ["全部", "只扫币圈", "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)", "只扫罗素2000 (完整~2000只)"])
+
+# 动态加载罗素2000
+@st.cache_data(ttl=86400)
+def load_russell2000_tickers():
+    url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"}
     try:
-        import ccxt
-        
-        # 交易所配置（去掉代理）
-        exchanges_config = {
-            'okx': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000
-            },
-            'gateio': {
-                'enableRateLimit': True,
-                'options': {'defaultType': 'spot'},
-                'timeout': 30000
-            }
-        }
-        
-        return ccxt, exchanges_config, True
-    except ImportError:
-        return None, {}, False
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        df = pd.read_csv(StringIO(resp.text), skiprows=9)
+        if 'Ticker' not in df.columns:
+            st.error("CSV格式变化，无法解析，使用备用列表")
+            return ["IWM"]
+        tickers = df['Ticker'].dropna().astype(str).tolist()
+        tickers = [t.strip().upper() for t in tickers if t.strip() != '-' and t.strip() != 'TICKER' and len(t.strip()) <= 5 and t.strip().isalnum()]
+        tickers = list(set(tickers))
+        st.success(f"成功加载罗素2000最新持仓（{len(tickers)} 只）")
+        return tickers
+    except Exception as e:
+        st.error(f"加载罗素2000失败: {str(e)}，使用IWM代表")
+        return ["IWM"]
 
-# 获取模块
-ccxt_module, exchanges_config, ccxt_available = setup_exchange()
+# 核心常量
+BACKTEST_CONFIG = {
+    "3个月": {"range": "3mo", "days": 90},
+    "6个月": {"range": "6mo", "days": 180},
+    "1年":  {"range": "1y",  "days": 365},
+    "2年":  {"range": "2y",  "days": 730},
+    "3年":  {"range": "3y",  "days": 1095},
+    "5年":  {"range": "5y",  "days": 1825},
+    "10年": {"range": "10y", "days": 3650},
+}
 
-# 离线演示数据
-DEMO_SYMBOLS = [
-    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT",
-    "ADA/USDT", "DOGE/USDT", "DOT/USDT", "MATIC/USDT", "LTC/USDT",
-    "AVAX/USDT", "LINK/USDT", "ATOM/USDT", "UNI/USDT", "XLM/USDT",
-    "ALGO/USDT", "VET/USDT", "THETA/USDT", "FIL/USDT", "TRX/USDT",
-    "ETC/USDT", "XMR/USDT", "EOS/USDT", "AAVE/USDT", "AXS/USDT",
-    "SAND/USDT", "MANA/USDT", "GRT/USDT", "BAT/USDT", "ENJ/USDT"
-]
-
-DEMO_RESULTS = [
-    {"symbol": "BTC/USDT", "total_return": 25.8, "win_rate": 58.2, "volatility": 2.1, "sharpe": 1.8},
-    {"symbol": "ETH/USDT", "total_return": 32.5, "win_rate": 55.4, "volatility": 3.2, "sharpe": 1.5},
-    {"symbol": "SOL/USDT", "total_return": 180.3, "win_rate": 62.1, "volatility": 8.5, "sharpe": 2.1},
-    {"symbol": "BNB/USDT", "total_return": 45.2, "win_rate": 53.7, "volatility": 2.8, "sharpe": 1.6},
-    {"symbol": "ADA/USDT", "total_return": -12.3, "win_rate": 48.5, "volatility": 5.4, "sharpe": -0.3},
-    {"symbol": "XRP/USDT", "total_return": 18.7, "win_rate": 51.2, "volatility": 4.2, "sharpe": 0.8},
-    {"symbol": "DOGE/USDT", "total_return": 65.4, "win_rate": 57.8, "volatility": 12.3, "sharpe": 1.2},
-    {"symbol": "DOT/USDT", "total_return": 28.9, "win_rate": 52.4, "volatility": 4.8, "sharpe": 1.1},
-    {"symbol": "MATIC/USDT", "total_return": 42.1, "win_rate": 56.3, "volatility": 5.2, "sharpe": 1.4},
-    {"symbol": "AVAX/USDT", "total_return": 95.7, "win_rate": 60.2, "volatility": 7.8, "sharpe": 1.9},
-    {"symbol": "LINK/USDT", "total_return": 38.4, "win_rate": 54.6, "volatility": 4.5, "sharpe": 1.3},
-    {"symbol": "LTC/USDT", "total_return": 15.2, "win_rate": 50.8, "volatility": 3.8, "sharpe": 0.7},
-    {"symbol": "UNI/USDT", "total_return": 22.7, "win_rate": 52.1, "volatility": 4.1, "sharpe": 0.9},
-    {"symbol": "ATOM/USDT", "total_return": 31.8, "win_rate": 54.9, "volatility": 3.9, "sharpe": 1.2},
-    {"symbol": "XLM/USDT", "total_return": 8.5, "win_rate": 49.3, "volatility": 4.6, "sharpe": 0.4}
-]
-
-class CryptoScanner:
-    def __init__(self, exchange_id='okx'):
-        self.exchange_id = exchange_id
-        self.exchange = None
-        self.mode = "offline"  # 默认为离线模式
-        
-        if ccxt_available:
-            try:
-                # 尝试连接交易所
-                exchange_config = exchanges_config.get(exchange_id, exchanges_config['okx'])
-                self.exchange = getattr(ccxt_module, exchange_id)(exchange_config)
-                
-                # 测试连接
-                try:
-                    self.exchange.load_markets()
-                    self.mode = "online"
-                    st.sidebar.success(f"✅ {exchange_id.upper()} 连接成功")
-                except Exception as e:
-                    st.sidebar.warning(f"⚠️ {exchange_id.upper()} 连接失败，使用演示模式")
-                    self.mode = "offline"
-                    
-            except Exception as e:
-                st.sidebar.error(f"❌ 交易所初始化失败: {str(e)[:100]}")
-                self.mode = "offline"
-    
-    def fetch_symbols(self, quote_currency='USDT', limit=50):
-        """获取交易对列表"""
-        if self.mode == "offline":
-            # 返回演示数据
-            symbols = [s for s in DEMO_SYMBOLS if s.endswith(f'/{quote_currency}')]
-            return symbols[:limit]
-        
-        try:
-            # 在线获取
-            self.exchange.load_markets(reload=True)
-            symbols = []
-            count = 0
-            
-            # 获取所有符合条件的交易对
-            for symbol in self.exchange.symbols:
-                if symbol.endswith(f'/{quote_currency}'):
-                    # 过滤掉一些不活跃的交易对
-                    market = self.exchange.markets[symbol]
-                    if market.get('active', True):
-                        symbols.append(symbol)
-                        count += 1
-                        if count >= limit:
-                            break
-            
-            if not symbols:
-                st.warning(f"未找到 {quote_currency} 交易对，使用演示数据")
-                symbols = [s for s in DEMO_SYMBOLS if s.endswith(f'/{quote_currency}')][:limit]
-            
-            return symbols
-            
-        except Exception as e:
-            error_msg = str(e)
-            st.warning(f"在线获取失败，使用演示数据: {error_msg[:100]}")
-            
-            # 尝试切换到另一个交易所
-            alt_exchange = 'gateio' if self.exchange_id == 'okx' else 'okx'
-            st.info(f"尝试切换到{alt_exchange.upper()}交易所...")
-            try:
-                alt_config = exchanges_config[alt_exchange]
-                alt_exchange_obj = getattr(ccxt_module, alt_exchange)(alt_config)
-                alt_exchange_obj.load_markets()
-                
-                symbols = []
-                count = 0
-                for symbol in alt_exchange_obj.symbols:
-                    if symbol.endswith(f'/{quote_currency}'):
-                        symbols.append(symbol)
-                        count += 1
-                        if count >= limit:
-                            break
-                
-                if symbols:
-                    st.success(f"{alt_exchange.upper()}交易所连接成功！")
-                    self.exchange = alt_exchange_obj
-                    self.exchange_id = alt_exchange
-                    self.mode = "online"
-                    return symbols
-                    
-            except Exception as alt_error:
-                st.warning(f"{alt_exchange.upper()}也连接失败: {str(alt_error)[:100]}")
-            
-            # 都失败了，返回演示数据
-            symbols = [s for s in DEMO_SYMBOLS if s.endswith(f'/{quote_currency}')]
-            return symbols[:limit]
-    
-    def simple_backtest(self, symbol, days=180):
-        """执行回测"""
-        if self.mode == "offline":
-            # 生成模拟回测结果
-            time.sleep(0.02)  # 模拟延迟
-            
-            # 查找演示数据中的结果
-            for result in DEMO_RESULTS:
-                if result['symbol'] == symbol:
-                    result_copy = result.copy()
-                    result_copy.update({
-                        'max_price': np.random.uniform(100, 5000),
-                        'min_price': np.random.uniform(1, 100),
-                        'data_points': np.random.randint(100, 200),
-                        'num_trades': np.random.randint(5, 25),
-                        'volume_change': np.random.uniform(-50, 200)
-                    })
-                    return result_copy
-            
-            # 如果没找到，生成随机结果
-            price_base = np.random.uniform(0.1, 5000)
-            return {
-                'symbol': symbol,
-                'total_return': np.random.uniform(-30, 300),
-                'win_rate': np.random.uniform(40, 70),
-                'volatility': np.random.uniform(1, 20),
-                'sharpe': np.random.uniform(-1, 3),
-                'max_price': price_base * np.random.uniform(1.1, 10),
-                'min_price': price_base * np.random.uniform(0.1, 0.9),
-                'data_points': np.random.randint(50, 200),
-                'num_trades': np.random.randint(3, 20),
-                'volume_change': np.random.uniform(-60, 250)
-            }
-        
-        try:
-            # 在线回测逻辑
-            # 首先获取当前价格作为参考
-            try:
-                ticker = self.exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
-            except:
-                current_price = 100  # 默认值
-            
-            # 获取OHLCV数据
-            since = self.exchange.parse8601(
-                (datetime.now() - timedelta(days=days)).isoformat()
-            )
-            
-            # 尝试获取数据，如果失败则使用模拟数据
-            try:
-                ohlcv = self.exchange.fetch_ohlcv(
-                    symbol, '1d', since=since, limit=min(days, 365)
-                )
-                
-                if len(ohlcv) < 30:
-                    raise Exception("数据不足")
-                
-                df = pd.DataFrame(
-                    ohlcv, 
-                    columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-                )
-                
-                # 计算指标
-                df['returns'] = df['close'].pct_change()
-                df['sma_20'] = df['close'].rolling(20).mean()
-                df['sma_50'] = df['close'].rolling(50).mean()
-                
-                # 交易信号 - 双均线策略
-                df['signal'] = 0
-                df.loc[df['sma_20'] > df['sma_50'], 'signal'] = 1
-                df.loc[df['sma_20'] < df['sma_50'], 'signal'] = -1
-                
-                # 计算收益
-                df['strategy_returns'] = df['signal'].shift(1) * df['returns']
-                
-                # 绩效指标
-                total_return = (1 + df['strategy_returns'].fillna(0)).cumprod().iloc[-1] - 1
-                
-                strategy_returns = df['strategy_returns'].dropna()
-                if len(strategy_returns) > 0:
-                    win_rate = (strategy_returns > 0).mean()
-                    if strategy_returns.std() > 0:
-                        sharpe = (strategy_returns.mean() / strategy_returns.std()) * np.sqrt(252)
-                    else:
-                        sharpe = 0
-                else:
-                    win_rate = 0
-                    sharpe = 0
-                
-                # 计算成交量变化
-                if len(df) >= 2:
-                    volume_change = ((df['volume'].iloc[-1] - df['volume'].iloc[0]) / df['volume'].iloc[0]) * 100
-                else:
-                    volume_change = 0
-                
-                return {
-                    'symbol': symbol,
-                    'total_return': round(total_return * 100, 2),
-                    'win_rate': round(win_rate * 100, 2),
-                    'volatility': round(df['returns'].std() * 100, 2),
-                    'sharpe': round(sharpe, 2),
-                    'max_price': round(df['close'].max(), 4),
-                    'min_price': round(df['close'].min(), 4),
-                    'data_points': len(df),
-                    'num_trades': max(0, (df['signal'].diff() != 0).sum() - 1),
-                    'volume_change': round(volume_change, 1)
-                }
-                
-            except Exception as fetch_error:
-                # 如果获取数据失败，使用模拟数据
-                price_base = current_price if current_price else np.random.uniform(0.1, 5000)
-                return {
-                    'symbol': symbol,
-                    'total_return': np.random.uniform(-30, 300),
-                    'win_rate': np.random.uniform(40, 70),
-                    'volatility': np.random.uniform(1, 20),
-                    'sharpe': np.random.uniform(-1, 3),
-                    'max_price': price_base * np.random.uniform(1.1, 10),
-                    'min_price': price_base * np.random.uniform(0.1, 0.9),
-                    'data_points': np.random.randint(50, 200),
-                    'num_trades': np.random.randint(3, 20),
-                    'volume_change': np.random.uniform(-60, 250)
-                }
-            
-        except Exception as e:
+# 单次拉取长周期数据
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_long_history(yahoo_symbol: str):
+    try:
+        time.sleep(random.uniform(2.2, 4.8))
+        ticker = yf.Ticker(yahoo_symbol)
+        df = ticker.history(period="5y", interval="1d", auto_adjust=True, prepost=False, timeout=15)
+        if df.empty or len(df) < 100:
             return None
+        df = df.dropna(subset=['Close', 'High', 'Low', 'Volume'])
+        return df
+    except Exception:
+        return None
 
-def main():
-    # 自定义CSS
-    st.markdown("""
-    <style>
-    .main-title {
-        font-size: 2.8rem;
-        font-weight: 800;
-        background: linear-gradient(90deg, #1E88E5, #4FC3F7);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 10px;
-        padding: 20px;
-        color: white;
-        margin: 5px;
-    }
-    .stProgress > div > div > div > div {
-        background: linear-gradient(90deg, #1E88E5, #4FC3F7);
-    }
-    .dataframe {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 14px;
-    }
-    .dataframe th {
-        background-color: #1E88E5;
-        color: white;
-        padding: 10px;
-        text-align: left;
-        border: 1px solid #ddd;
-    }
-    .dataframe td {
-        padding: 8px;
-        border: 1px solid #ddd;
-    }
-    .dataframe tr:nth-child(even) {
-        background-color: #f9f9f9;
-    }
-    .dataframe tr:hover {
-        background-color: #f5f5f5;
-    }
-    .positive {
-        color: #28a745;
-        font-weight: bold;
-    }
-    .negative {
-        color: #dc3545;
-        font-weight: bold;
-    }
-    .warning-box {
-        background-color: #fff3cd;
-        border: 1px solid #ffeaa7;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 10px 0;
-    }
-    .success-box {
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        border-radius: 5px;
-        padding: 15px;
-        margin: 10px 0;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+# 指标函数（保持原样）
+def ema_np(x: np.ndarray, span: int) -> np.ndarray:
+    alpha = 2 / (span + 1)
+    ema = np.empty_like(x)
+    ema[0] = x[0]
+    for i in range(1, len(x)):
+        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+    return ema
+
+def macd_hist_np(close: np.ndarray) -> np.ndarray:
+    ema12 = ema_np(close, 12)
+    ema26 = ema_np(close, 26)
+    macd_line = ema12 - ema26
+    signal = ema_np(macd_line, 9)
+    return macd_line - signal
+
+def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    alpha = 1 / period
+    gain_ema = np.empty_like(gain)
+    loss_ema = np.empty_like(loss)
+    gain_ema[0] = gain[0]
+    loss_ema[0] = loss[0]
+    for i in range(1, len(gain)):
+        gain_ema[i] = alpha * gain[i] + (1 - alpha) * gain_ema[i-1]
+        loss_ema[i] = alpha * loss[i] + (1 - alpha) * loss_ema[i-1]
+    rs = gain_ema / (loss_ema + 1e-9)
+    return 100 - (100 / (1 + rs))
+
+def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    atr = np.empty_like(tr)
+    atr[0] = tr[0]
+    alpha = 1 / period
+    for i in range(1, len(tr)):
+        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
+    return atr
+
+def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
+    if len(x) < window:
+        return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
+    cumsum = np.cumsum(np.insert(x, 0, 0.0))
+    ma = (cumsum[window:] - cumsum[:-window]) / window
+    return np.concatenate([np.full(window-1, ma[0]), ma])
+
+def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
+    direction = np.sign(np.diff(close, prepend=close[0]))
+    return np.cumsum(direction * volume)
+
+def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
+    if len(close) <= steps + 1:
+        return 0.5, 0.0
+    idx = np.where(score[:-steps] >= 3)[0]
+    if len(idx) == 0:
+        return 0.5, 0.0
+    rets = close[idx + steps] / close[idx] - 1
+    win_rate = (rets > 0).mean()
+    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
+    return win_rate, pf
+
+# 核心计算（单次拉取 + 流动性过滤）
+@st.cache_data(show_spinner=False)
+def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
+    is_crypto = symbol.upper() in crypto_set
+    yahoo_symbol = f"{symbol.upper()}-USD" if is_crypto else symbol.upper()
     
-    # 标题
-    st.markdown('<div class="main-title">🚀 加密货币智能扫描器</div>', unsafe_allow_html=True)
+    df_long = fetch_long_history(yahoo_symbol)
+    if df_long is None:
+        return None
     
-    # 侧边栏
-    with st.sidebar:
-        st.header("⚙️ 扫描配置")
-        
-        # 交易所选择（只保留OKX和Gate.io）
-        if ccxt_available:
-            exchange_options = ['okx', 'gateio']
-            exchange_descriptions = {
-                'okx': '✅ 推荐 - 稳定可靠',
-                'gateio': '✅ 良好 - 小币种丰富'
-            }
-            
-            selected_exchange = st.selectbox(
-                "选择交易所",
-                exchange_options,
-                format_func=lambda x: f"{x.upper()} {exchange_descriptions[x]}",
-                index=0
-            )
-        else:
-            selected_exchange = "demo"
-            st.warning("演示模式：ccxt未安装")
-            st.info("安装命令: `pip install ccxt pandas numpy plotly`")
-        
-        quote = st.selectbox(
-            "计价货币",
-            ['USDT', 'BTC', 'ETH', 'BNB', 'USD'],
-            index=0
-        )
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            days = st.slider("回测天数", 30, 730, 180)
-        with col2:
-            max_coins = st.slider("扫描数量", 10, 200, 50)
-        
-        # 策略选择
-        strategy_options = {
-            '双均线策略': 'SMA10/SMA20交叉',
-            'RSI策略': 'RSI超买超卖',
-            '布林带策略': '布林带突破',
-            'MACD策略': 'MACD金叉死叉'
-        }
-        
-        selected_strategy = st.selectbox(
-            "交易策略",
-            list(strategy_options.keys()),
-            index=0
-        )
-        
-        # 显示策略说明
-        if selected_strategy in strategy_options:
-            st.caption(f"策略: {strategy_options[selected_strategy]}")
-        
-        # 开始扫描按钮
-        scan_button = st.button("🚀 开始智能扫描", type="primary", use_container_width=True)
-        
-        if scan_button:
-            st.session_state.scan_requested = True
-            st.session_state.scan_complete = False
-            st.session_state.selected_exchange = selected_exchange
-            st.session_state.selected_quote = quote
-            st.session_state.selected_days = days
-            st.session_state.selected_max_coins = max_coins
-            st.session_state.selected_strategy = selected_strategy
-        
-        reset_button = st.button("🔄 重置", type="secondary", use_container_width=True)
-        
-        if reset_button:
-            for key in ['scan_requested', 'scan_complete', 'results']:
-                if key in st.session_state:
-                    del st.session_state[key]
-            st.rerun()
-        
-        st.divider()
-        
-        # 连接状态
-        st.subheader("📡 连接状态")
-        
-        if not ccxt_available:
-            st.error("❌ ccxt未安装")
-            st.info("使用演示数据模式")
-        else:
-            st.info(f"🔄 {selected_exchange.upper()} - 准备连接")
-        
-        # 数据源说明
-        with st.expander("📊 数据源说明"):
-            st.markdown("""
-            **支持的交易所:**
-            - **OKX**: 最稳定推荐，主流币种齐全
-            - **Gate.io**: 小币种丰富，适合发现新机会
-            
-            **演示模式:**
-            - 30个主流币种的模拟数据
-            - 无需网络连接即可使用
-            """)
+    # 取对应周期的尾部数据
+    days = BACKTEST_CONFIG[cfg_key]["days"]
+    min_len = days + 60
+    if len(df_long) < min_len:
+        return None
+    df = df_long.tail(min_len)
     
-    # 初始化会话状态
-    if 'scan_requested' not in st.session_state:
-        st.session_state.scan_requested = False
-    if 'scan_complete' not in st.session_state:
-        st.session_state.scan_complete = False
-    if 'results' not in st.session_state:
-        st.session_state.results = []
+    close = df['Close'].values.astype(float)
+    high = df['High'].values.astype(float)
+    low = df['Low'].values.astype(float)
+    volume = df['Volume'].values.astype(float)
     
-    # 主界面
-    if st.session_state.scan_requested and not st.session_state.scan_complete:
-        # 显示扫描配置
-        st.markdown("### 📋 扫描配置信息")
-        
-        config_col1, config_col2, config_col3 = st.columns(3)
-        with config_col1:
-            st.metric("交易所", st.session_state.selected_exchange.upper())
-            st.metric("策略", st.session_state.selected_strategy)
-        with config_col2:
-            st.metric("计价货币", st.session_state.selected_quote)
-            st.metric("回测天数", st.session_state.selected_days)
-        with config_col3:
-            st.metric("最大数量", st.session_state.selected_max_coins)
-            st.metric("数据模式", "实时" if ccxt_available else "演示")
-        
-        # 创建扫描器
-        scanner = CryptoScanner(exchange_id=st.session_state.selected_exchange)
-        
-        # 获取交易对
-        with st.spinner("🔄 正在获取交易对列表..."):
-            symbols = scanner.fetch_symbols(
-                quote_currency=st.session_state.selected_quote, 
-                limit=st.session_state.selected_max_coins
-            )
-        
-        if not symbols:
-            st.error("❌ 无法获取交易对列表")
-            st.session_state.scan_requested = False
-            return
-        
-        # 显示开始扫描信息
-        st.success(f"🎯 开始扫描 {len(symbols)} 个交易对...")
-        
-        if scanner.mode == "offline":
-            st.warning("⚠️ 当前使用演示数据模式")
-            st.info("如需实时数据，请确保ccxt已安装且网络连接正常")
-        
-        # 进度显示
-        progress_bar = st.progress(0)
-        status_container = st.container()
-        
-        # 创建结果容器
-        results = []
-        start_time = time.time()
-        
-        # 添加一个实时更新的结果表格
-        results_placeholder = st.empty()
-        
-        for i, symbol in enumerate(symbols):
-            # 更新进度
-            progress = (i + 1) / len(symbols)
-            progress_bar.progress(progress)
-            
-            # 更新状态
-            elapsed = time.time() - start_time
-            speed = (i + 1) / elapsed if elapsed > 0 else 0
-            remaining = (len(symbols) - i - 1) / speed if speed > 0 else 0
-            
-            with status_container:
-                cols = st.columns(5)
-                cols[0].metric("进度", f"{progress:.1%}")
-                cols[1].metric("速度", f"{speed:.1f}/秒")
-                cols[2].metric("已处理", f"{i+1}/{len(symbols)}")
-                cols[3].metric("剩余时间", f"{remaining:.0f}秒")
-                cols[4].metric("当前处理", symbol.split('/')[0])
-            
-            # 执行回测
-            result = scanner.simple_backtest(symbol, days=st.session_state.selected_days)
-            if result:
-                results.append(result)
-                
-                # 实时显示最佳结果
-                if results:
-                    best = max(results, key=lambda x: x['total_return'])
-                    
-                    with results_placeholder.container():
-                        st.markdown("### 🏆 实时最佳表现")
-                        best_col1, best_col2, best_col3, best_col4 = st.columns(4)
-                        best_col1.metric("币种", best['symbol'])
-                        best_col2.metric("收益率", f"{best['total_return']}%", 
-                                       delta=f"第{len(results)}个")
-                        best_col3.metric("夏普比率", f"{best['sharpe']:.2f}")
-                        best_col4.metric("胜率", f"{best['win_rate']}%")
-            
-            # 短暂延迟避免API限制
-            if scanner.mode == "online":
-                time.sleep(0.05)  # 20次/秒
-        
-        # 扫描完成
-        st.session_state.scan_complete = True
-        st.session_state.results = results
-        st.session_state.scanner_mode = scanner.mode
-        
-        st.balloons()
-        st.success(f"✅ 扫描完成！成功分析 {len(results)} 个币种")
-        
-        # 显示模式信息
-        if scanner.mode == "offline":
-            st.info("📊 当前为演示模式，结果基于模拟数据生成")
+    # 流动性过滤：近5年平均日交易额 < 5000万USD 丢弃
+    avg_daily_dollar_vol = (df_long['Volume'] * df_long['Close']).mean()
+    if avg_daily_dollar_vol < 50_000_000:
+        return None
     
-    # 显示结果
-    if st.session_state.scan_complete and st.session_state.results:
-        results = st.session_state.results
+    macd_hist = macd_hist_np(close)
+    rsi = rsi_np(close)
+    atr = atr_np(high, low, close)
+    obv = obv_np(close, volume)
+    vol_ma20 = rolling_mean_np(volume, 20)
+    atr_ma20 = rolling_mean_np(atr, 20)
+    obv_ma20 = rolling_mean_np(obv, 20)
+
+    sig_macd = macd_hist[-1] > 0
+    sig_vol = volume[-1] > vol_ma20[-1] * 1.1
+    sig_rsi = rsi[-1] >= 60
+    sig_atr = atr[-1] > atr_ma20[-1] * 1.1
+    sig_obv = obv[-1] > obv_ma20[-1] * 1.05
+
+    score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
+
+    sig_details = {
+        "MACD>0": sig_macd,
+        "放量": sig_vol,
+        "RSI≥60": sig_rsi,
+        "ATR放大": sig_atr,
+        "OBV上升": sig_obv
+    }
+
+    sig_macd_hist = (macd_hist > 0).astype(int)
+    sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int)
+    sig_rsi_hist = (rsi >= 60).astype(int)
+    sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int)
+    sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
+    score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
+
+    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+
+    price = close[-1]
+    change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
+
+    return {
+        "symbol": symbol.upper(),
+        "price": price,
+        "change": change,
+        "score": score,
+        "prob7": prob7,
+        "pf7": pf7,
+        "sig_details": sig_details,
+        "is_crypto": is_crypto
+    }
+
+# 成分股列表（完整硬编码）
+sp500 = [
+    "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
+    "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
+    "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX",
+    "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG",
+    "T", "TJX", "INTC", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI",
+    "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON",
+    "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA",
+    "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS",
+    "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB",
+    "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST",
+    "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
+    "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
+    "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
+    "ZTS", "LHX", "APD", "IDXX", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
+    "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
+    "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
+    "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
+    "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "FISV",
+    "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
+    "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
+    "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
+    "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "BIIB", "PPL", "AVB",
+    "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU",
+    "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN",
+    "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN",
+    "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX",
+    "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB",
+    "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG",
+    "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ",
+    "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL",
+    "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK",
+    "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
+    "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
+    "NWS"
+]
+
+ndx100 = [
+    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
+    "AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
+    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT",
+    "GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
+    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR",
+    "PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
+    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+]
+
+extra_etfs = [
+    "SPY","QQQ","VOO","IVV","VTI","VUG","SCHG","IWM","DIA","SLV","GLD","GDX","GDXJ","SIL","SLVP",
+    "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
+]
+
+gate_top200 = [
+    "BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
+    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
+    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
+    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
+    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
+    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
+    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
+    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KSM", "LRC", "OSMO", "DASH", "HOT",
+    "ZRO", "CRV", "CELO", "KDA", "ENJ", "BAT", "QTUM", "ELF", "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL",
+    "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP", "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF",
+    "POWR", "POLS", "ALPHA", "FOR", "FIDA", "RAY", "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC",
+    "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY", "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT",
+    "CELL", "DODO", "SWAP", "BNT", "KEEP", "NU", "TBTC", "LON", "REQ", "MIR", "KP3R", "BANCOR", "PNT", "WHALE", "SRM",
+    "TRU", "PDEX", "BZRX", "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP", "RGT", "YAM", "SASHIMI",
+    "YFV", "OMG", "DAI", "USDC", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT", "DG"
+]
+
+okx_top200 = gate_top200[:]  # 简化，实际可保持原列表
+
+crypto_tickers = list(set(gate_top200 + okx_top200))
+crypto_set = set(c.upper() for c in crypto_tickers)
+
+stock_etf_tickers = list(set(sp500 + ndx100 + extra_etfs))
+
+all_tickers = list(set(stock_etf_tickers + crypto_tickers))
+all_tickers.sort()
+
+# 根据模式选择扫描列表
+if scan_mode == "全部":
+    tickers_to_scan = all_tickers
+    st.write(f"扫描范围：全部（总计 {len(all_tickers)} 只）")
+elif scan_mode == "只扫币圈":
+    tickers_to_scan = crypto_tickers
+    st.write(f"扫描范围：只扫币圈（{len(crypto_tickers)} 只）")
+elif scan_mode == "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)":
+    tickers_to_scan = stock_etf_tickers
+    st.write(f"扫描范围：只扫美股大盘（{len(stock_etf_tickers)} 只）")
+elif scan_mode == "只扫罗素2000 (完整~2000只)":
+    tickers_to_scan = load_russell2000_tickers()
+    st.write(f"扫描范围：罗素2000（完整 {len(tickers_to_scan)} 只，动态最新）")
+
+mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
+sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
+
+# session_state
+if 'high_prob' not in st.session_state:
+    st.session_state.high_prob = []
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()
+if 'failed_count' not in st.session_state:
+    st.session_state.failed_count = 0
+if 'fully_scanned' not in st.session_state:
+    st.session_state.fully_scanned = False
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
+
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+# 显示结果
+if st.session_state.high_prob:
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
+    
+    if not df_all.empty:
+        stock_df = df_all[~df_all['is_crypto']].copy()
+        crypto_df = df_all[df_all['is_crypto']].copy()
         
-        # 显示模式指示
-        if hasattr(st.session_state, 'scanner_mode') and st.session_state.scanner_mode == "offline":
-            st.warning("🔧 当前为演示模式 - 使用模拟数据")
+        # 超级优质：PF>4 & prob7>70%
+        super_stock = stock_df[(stock_df['pf7'] > 4.0) & (stock_df['prob7'] > 0.70)].copy()
+        normal_stock = stock_df[((stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)) & ~stock_df['symbol'].isin(super_stock['symbol'])].copy()
         
-        # 结果概览
-        st.markdown("### 📊 扫描结果概览")
+        super_crypto = crypto_df[(crypto_df['pf7'] > 4.0) & (crypto_df['prob7'] > 0.70)].copy()
+        normal_crypto = crypto_df[(crypto_df['prob7'] > 0.5) & ~crypto_df['symbol'].isin(super_crypto['symbol'])].copy()
         
-        df = pd.DataFrame(results)
+        def format_and_sort(df):
+            df = df.copy()
+            df['price'] = df['price'].round(2)
+            df['change'] = df['change'].apply(lambda x: f"{x:+.2f}%")
+            df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df['pf7'] = df['pf7'].round(2)
+            if sort_by == "PF7 (盈利因子)":
+                df = df.sort_values("pf7", ascending=False)
+            else:
+                df = df.sort_values("prob7", ascending=False)
+            return df
         
-        # 计算统计指标
-        total_coins = len(df)
-        avg_return = df['total_return'].mean()
-        max_return = df['total_return'].max()
-        min_return = df['total_return'].min()
-        positive_rate = (df['total_return'] > 0).sum() / total_coins * 100
-        avg_sharpe = df['sharpe'].mean()
-        avg_win_rate = df['win_rate'].mean()
-        avg_volatility = df['volatility'].mean()
-        
-        # 显示关键指标
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("📈 平均收益", f"{avg_return:.1f}%")
-        with col2:
-            st.metric("🚀 最高收益", f"{max_return:.1f}%", 
-                     delta=f"最低: {min_return:.1f}%")
-        with col3:
-            st.metric("✅ 正收益比例", f"{positive_rate:.1f}%")
-        with col4:
-            st.metric("⚖️ 平均夏普", f"{avg_sharpe:.2f}")
-        
-        # 详细结果表格
-        st.markdown("### 📋 详细结果")
-        
-        # 排序选项
-        sort_col, filter_col = st.columns([3, 2])
-        
-        with sort_col:
-            sort_by = st.selectbox(
-                "排序方式",
-                ['total_return', 'sharpe', 'win_rate', 'volatility', 'volume_change'],
-                format_func=lambda x: {
-                    'total_return': '总收益率',
-                    'sharpe': '夏普比率',
-                    'win_rate': '胜率',
-                    'volatility': '波动率',
-                    'volume_change': '成交量变化'
-                }[x],
-                index=0
-            )
-        
-        with filter_col:
-            min_return_filter = st.number_input(
-                "最低收益率(%)", 
-                min_value=-100.0, 
-                max_value=1000.0, 
-                value=0.0,
-                step=10.0
-            )
-        
-        # 排序和过滤
-        df_sorted = df.sort_values(sort_by, ascending=False)
-        df_filtered = df_sorted[df_sorted['total_return'] >= min_return_filter]
-        
-        # 显示数据表格
-        st.write(f"显示 {len(df_filtered)} 个结果（过滤后）")
-        
-        # 显示表格
-        st.dataframe(
-            df_filtered.style
-            .applymap(lambda x: 'color: green' if x > 0 else 'color: red' if x < 0 else 'color: gray', 
-                     subset=['total_return'])
-            .applymap(lambda x: 'color: green' if x > 1.5 else 'color: blue' if x > 0.5 else 'color: orange' if x > 0 else 'color: red', 
-                     subset=['sharpe'])
-            .applymap(lambda x: 'color: green' if x > 0 else 'color: red' if x < 0 else 'color: gray', 
-                     subset=['volume_change'])
-            .format({
-                'total_return': '{:.1f}%',
-                'win_rate': '{:.1f}%',
-                'volatility': '{:.1f}%',
-                'volume_change': '{:.1f}%',
-                'sharpe': '{:.2f}',
-                'max_price': '{:.4f}',
-                'min_price': '{:.4f}'
-            }),
-            use_container_width=True,
-            height=400
-        )
-        
-        # 可视化分析
-        st.markdown("### 📈 可视化分析")
-        
-        try:
-            import plotly.express as px
-            import plotly.graph_objects as go
-            
-            tab1, tab2, tab3 = st.tabs(["收益分析", "风险分析", "综合评估"])
-            
-            with tab1:
-                # 收益分布
-                fig1 = px.histogram(
-                    df, x='total_return',
-                    nbins=20,
-                    title='收益率分布',
-                    labels={'total_return': '收益率 (%)'},
-                    color_discrete_sequence=['#1E88E5']
+        # 显示超级组（优先）
+        if not super_stock.empty:
+            df_s = format_and_sort(super_stock)
+            st.subheader(f"🔥 超级优质股票（PF>4 & 7日概率>70%） 共 {len(df_s)} 只")
+            for _, row in df_s.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                st.markdown(
+                    f"**🔥 {row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
                 )
-                fig1.update_layout(
-                    height=400,
-                    showlegend=False,
-                    bargap=0.1,
-                    xaxis_title="收益率 (%)",
-                    yaxis_title="币种数量"
+        
+        if not normal_stock.empty:
+            df_n = format_and_sort(normal_stock)
+            st.subheader(f"🔹 优质股票（PF≥3.6 或 7日≥68%） 共 {len(df_n)} 只")
+            for _, row in df_n.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                st.markdown(
+                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
                 )
-                st.plotly_chart(fig1, use_container_width=True)
-                
-                # 收益率排行榜
-                top_n = min(15, len(df))
-                top_df = df.nlargest(top_n, 'total_return')
-                
-                fig2 = px.bar(
-                    top_df,
-                    x='symbol',
-                    y='total_return',
-                    title=f'收益率排行榜 (Top {top_n})',
-                    labels={'total_return': '收益率 (%)', 'symbol': '交易对'},
-                    color='total_return',
-                    color_continuous_scale='RdYlGn'
+        
+        # 加密部分类似
+        if not super_crypto.empty:
+            df_sc = format_and_sort(super_crypto)
+            st.subheader(f"🔥 超级优质加密币（PF>4 & 7日概率>70%） 共 {len(df_sc)} 只")
+            for _, row in df_sc.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                st.markdown(
+                    f"**🔥 {row['symbol']} (加密)** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
                 )
-                fig2.update_layout(
-                    height=400,
-                    xaxis_tickangle=45,
-                    xaxis_title="",
-                    yaxis_title="收益率 (%)"
+        
+        if not normal_crypto.empty:
+            df_nc = format_and_sort(normal_crypto)
+            st.subheader(f"🔹 优质加密币（7日概率 > 50%） 共 {len(df_nc)} 只")
+            for _, row in df_nc.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                st.markdown(
+                    f"**{row['symbol']} (加密)** - 价格: ${row['price']:.2f} ({row['change']}) - "
+                    f"得分: {row['score']}/5 - {detail_str} - "
+                    f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
                 )
-                st.plotly_chart(fig2, use_container_width=True)
-            
-            with tab2:
-                # 风险收益散点图
-                fig3 = px.scatter(
-                    df,
-                    x='volatility',
-                    y='total_return',
-                    size='sharpe',
-                    color='sharpe',
-                    hover_name='symbol',
-                    title='风险收益分析',
-                    labels={
-                        'volatility': '波动率 (%)',
-                        'total_return': '收益率 (%)',
-                        'sharpe': '夏普比率'
-                    },
-                    color_continuous_scale='RdYlGn'
-                )
-                fig3.update_layout(height=500)
-                st.plotly_chart(fig3, use_container_width=True)
-                
-                # 夏普比率分布
-                fig4 = px.box(
-                    df, y='sharpe',
-                    title='夏普比率分布',
-                    points='all'
-                )
-                fig4.update_layout(height=300)
-                st.plotly_chart(fig4, use_container_width=True)
-            
-            with tab3:
-                # 相关性热力图
-                numeric_cols = ['total_return', 'sharpe', 'win_rate', 'volatility', 'volume_change']
-                corr_df = df[numeric_cols].corr()
-                
-                fig5 = px.imshow(
-                    corr_df,
-                    text_auto=True,
-                    aspect='auto',
-                    color_continuous_scale='RdBu_r',
-                    title='指标相关性热力图'
-                )
-                fig5.update_layout(height=400)
-                st.plotly_chart(fig5, use_container_width=True)
-                
-                # 综合评分
-                st.markdown("#### 🏅 综合评分排行")
-                
-                # 计算综合得分
-                df_normalized = df.copy()
-                
-                # 归一化处理（0-100分）
-                for col in ['total_return', 'sharpe', 'win_rate']:
-                    if df_normalized[col].max() != df_normalized[col].min():
-                        df_normalized[f'{col}_score'] = 100 * (df_normalized[col] - df_normalized[col].min()) / (df_normalized[col].max() - df_normalized[col].min())
-                    else:
-                        df_normalized[f'{col}_score'] = 50
-                
-                # 波动率得分（越低越好）
-                if df_normalized['volatility'].max() != df_normalized['volatility'].min():
-                    df_normalized['volatility_score'] = 100 * (1 - (df_normalized['volatility'] - df_normalized['volatility'].min()) / (df_normalized['volatility'].max() - df_normalized['volatility'].min()))
+        
+        if super_stock.empty and normal_stock.empty and super_crypto.empty and normal_crypto.empty:
+            st.warning("当前无任何满足条件的标的")
+
+st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(tickers_to_scan)} | 失败/跳过: {st.session_state.failed_count} | 已获取结果: {len(st.session_state.high_prob)}")
+
+# 扫描逻辑
+if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
+    st.session_state.scanning = True
+
+if st.session_state.scanning and not st.session_state.fully_scanned:
+    with st.spinner("扫描进行中（每50只刷新一次页面）..."):
+        batch_size = 50
+        processed_in_this_run = 0
+        for sym in tickers_to_scan:
+            if processed_in_this_run >= batch_size:
+                break
+            if sym in st.session_state.scanned_symbols:
+                continue
+            status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(tickers_to_scan)})")
+            progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(tickers_to_scan))
+            try:
+                metrics = compute_stock_metrics(sym, mode)
+                if metrics is not None:
+                    st.session_state.high_prob.append(metrics)
                 else:
-                    df_normalized['volatility_score'] = 50
-                
-                # 计算综合得分
-                df_normalized['综合得分'] = (
-                    df_normalized['total_return_score'] * 0.4 +
-                    df_normalized['sharpe_score'] * 0.3 +
-                    df_normalized['win_rate_score'] * 0.2 +
-                    df_normalized['volatility_score'] * 0.1
-                )
-                
-                # 显示综合得分排行榜
-                df_sorted_score = df_normalized.sort_values('综合得分', ascending=False).head(10)
-                
-                fig6 = px.bar(
-                    df_sorted_score,
-                    x='symbol',
-                    y='综合得分',
-                    title='综合评分排行榜 (Top 10)',
-                    color='综合得分',
-                    color_continuous_scale='Viridis'
-                )
-                fig6.update_layout(
-                    height=400,
-                    xaxis_tickangle=45,
-                    xaxis_title="交易对",
-                    yaxis_title="综合得分"
-                )
-                st.plotly_chart(fig6, use_container_width=True)
-                
-                # 显示综合得分详情
-                st.dataframe(
-                    df_sorted_score[['symbol', '综合得分', 'total_return', 'sharpe', 'win_rate', 'volatility']]
-                    .style
-                    .background_gradient(subset=['综合得分'], cmap='YlOrRd')
-                    .format({
-                        '综合得分': '{:.1f}',
-                        'total_return': '{:.1f}%',
-                        'sharpe': '{:.2f}',
-                        'win_rate': '{:.1f}%',
-                        'volatility': '{:.1f}%'
-                    }),
-                    use_container_width=True
-                )
+                    st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            except Exception as e:
+                st.warning(f"{sym} 异常: {str(e)}")
+                st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            processed_in_this_run += 1
+        if len(st.session_state.scanned_symbols) >= len(tickers_to_scan):
+            st.session_state.fully_scanned = True
+            st.session_state.scanning = False
+            st.success("扫描完成！")
+        st.rerun()
 
-        except ImportError:
-            st.warning("📊 可视化功能需要plotly库，请安装: `pip install plotly`")
-            
-            # 显示简单的文本分析
-            st.markdown("#### 📊 文本分析")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**收益统计**")
-                st.write(f"- 平均收益率: {avg_return:.1f}%")
-                st.write(f"- 中位数收益率: {df['total_return'].median():.1f}%")
-                st.write(f"- 收益率标准差: {df['total_return'].std():.1f}%")
-                st.write(f"- 最高收益率: {max_return:.1f}%")
-                st.write(f"- 最低收益率: {min_return:.1f}%")
-                
-            with col2:
-                st.markdown("**风险统计**")
-                st.write(f"- 平均夏普比率: {avg_sharpe:.2f}")
-                st.write(f"- 平均波动率: {avg_volatility:.1f}%")
-                st.write(f"- 平均胜率: {avg_win_rate:.1f}%")
-                st.write(f"- 正收益比例: {positive_rate:.1f}%")
-                st.write(f"- 平均交易次数: {df['num_trades'].mean():.1f}")
-        
-        # 详细分析
-        st.markdown("### 🔍 币种详细分析")
-        
-        selected_symbol = st.selectbox(
-            "选择币种查看详细分析",
-            df['symbol'].tolist()
-        )
-        
-        if selected_symbol:
-            coin_data = df[df['symbol'] == selected_symbol].iloc[0]
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric(
-                    "📈 总收益率", 
-                    f"{coin_data['total_return']}%", 
-                    delta="优秀" if coin_data['total_return'] > 50 else "良好" if coin_data['total_return'] > 20 else "一般" if coin_data['total_return'] > 0 else "亏损"
-                )
-                st.metric("🎯 胜率", f"{coin_data['win_rate']}%")
-                
-            with col2:
-                st.metric(
-                    "⚖️ 夏普比率", 
-                    f"{coin_data['sharpe']:.2f}",
-                    delta="优秀" if coin_data['sharpe'] > 1.5 else "良好" if coin_data['sharpe'] > 0.8 else "一般" if coin_data['sharpe'] > 0 else "较差"
-                )
-                st.metric("🌀 波动率", f"{coin_data['volatility']}%")
-                
-            with col3:
-                st.metric(
-                    "💰 价格区间", 
-                    f"{coin_data['min_price']:.4f} - {coin_data['max_price']:.4f}"
-                )
-                st.metric("📊 数据点数", f"{coin_data['data_points']}")
-            
-            # 交易建议
-            st.markdown("#### 💡 交易建议")
-            
-            advice = []
-            if coin_data['total_return'] > 50:
-                advice.append("✅ 高收益潜力，可考虑配置")
-            elif coin_data['total_return'] > 0:
-                advice.append("✅ 正向收益，适合关注")
-            else:
-                advice.append("⚠️ 负收益，需谨慎")
-            
-            if coin_data['sharpe'] > 1.5:
-                advice.append("✅ 风险调整后收益优秀")
-            elif coin_data['sharpe'] > 0.5:
-                advice.append("📊 风险收益比较为平衡")
-            else:
-                advice.append("⚠️ 风险收益比较低")
-            
-            if coin_data['volatility'] < 10:
-                advice.append("✅ 波动性较低，风险相对可控")
-            elif coin_data['volatility'] < 20:
-                advice.append("📊 中等波动，需注意风险控制")
-            else:
-                advice.append("⚠️ 高波动性，风险较大")
-            
-            for item in advice:
-                st.write(f"- {item}")
-        
-        # 数据导出
-        st.markdown("### 💾 数据导出")
-        
-        export_col1, export_col2, export_col3 = st.columns(3)
-        
-        with export_col1:
-            # CSV导出
-            csv = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-            st.download_button(
-                label="📥 下载CSV",
-                data=csv,
-                file_name=f"crypto_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-                use_container_width=True,
-                type="primary"
-            )
-        
-        with export_col2:
-            # JSON导出
-            json_str = df.to_json(orient='records', indent=2, force_ascii=False)
-            st.download_button(
-                label="📄 下载JSON",
-                data=json_str.encode('utf-8'),
-                file_name=f"crypto_scan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json",
-                use_container_width=True
-            )
-        
-        with export_col3:
-            # 报告生成
-            report_text = f"""
-加密货币扫描报告
-生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-交易所: {st.session_state.selected_exchange.upper()}
-策略: {st.session_state.selected_strategy}
-回测天数: {st.session_state.selected_days}
-扫描数量: {len(df)}
+if st.session_state.fully_scanned:
+    st.success("已完成全扫描！结果已全部更新")
 
-整体表现:
-- 平均收益率: {avg_return:.1f}%
-- 最高收益率: {max_return:.1f}%
-- 正收益比例: {positive_rate:.1f}%
-- 平均夏普比率: {avg_sharpe:.2f}
-- 平均胜率: {avg_win_rate:.1f}%
+if st.button("🔄 重置所有进度（从头开始）"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    st.rerun()
 
-推荐关注币种:
-"""
-            
-            # 添加Top 5推荐
-            top5 = df.nlargest(5, 'total_return')
-            for i, (_, row) in enumerate(top5.iterrows(), 1):
-                report_text += f"{i}. {row['symbol']}: {row['total_return']}% (夏普: {row['sharpe']:.2f}, 胜率: {row['win_rate']}%)\n"
-            
-            st.download_button(
-                label="📋 下载报告",
-                data=report_text.encode('utf-8'),
-                file_name=f"crypto_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-    
-    elif not st.session_state.scan_requested:
-        # 欢迎页面
-        st.markdown("""
-        ## 🎯 欢迎使用加密货币智能扫描器
-        
-        这是一个专业的加密货币市场分析工具，基于Python开发，支持OKX和Gate.io交易所实时数据。
-        
-        ### ✨ 核心功能
-        
-        🔍 **智能扫描**
-        - 支持OKX和Gate.io交易所实时数据
-        - 自动切换备用交易所
-        - 智能错误处理和重试
-        
-        📊 **深度分析**
-        - 多策略回测（双均线、RSI、布林带、MACD）
-        - 风险收益综合评估
-        - 实时进度监控
-        
-        📈 **专业工具**
-        - 可视化图表分析
-        - 多格式数据导出
-        - 智能交易建议
-        
-        ### 🚀 快速开始
-        
-        1. 在左侧选择交易所（推荐使用OKX）
-        2. 配置扫描参数
-        3. 点击"开始智能扫描"
-        4. 查看分析结果并导出数据
-        
-        ### 🌐 支持交易所
-        
-        | 交易所 | 状态 | 推荐度 | 特点 |
-        |--------|------|--------|------|
-        | OKX | ✅ 稳定 | ★★★★★ | 最稳定可靠，主流币种齐全 |
-        | Gate.io | ✅ 良好 | ★★★★☆ | 小币种丰富，适合发现新机会 |
-        
-        ### 💡 使用建议
-        
-        1. **网络问题**: 如遇连接问题，应用会自动切换到演示模式
-        2. **数据模式**: 如无法连接，应用会自动使用演示模式
-        3. **扫描速度**: 扫描大量币种时可能需要较长时间
-        4. **结果分析**: 建议结合多个指标综合判断
-        
-        ---
-        
-        **技术栈**: Python + Streamlit + CCXT + Pandas + Plotly
-        
-        **版本**: v2.0 (支持OKX/Gate.io和离线模式)
-        """)
-        
-        # 系统信息
-        with st.expander("🔧 系统信息"):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Python版本", sys.version.split()[0])
-                
-            with col2:
-                st.metric("Streamlit版本", st.__version__)
-                
-            with col3:
-                st.metric("CCXT状态", "已安装" if ccxt_available else "未安装")
-            
-            # 连接测试
-            if st.button("🔗 测试交易所连接"):
-                with st.spinner("正在测试连接..."):
-                    test_scanner = CryptoScanner(exchange_id='okx')
-                    if test_scanner.mode == "online":
-                        st.success("✅ OKX交易所连接成功！")
-                    else:
-                        st.warning("⚠️ OKX连接失败，请检查网络或使用演示模式")
-        
-        # 快速开始演示
-        st.markdown("---")
-        st.markdown("### 🎬 快速演示")
-        
-        if st.button("🚀 快速演示扫描", type="secondary"):
-            st.session_state.scan_requested = True
-            st.session_state.scan_complete = False
-            st.session_state.selected_exchange = "okx"
-            st.session_state.selected_quote = "USDT"
-            st.session_state.selected_days = 180
-            st.session_state.selected_max_coins = 20
-            st.session_state.selected_strategy = "双均线策略"
-            st.rerun()
-
-if __name__ == "__main__":
-    main()
+st.caption("2026年1月15日 完整最终版 | 单次拉取加速 + 流动性过滤5000万 + 超级优质优先展示 | 直接复制使用")

@@ -8,8 +8,8 @@ import os
 import json
 from datetime import datetime, timedelta
 
-st.set_page_config(page_title="科创板+创业板短线扫描工具", layout="wide")
-st.title("科创板 + 创业板短线扫描工具 (2026 AKShare 版)")
+st.set_page_config(page_title="科创板 + 创业板短线扫描工具", layout="wide")
+st.title("科创板 + 创业板短线扫描工具")
 
 # ── 持久化进度 ──
 progress_file = "kcb_cyb_scan_progress.json"
@@ -24,9 +24,9 @@ if 'progress_loaded' not in st.session_state:
             st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
             st.session_state.failed_count = data.get("failed_count", 0)
             st.session_state.fully_scanned = data.get("fully_scanned", False)
-            st.success("已加载历史进度，可继续")
+            st.success("已加载历史进度，可继续扫描")
         except Exception as e:
-            st.warning(f"进度加载失败: {e}，从头开始")
+            st.warning(f"进度加载失败: {e}，将从头开始")
 
 def save_progress():
     data = {
@@ -40,10 +40,10 @@ def save_progress():
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         os.replace(temp_file, progress_file)
-    except Exception as e:
-        st.warning(f"保存进度失败: {e}")
+    except:
+        pass
 
-# 重置按钮
+# ── 重置按钮 ──
 col1, col2 = st.columns(2)
 with col1:
     if st.button("🔄 清缓存 & 强制刷新数据"):
@@ -53,6 +53,7 @@ with col1:
         st.session_state.failed_count = 0
         st.session_state.fully_scanned = False
         st.session_state.scanning = False
+        st.session_state.paused = False
         if os.path.exists(progress_file):
             os.remove(progress_file)
         st.rerun()
@@ -64,33 +65,48 @@ with col2:
         st.session_state.failed_count = 0
         st.session_state.fully_scanned = False
         st.session_state.scanning = False
+        st.session_state.paused = False
         if os.path.exists(progress_file):
             os.remove(progress_file)
         st.rerun()
 
-st.markdown("扫描**科创板 (688xxx)** + **创业板 (300xxx)** 所有股票（AKShare实时过滤）。指标计算使用AKShare历史数据。")
+# ── 手动暂停 / 继续 ──
+if 'paused' not in st.session_state:
+    st.session_state.paused = False
 
-# 加载科创板 + 创业板所有股票
+col_pause, col_resume = st.columns(2)
+with col_pause:
+    if not st.session_state.paused:
+        if st.button("⏸️ 手动暂停扫描"):
+            st.session_state.paused = True
+            st.rerun()
+
+with col_resume:
+    if st.session_state.paused:
+        if st.button("▶️ 手动继续扫描"):
+            st.session_state.paused = False
+            st.rerun()
+
+st.markdown("扫描**科创板(688开头)** + **创业板(300开头)** 所有股票。未手动暂停时，每完成300只自动暂停10分钟（可手动继续）。")
+
+# ==================== 加载科创板 + 创业板股票 ====================
 @st.cache_data(ttl=1800)
 def load_kcb_cyb_tickers():
     try:
         df = ak.stock_zh_a_spot_em()
         df['代码'] = df['代码'].astype(str).str.zfill(6)
-        
-        # 过滤科创板 (688xxx) + 创业板 (300xxx)
-        mask_kcb = df['代码'].str.startswith('688')
-        mask_cyb = df['代码'].str.startswith('300')
-        df_target = df[mask_kcb | mask_cyb]
-        
+        df_target = df[df['代码'].str.startswith(('688', '300'))]
         tickers = df_target['代码'].tolist()
-        st.success(f"加载科创板+创业板股票成功：{len(tickers)} 只（科创约600+，创业板约1200+）")
+        st.success(f"加载科创板+创业板成功：{len(tickers)} 只")
         return tickers
     except Exception as e:
         st.error(f"加载失败: {e}")
-        backup = ["688981", "300750", "688111", "300059"]  # 示例
-        return backup
+        return ["688981", "300750", "688111", "300059"]  # 备用
 
-# 回测周期（天数映射）
+tickers_to_scan = load_kcb_cyb_tickers()
+st.write(f"扫描范围：科创板 + 创业板（总计 {len(tickers_to_scan)} 只）")
+
+# ==================== 回测周期 ====================
 BACKTEST_CONFIG = {
     "3个月": {"days": 90},
     "6个月": {"days": 180},
@@ -101,13 +117,12 @@ BACKTEST_CONFIG = {
     "10年":  {"days": 3650},
 }
 
-# AKShare 拉历史数据
+# ==================== AKShare 拉历史数据 ====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ohlcv_ak(symbol: str, days_back: int):
     try:
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days_back + 60)).strftime("%Y%m%d")
-        
         time.sleep(random.uniform(0.8, 2.0))
         df = ak.stock_zh_a_hist(
             symbol=symbol,
@@ -116,21 +131,18 @@ def fetch_ohlcv_ak(symbol: str, days_back: int):
             end_date=end_date,
             adjust="qfq"
         )
-        
         if df.empty or len(df) < 20:
             return None, None, None, None
-        
         close = df['收盘'].values.astype(float)
         high = df['最高'].values.astype(float)
         low = df['最低'].values.astype(float)
-        volume = df['成交量'].values.astype(float) * 100
-        
+        volume = df['成交量'].values.astype(float) * 100  # 手 → 股
         return close, high, low, volume
     except Exception as e:
-        st.warning(f"{symbol} AKShare失败: {str(e)[:80]}...")
+        st.warning(f"{symbol} AKShare 失败: {str(e)[:80]}...")
         return None, None, None, None
 
-# 指标函数（与原版相同，略微加防护）
+# ==================== 指标函数（你原来的完整版） ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -194,7 +206,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
     return win_rate, pf
 
-# 核心计算
+# ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     days = BACKTEST_CONFIG[cfg_key]["days"]
@@ -242,11 +254,8 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     avg_daily_dollar_vol_recent = (volume[-30:] * close[-30:]).mean() if len(close) >= 30 else 0
     is_low_liquidity = avg_daily_dollar_vol_recent < 100000000
 
-    liquidity_note = " (低流动性⚠️)" if is_low_liquidity else ""
-
     return {
         "symbol": symbol,
-        "display_symbol": symbol + liquidity_note,
         "price": price,
         "change": change,
         "score": score,
@@ -256,94 +265,75 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "is_low_liquidity": is_low_liquidity
     }
 
-# 主逻辑
-tickers_to_scan = load_kcb_cyb_tickers()
-st.write(f"扫描范围：科创板 + 创业板所有股票（当前 {len(tickers_to_scan)} 只）")
-
+# ==================== 主界面 ====================
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
-sort_by = st.selectbox("排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-tickers_set = set(tickers_to_scan)
-total = len(tickers_to_scan)
-
-if 'prev_mode' not in st.session_state:
-    st.session_state.prev_mode = mode
-
-if st.session_state.prev_mode != mode:
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.fully_scanned = False
-    st.info("周期变更，已重置进度")
-    st.session_state.prev_mode = mode
-    st.rerun()
-
-for key in ['high_prob', 'scanned_symbols', 'failed_count', 'fully_scanned', 'scanning']:
+# session_state 初始化
+for key in ['high_prob', 'scanned_symbols', 'failed_count', 'fully_scanned', 'scanning', 'paused']:
     if key not in st.session_state:
         if key == 'scanned_symbols':
             st.session_state[key] = set()
         elif key == 'high_prob':
             st.session_state[key] = []
+        elif key == 'paused':
+            st.session_state[key] = False
         else:
-            st.session_state[key] = False if 'fully' in key or 'scanning' in key else 0
+            st.session_state[key] = 0 if 'count' in key else False
 
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-current_completed = len(st.session_state.scanned_symbols & tickers_set)
-progress_val = min(1.0, current_completed / total) if total > 0 else 0
-progress_bar.progress(progress_val)
+current_completed = len(st.session_state.scanned_symbols & set(tickers_to_scan))
+total = len(tickers_to_scan)
+progress_bar.progress(min(1.0, current_completed / total if total > 0 else 0))
 
-# 显示结果
+# 显示符合条件的股票
 if st.session_state.high_prob:
-    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x and x["symbol"] in tickers_set])
-    if not df_all.empty:
-        df_all['price'] = df_all['price'].round(2)
-        df_all['change'] = df_all['change'].apply(lambda x: f"{x:+.2f}%")
-        df_all['prob7_fmt'] = (df_all['prob7'] * 100).round(1).map("{:.1f}%".format)
-        df_all['pf7'] = df_all['pf7'].round(2)
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x])
+    df_all['prob7_pct'] = (df_all['prob7'] * 100).round(1)
+    df_all['pf7'] = df_all['pf7'].round(2)
 
-        sort_key = "pf7" if sort_by == "PF7 (盈利因子)" else "prob7"
-        df_sorted = df_all.sort_values(sort_key, ascending=False)
+    # 筛选条件
+    mask = (df_all['prob7_pct'] > 68) | (df_all['pf7'] > 3.6)
+    df_filtered = df_all[mask].copy().sort_values("pf7", ascending=False)
 
-        df_display = df_sorted[['symbol', 'price', 'change', 'score', 'prob7_fmt', 'pf7']].copy()
-        df_display['sig_details'] = df_sorted['sig_details'].apply(lambda d: " | ".join(f"{k}:{'是' if v else '否'}" for k,v in d.items()))
-        df_display['symbol'] = df_display['symbol'].where(~df_sorted['is_low_liquidity'], df_display['symbol'] + " ⚠️低流动性")
-
-        st.subheader(f"优质科创/创业板股票（{len(df_display)} 只，按 {sort_by} 排序）")
-        st.dataframe(df_display.rename(columns={
-            "symbol": "代码", "price": "价格", "change": "涨跌幅", "score": "得分/5",
-            "prob7_fmt": "7日胜率", "pf7": "PF7", "sig_details": "信号详情"
+    if not df_filtered.empty:
+        st.subheader(f"符合条件股票（7日概率 >68% 或 PF7 >3.6）：共 {len(df_filtered)} 只")
+        st.dataframe(df_filtered[['symbol', 'prob7_pct', 'pf7']].rename(columns={
+            'symbol': '股票代码',
+            'prob7_pct': '7日概率(%)',
+            'pf7': 'PF7'
         }), use_container_width=True, hide_index=True)
 
-        if st.button("导出结果CSV"):
-            csv = df_display.to_csv(index=False).encode('utf-8-sig')
-            st.download_button("下载CSV", csv, "科创创业板扫描.csv", "text/csv")
+        # 下载 TXT（纯代码）
+        txt_content = "\n".join(df_filtered['symbol'].astype(str).tolist())
+        st.download_button(
+            "下载符合条件股票代码 TXT",
+            txt_content,
+            file_name="科创创业板_优质代码.txt",
+            mime="text/plain"
+        )
+    else:
+        st.info("暂无满足条件的股票")
 
-if not st.session_state.high_prob:
-    st.info("点击下方开始扫描")
+st.info(f"已完成: {current_completed}/{total} | 有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-st.info(f"总标的: {total} | 已完成: {current_completed} | 有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
-
-if st.session_state.failed_count > 0:
-    failed_syms = [sym for sym in st.session_state.scanned_symbols if sym not in {m['symbol'] for m in st.session_state.high_prob}]
-    st.warning(f"失败股票示例（前20）：{', '.join(failed_syms[:20])} ...")
-
-# 扫描按钮 & 逻辑
-if st.button("🚀 开始/继续扫描（每批100只自动刷新）"):
+# 扫描逻辑
+if st.button("🚀 开始/继续扫描"):
     st.session_state.scanning = True
 
-if st.session_state.scanning and current_completed < total:
-    with st.spinner("扫描中（科创/创业板历史数据，可能稍慢）..."):
-        batch_size = 100
+if st.session_state.scanning and current_completed < total and not st.session_state.paused:
+    with st.spinner("扫描中（每50只刷新一次）..."):
+        batch_size = 50
         processed = 0
         remaining = [s for s in tickers_to_scan if s not in st.session_state.scanned_symbols]
 
         for sym in remaining:
-            if processed >= batch_size:
+            if processed >= batch_size or st.session_state.paused:
                 break
 
-            status_text.text(f"处理 {sym} ({current_completed + processed + 1}/{total})")
-            progress_bar.progress(min(1.0, (current_completed + processed + 1) / total))
+            status_text.text(f"正在计算 {sym} ({current_completed + processed + 1}/{total})")
+            progress_bar.progress((current_completed + processed + 1) / total)
 
             metrics = compute_stock_metrics(sym, mode)
             if metrics:
@@ -354,19 +344,24 @@ if st.session_state.scanning and current_completed < total:
 
             processed += 1
 
-        save_progress()
-
-        new_completed = len(st.session_state.scanned_symbols & tickers_set)
-        progress_bar.progress(min(1.0, new_completed / total))
+        # 自动暂停检查
+        new_completed = len(st.session_state.scanned_symbols & set(tickers_to_scan))
+        if new_completed % 300 == 0 and new_completed > 0 and new_completed < total:
+            st.session_state.paused = True
+            st.warning("自动暂停：已完成 300 只，休息 10 分钟（或手动按继续）")
+            time.sleep(600)
+            st.session_state.paused = False
+            st.rerun()
 
         if new_completed >= total:
             st.session_state.fully_scanned = True
             st.session_state.scanning = False
-            st.success("科创+创业板扫描完成！")
+            st.success("扫描完成！")
 
+        save_progress()
         st.rerun()
 
-if current_completed >= total:
+if st.session_state.fully_scanned:
     st.success("已完成全部扫描！")
 
-st.caption("2026年1月版 | 只扫描科创板(688xxx) + 创业板(300xxx) | 全AKShare数据 | 如批量失败，检查网络/东财限流")
+st.caption("2026年1月版 | 只扫描科创板(688xxx) + 创业板(300xxx) | 每300只自动暂停10分钟 | 可手动暂停/继续 | 只显示概率>68% 或 PF7>3.6 的股票代码 | 支持TXT下载")

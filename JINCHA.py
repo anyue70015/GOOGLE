@@ -5,6 +5,7 @@ import yfinance as yf
 import akshare as ak
 import time
 import random
+import threading
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -85,7 +86,8 @@ def initialize_stock_pool():
                 'low': float(row.get('最低', 0)),
                 'open': float(row.get('今开', 0)),
                 'pre_close': float(row.get('昨收', 0)),
-                'update_time': datetime.now().strftime("%H:%M:%S")
+                'update_time': datetime.now().strftime("%H:%M:%S"),
+                'is_realtime': True
             }
         
         print(f"股票池初始化: 科创板{len(kcb_top)}只, 创业板{len(cyb_top)}只")
@@ -103,9 +105,13 @@ def get_backup_stocks():
         # 科创板
         "688981": "中芯国际", "688111": "金山办公", "688126": "沪硅产业",
         "688008": "澜起科技", "688099": "晶晨股份", "688036": "传音控股",
+        "688333": "铂力特", "688388": "嘉元科技", "688390": "固德威",
+        "688516": "奥特维", "688599": "天合光能", "688696": "极米科技",
         # 创业板
         "300750": "宁德时代", "300059": "东方财富", "300760": "迈瑞医疗",
         "300498": "温氏股份", "300142": "沃森生物", "300015": "爱尔眼科",
+        "300122": "智飞生物", "300274": "阳光电源", "300124": "汇川技术",
+        "300347": "泰格医药", "300014": "亿纬锂能", "300033": "同花顺",
     }
     
     # 添加模拟实时数据
@@ -124,7 +130,7 @@ def get_backup_stocks():
             'open': round(base_price * 0.99, 2),
             'pre_close': round(base_price, 2),
             'update_time': datetime.now().strftime("%H:%M:%S"),
-            'is_simulated': True
+            'is_realtime': False
         }
     
     return backup_stocks, realtime_data_dict
@@ -183,7 +189,7 @@ def get_historical_data(symbol: str, days_back: int):
         
         return None, None, None, None
 
-# ==================== 专业指标计算（保持不变） ====================
+# ==================== 专业指标计算 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -325,7 +331,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
             "data_points": len(close_hist),
             "scan_time": datetime.now().strftime("%H:%M:%S"),
             "update_time": realtime_data.get('update_time', ''),
-            "is_realtime": not realtime_data.get('is_simulated', False)
+            "is_realtime": realtime_data.get('is_realtime', False)
         }
         
     except Exception as e:
@@ -334,12 +340,14 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 
 # ==================== 主界面 ====================
 # 初始化session state
-for key in ['scan_results', 'scanning', 'premium_count', 'scanned_count']:
+for key in ['scan_results', 'scanning', 'premium_count', 'scanned_count', 'premium_stocks_display']:
     if key not in st.session_state:
         if 'count' in key:
             st.session_state[key] = 0
         elif 'scanning' in key:
             st.session_state[key] = False
+        elif key == 'premium_stocks_display':
+            st.session_state[key] = []
         else:
             st.session_state[key] = []
 
@@ -401,6 +409,9 @@ with st.sidebar:
     # 延迟设置
     delay_time = st.slider("请求延迟(秒)", 0.1, 3.0, 0.5, 0.1)
     
+    # 扫描超时设置
+    scan_timeout = st.slider("扫描超时(秒)", 5, 30, 10, 1)
+    
     # 刷新按钮
     if st.button("🔄 刷新实时数据", use_container_width=True):
         st.cache_data.clear()
@@ -417,6 +428,7 @@ with col1:
         st.session_state.scan_results = []
         st.session_state.premium_count = 0
         st.session_state.scanned_count = 0
+        st.session_state.premium_stocks_display = []
 
 with col2:
     if st.button("⏸️ 暂停扫描", use_container_width=True):
@@ -428,13 +440,15 @@ with col3:
         st.session_state.scanning = False
         st.session_state.premium_count = 0
         st.session_state.scanned_count = 0
+        st.session_state.premium_stocks_display = []
         st.rerun()
 
-# 扫描进度显示
+# 扫描进度显示容器
 progress_container = st.empty()
 status_container = st.empty()
+premium_container = st.empty()
 
-# 扫描逻辑
+# ==================== 扫描逻辑（改进版 - 卡住也不会跳过） ====================
 if st.session_state.scanning:
     all_stocks = list(STOCK_POOL.items())[:stock_count]
     total_stocks = len(all_stocks)
@@ -447,81 +461,322 @@ if st.session_state.scanning:
         
         # 创建进度条
         progress_bar = progress_container.progress(scanned / total_stocks)
-        status_text = status_container.text(f"准备扫描...")
+        
+        # 创建状态显示容器
+        status_display = status_container.empty()
+        
+        # 创建优质股票显示容器
+        premium_display = premium_container.empty()
         
         for i in range(scanned, batch_end):
             code, name = all_stocks[i]
             
             progress = (i + 1) / total_stocks
             progress_bar.progress(progress)
-            status_text = status_container.text(f"扫描: {code} {name} ({i+1}/{total_stocks})")
             
-            # 扫描股票
-            result = compute_stock_metrics(code, period_key)
+            # 显示扫描状态（类似样例格式）
+            status_markdown = f"""
+            ### 📈 科创板创业板实时拉
+            **开始实时扫描**
+            ---
+            **扫描:** {code} {name} ({i+1}/{total_stocks})
             
-            if result:
-                # 判断评级
-                if result['pf7'] > min_pf and result['prob7_pct'] > min_win_rate:
-                    rating = '🔥 优质'
-                    st.session_state.premium_count += 1
-                elif result['score'] >= 3:
-                    rating = '✅ 良好'
-                elif result['score'] >= 1:
-                    rating = '📊 一般'
+            🕒 扫描时间: {datetime.now().strftime("%H:%M:%S")}
+            """
+            status_display.markdown(status_markdown)
+            
+            try:
+                # 扫描股票（带超时保护）
+                scan_result = None
+                scan_error = None
+                
+                def scan_stock_thread():
+                    nonlocal scan_result, scan_error
+                    try:
+                        scan_result = compute_stock_metrics(code, period_key)
+                    except Exception as e:
+                        scan_error = str(e)
+                
+                # 启动扫描线程
+                scan_thread = threading.Thread(target=scan_stock_thread)
+                scan_thread.start()
+                scan_thread.join(timeout=scan_timeout)  # 可配置的超时时间
+                
+                if scan_thread.is_alive():
+                    # 超时情况
+                    status_display.markdown(f"""
+                    ### 📈 科创板创业板实时拉
+                    **开始实时扫描**
+                    ---
+                    **扫描:** {code} {name} ({i+1}/{total_stocks})
+                    
+                    ⚠️ **扫描超时** - 超时{scan_timeout}秒，自动跳过...
+                    
+                    🕒 跳过时间: {datetime.now().strftime("%H:%M:%S")}
+                    """)
+                    
+                    # 添加超时记录
+                    stock_result = {
+                        '代码': code,
+                        '名称': name,
+                        '价格': 0,
+                        '涨幅%': 0,
+                        '涨跌额': 0,
+                        '信号分': 0,
+                        '7日胜率%': 0,
+                        '盈亏比': 0,
+                        'RSI': 0,
+                        '成交额': 0,
+                        '触发信号': f'超时{scan_timeout}秒',
+                        '评级': '⏰ 超时',
+                        '数据点': 0,
+                        '扫描时间': datetime.now().strftime("%H:%M:%S"),
+                        '更新时间': '',
+                        '实时性': '超时'
+                    }
+                    st.session_state.scan_results.append(stock_result)
+                    st.session_state.scanned_count += 1
+                    time.sleep(1)  # 显示超时状态
+                    continue
+                
+                if scan_error:
+                    # 扫描出错情况
+                    status_display.markdown(f"""
+                    ### 📈 科创板创业板实时拉
+                    **开始实时扫描**
+                    ---
+                    **扫描:** {code} {name} ({i+1}/{total_stocks})
+                    
+                    ❌ **扫描错误** - {scan_error[:50]}...
+                    
+                    🕒 错误时间: {datetime.now().strftime("%H:%M:%S")}
+                    """)
+                    
+                    # 添加错误记录
+                    stock_result = {
+                        '代码': code,
+                        '名称': name,
+                        '价格': 0,
+                        '涨幅%': 0,
+                        '涨跌额': 0,
+                        '信号分': 0,
+                        '7日胜率%': 0,
+                        '盈亏比': 0,
+                        'RSI': 0,
+                        '成交额': 0,
+                        '触发信号': f'错误: {scan_error[:30]}',
+                        '评级': '❌ 错误',
+                        '数据点': 0,
+                        '扫描时间': datetime.now().strftime("%H:%M:%S"),
+                        '更新时间': '',
+                        '实时性': '错误'
+                    }
+                    st.session_state.scan_results.append(stock_result)
+                    st.session_state.scanned_count += 1
+                    time.sleep(1)
+                    continue
+                
+                if scan_result:
+                    # 判断评级
+                    if scan_result['pf7'] > min_pf and scan_result['prob7_pct'] > min_win_rate:
+                        rating = '🔥 优质'
+                        st.session_state.premium_count += 1
+                        
+                        # 实时显示优质股票（类似样例格式）
+                        premium_info = {
+                            'code': code,
+                            'name': scan_result['name'],
+                            'price': scan_result['price'],
+                            'change_percent': scan_result['change_percent'],
+                            'change_amount': scan_result['change_amount'],
+                            'score': scan_result['score'],
+                            'prob7_pct': scan_result['prob7_pct'],
+                            'pf7': scan_result['pf7'],
+                            'scan_time': datetime.now().strftime("%H:%M:%S")
+                        }
+                        st.session_state.premium_stocks_display.append(premium_info)
+                        
+                        # 显示所有发现的优质股票
+                        premium_content = "### 🔥 发现优质股票\n---\n"
+                        for idx, stock in enumerate(st.session_state.premium_stocks_display, 1):
+                            premium_content += f"""
+**{stock['code']} {stock['name']}** | 
+价:{stock['price']:.2f} | 
+涨:{stock['change_percent']:+.2f}% | 
+额:{stock['change_amount']:+.2f} | 
+分:{stock['score']} | 
+胜:{stock['prob7_pct']:.1f} | 
+PF:{stock['pf7']:.2f}
+
+"""
+                        premium_display.success(premium_content)
+                        
+                    elif scan_result['score'] >= 3:
+                        rating = '✅ 良好'
+                    elif scan_result['score'] >= 1:
+                        rating = '📊 一般'
+                    else:
+                        rating = '⚠️ 弱势'
+                    
+                    stock_result = {
+                        '代码': scan_result['symbol'],
+                        '名称': scan_result['name'],
+                        '价格': scan_result['price'],
+                        '涨幅%': scan_result['change_percent'],
+                        '涨跌额': scan_result['change_amount'],
+                        '信号分': scan_result['score'],
+                        '7日胜率%': scan_result['prob7_pct'],
+                        '盈亏比': round(scan_result['pf7'], 2),
+                        'RSI': scan_result['rsi'],
+                        '成交额': scan_result['turnover'],
+                        '触发信号': scan_result['signals'],
+                        '评级': rating,
+                        '数据点': scan_result['data_points'],
+                        '扫描时间': scan_result['scan_time'],
+                        '更新时间': scan_result.get('update_time', ''),
+                        '实时性': '实时' if scan_result.get('is_realtime', False) else '延迟'
+                    }
+                    
+                    st.session_state.scan_results.append(stock_result)
+                    
+                    # 显示扫描成功状态
+                    status_display.markdown(f"""
+                    ### 📈 科创板创业板实时拉
+                    **开始实时扫描**
+                    ---
+                    **扫描:** {code} {name} ({i+1}/{total_stocks})
+                    
+                    ✅ **完成扫描** - 信号分: {scan_result['score']}/5, 评级: {rating}
+                    
+                    🎯 信号: {scan_result['signals']}
+                    📊 胜率: {scan_result['prob7_pct']:.1f}% | 盈亏比: {scan_result['pf7']:.2f}
+                    🕒 完成时间: {datetime.now().strftime("%H:%M:%S")}
+                    """)
                 else:
-                    rating = '⚠️ 弱势'
+                    # 数据不足情况
+                    status_display.markdown(f"""
+                    ### 📈 科创板创业板实时拉
+                    **开始实时扫描**
+                    ---
+                    **扫描:** {code} {name} ({i+1}/{total_stocks})
+                    
+                    ⚠️ **数据不足** - 跳过，继续下一只...
+                    
+                    🕒 跳过时间: {datetime.now().strftime("%H:%M:%S")}
+                    """)
+                    
+                    # 添加数据不足记录
+                    stock_result = {
+                        '代码': code,
+                        '名称': name,
+                        '价格': 0,
+                        '涨幅%': 0,
+                        '涨跌额': 0,
+                        '信号分': 0,
+                        '7日胜率%': 0,
+                        '盈亏比': 0,
+                        'RSI': 0,
+                        '成交额': 0,
+                        '触发信号': '数据不足',
+                        '评级': '📉 数据不足',
+                        '数据点': 0,
+                        '扫描时间': datetime.now().strftime("%H:%M:%S"),
+                        '更新时间': '',
+                        '实时性': '失败'
+                    }
+                    st.session_state.scan_results.append(stock_result)
+                    
+            except Exception as e:
+                # 捕获所有异常，继续扫描下一只
+                error_msg = str(e)[:100]
+                print(f"扫描{code}时发生异常: {error_msg}")
                 
+                status_display.markdown(f"""
+                ### 📈 科创板创业板实时拉
+                **开始实时扫描**
+                ---
+                **扫描:** {code} {name} ({i+1}/{total_stocks})
+                
+                ❌ **异常跳过** - {error_msg}...
+                
+                🕒 异常时间: {datetime.now().strftime("%H:%M:%S")}
+                """)
+                
+                # 添加异常记录
                 stock_result = {
-                    '代码': result['symbol'],
-                    '名称': result['name'],
-                    '价格': result['price'],
-                    '涨幅%': result['change_percent'],
-                    '涨跌额': result['change_amount'],
-                    '信号分': result['score'],
-                    '7日胜率%': result['prob7_pct'],
-                    '盈亏比': round(result['pf7'], 2),
-                    'RSI': result['rsi'],
-                    '成交额': result['turnover'],
-                    '触发信号': result['signals'],
-                    '评级': rating,
-                    '数据点': result['data_points'],
-                    '扫描时间': result['scan_time'],
-                    '更新时间': result.get('update_time', ''),
-                    '实时性': '实时' if result.get('is_realtime', False) else '延迟'
+                    '代码': code,
+                    '名称': name,
+                    '价格': 0,
+                    '涨幅%': 0,
+                    '涨跌额': 0,
+                    '信号分': 0,
+                    '7日胜率%': 0,
+                    '盈亏比': 0,
+                    'RSI': 0,
+                    '成交额': 0,
+                    '触发信号': f'异常: {error_msg[:30]}',
+                    '评级': '💥 异常',
+                    '数据点': 0,
+                    '扫描时间': datetime.now().strftime("%H:%M:%S"),
+                    '更新时间': '',
+                    '实时性': '异常'
                 }
-                
                 st.session_state.scan_results.append(stock_result)
-                
-                # 实时显示优质股票
-                if rating == '🔥 优质':
-                    st.success(f"🎯 {code} {name} | "
-                              f"价:{result['price']:.2f} | 涨:{result['change_percent']:+.2f}% | "
-                              f"额:{result['change_amount']:+.2f} | 分:{result['score']} | "
-                              f"胜:{result['prob7_pct']}% | PF:{result['pf7']:.2f}")
             
             st.session_state.scanned_count += 1
-            time.sleep(delay_time)
+            time.sleep(delay_time)  # 用户设置的延迟
         
         # 检查是否完成
         if st.session_state.scanned_count >= total_stocks:
             st.session_state.scanning = False
             progress_bar.progress(1.0)
-            status_text = status_container.text(f"✅ 扫描完成! 共{total_stocks}只，优质{st.session_state.premium_count}只")
+            
+            # 显示完成状态
+            premium_count = st.session_state.premium_count
+            status_display.markdown(f"""
+            ### ✅ 扫描完成!
+            ---
+            📊 **扫描统计:**
+            - 总共扫描: {total_stocks}只股票
+            - 发现优质: {premium_count}只
+            - 完成时间: {datetime.now().strftime("%H:%M:%S")}
+            - 总用时: {(datetime.now() - datetime.strptime(current_time, "%H:%M:%S")).seconds}秒
+            
+            🎉 **扫描结束，请在下方查看详细结果**
+            """)
+            
+            # 显示最后的优质股票
+            if st.session_state.premium_stocks_display:
+                final_premium_content = "### 🏆 最终优质股票列表\n---\n"
+                for idx, stock in enumerate(st.session_state.premium_stocks_display, 1):
+                    final_premium_content += f"""
+**{idx:2d}. {stock['code']} {stock['name']}** | 
+价:{stock['price']:.2f} | 
+涨:{stock['change_percent']:+.2f}% | 
+分:{stock['score']} | 
+胜:{stock['prob7_pct']:.1f} | 
+PF:{stock['pf7']:.2f}
+
+"""
+                premium_display.success(final_premium_content)
+            
             st.balloons()
+            time.sleep(3)  # 显示完成状态3秒
         
         # 自动继续下一批（如果还没完成）
         if st.session_state.scanning:
             time.sleep(0.5)
             st.rerun()
 
-# 显示结果
+# ==================== 显示扫描结果 ====================
 st.markdown("---")
 
 if st.session_state.scan_results:
     df_results = pd.DataFrame(st.session_state.scan_results)
     
-    # 过滤有效结果
-    df_valid = df_results[~df_results['评级'].isin(['❌ 失败', '❌ 错误'])].copy()
+    # 过滤有效结果（排除失败、错误、超时等）
+    exclude_ratings = ['❌ 错误', '💥 异常', '⏰ 超时', '📉 数据不足']
+    df_valid = df_results[~df_results['评级'].isin(exclude_ratings)].copy()
     
     if not df_valid.empty:
         # 按评级排序
@@ -533,8 +788,10 @@ if st.session_state.scan_results:
         # 统计信息
         premium_count = len(df_sorted[df_sorted['评级'] == '🔥 优质'])
         total_scanned = len(df_sorted)
+        total_all = len(df_results)
+        failed_count = total_all - total_scanned
         
-        st.subheader(f"📊 实时扫描结果 ({total_scanned}只)")
+        st.subheader(f"📊 实时扫描结果 (成功{total_scanned}只, 失败{failed_count}只)")
         
         # 显示数据时间信息
         if '更新时间' in df_sorted.columns:
@@ -543,29 +800,36 @@ if st.session_state.scan_results:
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("总扫描", f"{total_scanned}只")
+            st.metric("成功扫描", f"{total_scanned}只")
         with col2:
             st.metric("优质股票", f"{premium_count}只")
         with col3:
             avg_score = df_sorted['信号分'].mean()
             st.metric("平均信号分", f"{avg_score:.1f}")
         with col4:
-            avg_pf = df_sorted['盈亏比'].mean()
-            st.metric("平均盈亏比", f"{avg_pf:.2f}")
+            success_rate = (total_scanned / total_all * 100) if total_all > 0 else 0
+            st.metric("成功率", f"{success_rate:.1f}%")
         
-        # 优质股票TXT
+        # 显示详细结果表格
+        st.dataframe(
+            df_sorted[['代码', '名称', '价格', '涨幅%', '信号分', '7日胜率%', 
+                      '盈亏比', '触发信号', '评级', '实时性']],
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # 优质股票TXT导出
         premium_df = df_sorted[df_sorted['评级'] == '🔥 优质']
         if not premium_df.empty:
-            st.subheader(f"🔥 优质股票 ({len(premium_df)}只)")
+            st.subheader(f"🔥 优质股票详情 ({len(premium_df)}只)")
             
             # 生成TXT内容
             txt_content = "=" * 100 + "\n"
             txt_content += "优质股票实时扫描结果\n"
             txt_content += "=" * 100 + "\n"
             txt_content += f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            txt_content += f"数据时间: {latest_update if 'latest_update' in locals() else '未知'}\n"
             txt_content += f"筛选标准: 盈亏比>{min_pf} 且 胜率>{min_win_rate}%\n"
-            txt_content += f"股票数量: {len(premium_df)}只\n"
+            txt_content += f"扫描数量: {total_all}只 (成功{total_scanned}只, 优质{len(premium_df)}只)\n"
             txt_content += "=" * 100 + "\n\n"
             
             for idx, (_, stock) in enumerate(premium_df.iterrows(), 1):
@@ -587,7 +851,14 @@ if st.session_state.scan_results:
                 mime="text/plain",
                 use_container_width=True
             )
-
+        
+        # 显示失败统计
+        if failed_count > 0:
+            st.warning(f"⚠️ 扫描过程中有{failed_count}只股票失败（超时、数据不足或异常），已自动跳过继续扫描。")
+            
+    else:
+        st.warning("⚠️ 没有成功扫描到有效股票数据，请检查网络连接或调整扫描参数。")
+        
 else:
     st.info("👈 请设置参数后点击'开始实时扫描'按钮")
 
@@ -598,5 +869,6 @@ st.caption(
     f"📊 实时扫描系统 | "
     f"科创板: {kcb_count}只 | 创业板: {cyb_count}只 | "
     f"更新时间: {current_time} | "
-    f"数据源: AKShare实时行情"
+    f"数据源: AKShare实时行情 | "
+    f"💡 提示: 程序具有超时保护，单个股票卡住会自动跳过"
 )

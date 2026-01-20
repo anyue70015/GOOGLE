@@ -6,7 +6,7 @@ import time
 import random
 from datetime import datetime, timedelta
 import warnings
-import akshare as ak  # 仅用于获取股票列表
+import akshare as ak
 warnings.filterwarnings('ignore')
 
 # ==================== 配置 ====================
@@ -14,22 +14,25 @@ st.set_page_config(page_title="股票短线扫描", layout="wide")
 st.title("科创板和创业板短线扫描工具")
 
 # ==================== 获取前300只股票 ====================
-@st.cache_data(ttl=3600)  # 缓存1小时
+@st.cache_data(ttl=3600)
 def get_top_300_stocks():
     """获取科创板和创业板成交额前300的股票"""
     try:
-        st.info("正在获取全市场股票列表...")
+        st.info("正在获取股票列表...")
         
-        # 获取全市场实时行情
         df_all = ak.stock_zh_a_spot_em()
         
         if df_all.empty:
-            st.error("无法获取股票列表，使用备用股票池")
             return get_backup_stocks()
         
         # 数据清洗
         df_all['代码'] = df_all['代码'].astype(str).str.zfill(6)
         df_all['名称'] = df_all['名称'].astype(str)
+        
+        # 确保成交额列存在
+        if '成交额' not in df_all.columns:
+            df_all['成交额'] = 0
+        
         df_all['成交额'] = pd.to_numeric(df_all['成交额'], errors='coerce').fillna(0)
         
         # 筛选科创板和创业板
@@ -44,30 +47,53 @@ def get_top_300_stocks():
         df_combined = pd.concat([df_kcb_top, df_cyb_top], ignore_index=True)
         
         if df_combined.empty:
-            st.warning("未获取到足够股票，使用备用股票池")
             return get_backup_stocks()
         
         # 转换为字典
         stock_dict = dict(zip(df_combined['代码'], df_combined['名称']))
         
-        st.success(f"成功获取 {len(stock_dict)} 只股票 (科创板: {len(df_kcb_top)}只, 创业板: {len(df_cyb_top)}只)")
+        st.success(f"获取成功: {len(stock_dict)} 只股票")
         return stock_dict
         
     except Exception as e:
-        st.warning(f"获取股票列表失败: {str(e)[:100]}，使用备用股票池")
+        st.warning(f"获取失败，使用备用股票池: {str(e)[:100]}")
         return get_backup_stocks()
 
 def get_backup_stocks():
     """备用股票池"""
     backup_stocks = {}
     
-    # 科创板
-    for i in range(1, 301):
+    # 科创板示例股票
+    kcb_samples = {
+        "688981": "中芯国际", "688111": "金山办公", "688126": "沪硅产业",
+        "688008": "澜起科技", "688099": "晶晨股份", "688036": "传音控股",
+        "688185": "康希诺", "688390": "固德威", "688169": "石头科技",
+        "688399": "硕世生物", "688019": "安集科技", "688088": "虹软科技",
+        "688116": "天奈科技", "688321": "微芯生物", "688363": "华熙生物",
+        "688568": "中科星图", "688122": "西部超导", "688005": "容百科技",
+        "688777": "中控技术", "688278": "特宝生物"
+    }
+    
+    # 创业板示例股票
+    cyb_samples = {
+        "300750": "宁德时代", "300059": "东方财富", "300760": "迈瑞医疗",
+        "300498": "温氏股份", "300142": "沃森生物", "300015": "爱尔眼科",
+        "300124": "汇川技术", "300274": "阳光电源", "300122": "智飞生物",
+        "300014": "亿纬锂能", "300347": "泰格医药", "300595": "欧普康视",
+        "300601": "康泰生物", "300628": "亿联网络", "300676": "华大基因",
+        "300782": "卓胜微", "300896": "爱美客", "300999": "金龙鱼",
+        "300750": "宁德时代", "300413": "芒果超媒"
+    }
+    
+    backup_stocks.update(kcb_samples)
+    backup_stocks.update(cyb_samples)
+    
+    # 添加更多模拟股票
+    for i in range(21, 301):
         code = f"688{i:03d}"
         backup_stocks[code] = f"科创板{i}"
     
-    # 创业板
-    for i in range(1, 301):
+    for i in range(21, 301):
         code = f"300{i:03d}"
         backup_stocks[code] = f"创业板{i}"
     
@@ -80,23 +106,21 @@ STOCK_POOL = get_top_300_stocks()
 def get_yf_symbol(code):
     """将A股代码转换为yfinance格式"""
     if code.startswith('6'):
-        return f"{code}.SS"  # 上海交易所
+        return f"{code}.SS"
     elif code.startswith('3') or code.startswith('0'):
-        return f"{code}.SZ"  # 深圳交易所
+        return f"{code}.SZ"
     else:
         return code
 
-@st.cache_data(ttl=600, show_spinner=False)  # 缓存10分钟
+@st.cache_data(ttl=600, show_spinner=False)
 def fetch_yf_data(stock_code, days=180):
     """使用yfinance获取股票历史数据"""
     try:
         yf_symbol = get_yf_symbol(stock_code)
         
-        # 计算日期
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days + 20)
         
-        # 下载数据
         ticker = yf.Ticker(yf_symbol)
         df = ticker.history(start=start_date, end=end_date)
         
@@ -114,6 +138,14 @@ def fetch_yf_data(stock_code, days=180):
         prev_price = close_prices[-2] if len(close_prices) > 1 else current_price
         price_change = ((current_price - prev_price) / prev_price * 100) if prev_price > 0 else 0
         
+        # 计算成交额（使用最近20天平均）
+        if len(volumes) >= 20:
+            avg_volume = np.mean(volumes[-20:])
+            turnover = avg_volume * current_price / 1e8  # 转换为亿元
+        else:
+            avg_volume = np.mean(volumes) if len(volumes) > 0 else 0
+            turnover = 0
+        
         return {
             'close': close_prices,
             'high': high_prices,
@@ -122,7 +154,8 @@ def fetch_yf_data(stock_code, days=180):
             'current_price': round(current_price, 2),
             'price_change': round(price_change, 2),
             'data_points': len(df),
-            'avg_volume': np.mean(volumes[-20:]) if len(volumes) >= 20 else np.mean(volumes)
+            'avg_volume': avg_volume,
+            'turnover': round(turnover, 2)  # 成交额（亿元）
         }, True, "成功"
         
     except Exception as e:
@@ -209,8 +242,6 @@ def calculate_volume_ratio(volume):
 def calculate_signals(stock_data):
     """计算技术信号"""
     close = stock_data['close']
-    high = stock_data['high']
-    low = stock_data['low']
     volume = stock_data['volume']
     
     if len(close) < 20:
@@ -220,8 +251,7 @@ def calculate_signals(stock_data):
             'win_rate': 50.0,
             'profit_factor': 1.0,
             'rsi': 50.0,
-            'volume_ratio': 1.0,
-            'trend_strength': 0.0
+            'volume_ratio': 1.0
         }
     
     # 计算指标
@@ -246,31 +276,35 @@ def calculate_signals(stock_data):
     # 生成信号
     signals = []
     
-    # 1. MACD金叉（柱状线>0）
-    if macd_hist[-1] > 0 and macd_hist[-2] <= 0:
+    # MACD信号
+    if macd_hist[-1] > 0 and (len(macd_hist) < 2 or macd_hist[-2] <= 0):
         signals.append("MACD金叉")
     elif macd_hist[-1] > 0:
         signals.append("MACD向上")
     
-    # 2. 放量（量比>1.2）
+    # 成交量信号
     if volume_ratio > 1.2:
         signals.append(f"放量{volume_ratio:.1f}x")
     
-    # 3. RSI强势（60-80）
+    # RSI信号
     if 60 <= rsi[-1] <= 80:
         signals.append(f"RSI{rsi[-1]:.0f}")
     elif rsi[-1] > 80:
         signals.append("RSI超买")
+    elif rsi[-1] < 30:
+        signals.append("RSI超卖")
     
-    # 4. 价格在20日均线上
+    # 价格位置信号
     if close[-1] > ma20 * 1.02:
         signals.append("站上均线")
     elif close[-1] > ma20:
         signals.append("均线上方")
     
-    # 5. 趋势向上
+    # 趋势信号
     if trend_strength > 1.0:
         signals.append(f"趋势+{trend_strength:.1f}%")
+    elif trend_strength < -1.0:
+        signals.append(f"趋势{trend_strength:.1f}%")
     
     score = len(signals)
     
@@ -291,18 +325,16 @@ def calculate_signals(stock_data):
     # 根据RSI调整
     if 30 <= rsi[-1] <= 70:
         base_win_rate += 5
-        base_profit_factor += 0.3
     
     # 根据量比调整
     if 1.0 <= volume_ratio <= 2.0:
         base_win_rate += 3
-        base_profit_factor += 0.2
     
     return {
         'score': score,
         'signals': signals,
-        'win_rate': round(base_win_rate, 1),
-        'profit_factor': round(base_profit_factor, 2),
+        'win_rate': max(0, min(100, round(base_win_rate, 1))),
+        'profit_factor': max(0, round(base_profit_factor, 2)),
         'rsi': round(rsi[-1], 1),
         'volume_ratio': round(volume_ratio, 2),
         'trend_strength': round(trend_strength, 1),
@@ -323,18 +355,21 @@ def scan_stock(stock_code, stock_name):
                 '价格': 0,
                 '涨幅%': 0,
                 '信号分': 0,
-                '7日胜率%': 0,
+                '胜率%': 0,
                 '盈亏比': 0,
-                '触发信号': f"数据失败",
+                '触发信号': "数据失败",
                 '评级': '❌ 失败',
                 '数据点': 0,
                 'RSI': 0,
                 '量比': 0,
-                '趋势强度': 0
+                '成交额': 0
             }
         
         # 计算信号
         signals = calculate_signals(stock_data)
+        
+        # 获取成交额（安全方式）
+        turnover = stock_data.get('turnover', 0)
         
         # 判断评级
         if signals['profit_factor'] > 4 and signals['win_rate'] > 68:
@@ -353,15 +388,13 @@ def scan_stock(stock_code, stock_name):
             '涨幅%': stock_data['price_change'],
             'RSI': signals['rsi'],
             '量比': signals['volume_ratio'],
-            '趋势强度': signals['trend_strength'],
-            '均线位置': signals['ma_position'],
             '信号分': signals['score'],
-            '7日胜率%': signals['win_rate'],
+            '胜率%': signals['win_rate'],
             '盈亏比': signals['profit_factor'],
             '触发信号': " ".join(signals['signals']) if signals['signals'] else "无信号",
             '评级': rating,
             '数据点': stock_data['data_points'],
-            '成交额': round(stock_data['avg_volume'] * stock_data['current_price'] / 1e8, 2),  # 亿元
+            '成交额': turnover,  # 亿元
             '扫描时间': datetime.now().strftime("%H:%M:%S")
         }
         
@@ -372,14 +405,14 @@ def scan_stock(stock_code, stock_name):
             '价格': 0,
             '涨幅%': 0,
             '信号分': 0,
-            '7日胜率%': 0,
+            '胜率%': 0,
             '盈亏比': 0,
             '触发信号': f"错误",
             '评级': '❌ 错误',
             '数据点': 0,
             'RSI': 0,
             '量比': 0,
-            '趋势强度': 0
+            '成交额': 0
         }
 
 # ==================== 主界面 ====================
@@ -397,31 +430,26 @@ if 'scanned_count' not in st.session_state:
 with st.sidebar:
     st.title("⚙️ 扫描设置")
     
-    # 选择股票数量
     stock_count = st.slider(
         "扫描股票数量",
         min_value=10,
         max_value=min(600, len(STOCK_POOL)),
         value=min(100, len(STOCK_POOL)),
-        step=10,
-        help=f"最多可扫描 {len(STOCK_POOL)} 只股票"
+        step=10
     )
     
-    # 优质标准
     st.subheader("优质标准")
     min_pf = st.slider("最小盈亏比", 2.0, 8.0, 4.0, 0.5)
     min_win_rate = st.slider("最小胜率%", 50, 90, 68, 2)
     
-    # 扫描设置
     st.subheader("扫描设置")
     batch_size = st.slider("每批数量", 1, 20, 5, 1)
-    delay_time = st.slider("请求延迟(秒)", 0.1, 3.0, 0.8, 0.1)
+    delay_time = st.slider("延迟(秒)", 0.1, 3.0, 0.8, 0.1)
     
-    # 显示信息
     st.markdown("---")
-    st.info(f"股票池: {len(STOCK_POOL)} 只")
-    st.info(f"科创板: {len([c for c in STOCK_POOL.keys() if c.startswith('688')])} 只")
-    st.info(f"创业板: {len([c for c in STOCK_POOL.keys() if c.startswith('300')])} 只")
+    st.info(f"股票总数: {len(STOCK_POOL)}")
+    st.info(f"科创板: {len([c for c in STOCK_POOL if c.startswith('688')])}")
+    st.info(f"创业板: {len([c for c in STOCK_POOL if c.startswith('300')])}")
 
 # 控制面板
 st.markdown("---")
@@ -449,58 +477,49 @@ with col3:
 with col4:
     if st.button("📊 刷新股票池", use_container_width=True):
         st.cache_data.clear()
+        global STOCK_POOL
         STOCK_POOL = get_top_300_stocks()
         st.rerun()
 
 # 扫描进度
 if st.session_state.scanning:
-    # 获取要扫描的股票列表
     all_stocks = list(STOCK_POOL.items())
     stocks_to_scan = all_stocks[:stock_count]
     total_stocks = len(stocks_to_scan)
     
-    # 已经扫描的数量
     scanned_count = st.session_state.scanned_count
     
     if scanned_count < total_stocks:
-        # 计算本次批次
         batch_end = min(scanned_count + batch_size, total_stocks)
         
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # 扫描本批次
         for i in range(scanned_count, batch_end):
             stock_code, stock_name = stocks_to_scan[i]
             
-            # 更新进度
             progress = (i + 1) / total_stocks
             progress_bar.progress(progress)
-            status_text.text(f"正在扫描: {stock_code} {stock_name} ({i+1}/{total_stocks})")
+            status_text.text(f"扫描: {stock_code} {stock_name} ({i+1}/{total_stocks})")
             
-            # 扫描股票
             result = scan_stock(stock_code, stock_name)
             st.session_state.scan_results.append(result)
             st.session_state.scanned_count += 1
             
-            # 检查是否优质
             if result['评级'] == '🔥 优质':
                 st.session_state.premium_count += 1
-                st.success(f"🎯 优质发现: {stock_code} {stock_name} | "
+                st.success(f"🎯 {stock_code} {stock_name} | "
                           f"价:{result['价格']} | 涨:{result['涨幅%']:+.2f}% | "
-                          f"分:{result['信号分']} | 胜:{result['7日胜率%']}% | "
+                          f"分:{result['信号分']} | 胜:{result['胜率%']}% | "
                           f"PF:{result['盈亏比']:.2f}")
             
-            # 延迟
             time.sleep(delay_time)
         
-        # 批次完成，自动继续
         st.rerun()
     else:
-        # 扫描完成
         st.session_state.scanning = False
         st.balloons()
-        st.success(f"✅ 扫描完成！共扫描 {total_stocks} 只股票，发现 {st.session_state.premium_count} 只优质股票")
+        st.success(f"✅ 完成! 扫描{total_stocks}只, 优质{st.session_state.premium_count}只")
 
 # 显示结果
 st.markdown("---")
@@ -508,19 +527,19 @@ st.markdown("---")
 if st.session_state.scan_results:
     df_results = pd.DataFrame(st.session_state.scan_results)
     
-    # 过滤掉失败的结果
+    # 过滤有效结果
     df_valid = df_results[~df_results['评级'].isin(['❌ 失败', '❌ 错误'])].copy()
     
     if not df_valid.empty:
-        # 按评级和盈亏比排序
+        # 按评级排序
         rating_order = {'🔥 优质': 0, '✅ 良好': 1, '📊 一般': 2, '⚠️ 弱势': 3}
         df_valid['rating_order'] = df_valid['评级'].map(rating_order)
         df_valid = df_valid.sort_values(['rating_order', '盈亏比'], ascending=[True, False])
         
-        # 显示统计信息
+        # 显示统计
         st.subheader("📈 扫描统计")
         
-        col_stat1, col_stat2, col_stat3, col_stat4, col_stat5 = st.columns(5)
+        col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
         
         with col_stat1:
             total_scanned = len(df_valid)
@@ -535,10 +554,6 @@ if st.session_state.scan_results:
             st.metric("平均信号分", f"{avg_score:.1f}")
         
         with col_stat4:
-            avg_win = df_valid['7日胜率%'].mean()
-            st.metric("平均胜率", f"{avg_win:.1f}%")
-        
-        with col_stat5:
             avg_pf = df_valid['盈亏比'].mean()
             st.metric("平均盈亏比", f"{avg_pf:.2f}")
         
@@ -547,7 +562,7 @@ if st.session_state.scan_results:
         if not premium_stocks.empty:
             st.subheader(f"🔥 优质股票列表 ({len(premium_stocks)}只)")
             
-            # 创建TXT格式的显示
+            # 生成TXT内容
             txt_content = "优质股票列表\n"
             txt_content += "=" * 80 + "\n"
             txt_content += f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
@@ -555,47 +570,55 @@ if st.session_state.scan_results:
             txt_content += "=" * 80 + "\n\n"
             
             for idx, (_, stock) in enumerate(premium_stocks.iterrows(), 1):
+                # 使用.get()方法安全获取字段
+                turnover = stock.get('成交额', 0)
+                
                 txt_content += f"{idx:3d}. {stock['代码']} {stock['名称']:<10} "
-                txt_content += f"价格:{stock['价格']:7.2f} 涨幅:{stock['涨幅%']:+6.2f}% "
-                txt_content += f"信号分:{stock['信号分']:1d} RSI:{stock['RSI']:5.1f} "
-                txt_content += f"量比:{stock['量比']:4.1f}x "
-                txt_content += f"胜率:{stock['7日胜率%']:5.1f}% "
-                txt_content += f"盈亏比:{stock['盈亏比']:5.2f}\n"
+                txt_content += f"价:{stock['价格']:7.2f} 涨:{stock['涨幅%']:+6.2f}% "
+                txt_content += f"分:{stock['信号分']:1d} RSI:{stock.get('RSI', 0):5.1f} "
+                txt_content += f"量:{stock.get('量比', 0):4.1f}x "
+                txt_content += f"胜:{stock['胜率%']:5.1f}% "
+                txt_content += f"PF:{stock['盈亏比']:5.2f} "
+                txt_content += f"额:{turnover:5.2f}亿\n"
                 txt_content += f"    信号: {stock['触发信号']}\n"
                 txt_content += "-" * 80 + "\n"
             
-            # 在Streamlit中显示
-            st.text_area("优质股票详情 (TXT格式)", txt_content, height=300)
+            # 显示和下载TXT
+            st.text_area("优质股票详情", txt_content, height=250)
             
-            # 下载TXT按钮
             st.download_button(
                 label="📥 下载优质股票列表 (TXT)",
                 data=txt_content,
-                file_name=f"优质股票列表_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                file_name=f"优质股票_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
                 mime="text/plain",
                 use_container_width=True
             )
         
         st.markdown("---")
         
-        # 显示完整表格
-        st.subheader(f"📋 完整扫描结果 ({len(df_valid)}只)")
+        # 显示完整结果
+        st.subheader(f"📋 完整结果 ({len(df_valid)}只)")
         
-        # 创建TXT格式的完整结果
+        # 生成完整TXT
         full_txt_content = "完整股票扫描结果\n"
         full_txt_content += "=" * 100 + "\n"
         full_txt_content += f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        full_txt_content += f"扫描数量: {len(df_valid)}只 优质股票: {len(premium_stocks)}只\n"
+        full_txt_content += f"扫描数量: {len(df_valid)}只 | 优质股票: {len(premium_stocks)}只\n"
         full_txt_content += "=" * 100 + "\n\n"
         
         for _, stock in df_valid.iterrows():
+            # 安全获取所有字段
+            turnover = stock.get('成交额', 0)
+            rsi_value = stock.get('RSI', 0)
+            volume_ratio = stock.get('量比', 0)
+            
             full_txt_content += f"{stock['评级']} {stock['代码']} {stock['名称']:<10} "
             full_txt_content += f"价:{stock['价格']:7.2f} 涨:{stock['涨幅%']:+6.2f}% "
-            full_txt_content += f"分:{stock['信号分']:1d} RSI:{stock['RSI']:5.1f} "
-            full_txt_content += f"量:{stock['量比']:4.1f}x "
-            full_txt_content += f"胜:{stock['7日胜率%']:5.1f}% "
+            full_txt_content += f"分:{stock['信号分']:1d} RSI:{rsi_value:5.1f} "
+            full_txt_content += f"量:{volume_ratio:4.1f}x "
+            full_txt_content += f"胜:{stock['胜率%']:5.1f}% "
             full_txt_content += f"PF:{stock['盈亏比']:5.2f} "
-            full_txt_content += f"成:{stock['成交额']:5.2f}亿\n"
+            full_txt_content += f"额:{turnover:5.2f}亿\n"
             full_txt_content += f"    信号: {stock['触发信号']}\n"
             full_txt_content += "-" * 100 + "\n"
         
@@ -603,57 +626,57 @@ if st.session_state.scan_results:
         full_txt_content += "\n" + "=" * 100 + "\n"
         full_txt_content += "扫描统计:\n"
         full_txt_content += f"- 平均信号分: {avg_score:.2f}\n"
-        full_txt_content += f"- 平均胜率: {avg_win:.2f}%\n"
+        full_txt_content += f"- 平均胜率: {df_valid['胜率%'].mean():.2f}%\n"
         full_txt_content += f"- 平均盈亏比: {avg_pf:.2f}\n"
-        full_txt_content += f"- 优质股票比例: {premium_count/total_scanned*100:.1f}%\n"
+        full_txt_content += f"- 优质股票比例: {len(premium_stocks)/len(df_valid)*100:.1f}%\n"
         full_txt_content += "=" * 100
         
-        # 显示TXT内容
-        with st.expander("📄 查看完整TXT格式结果"):
-            st.text_area("完整结果", full_txt_content, height=400)
+        # 显示和下载完整TXT
+        with st.expander("📄 查看完整TXT结果"):
+            st.text_area("完整结果", full_txt_content, height=350)
         
-        # 下载完整TXT按钮
-        st.download_button(
-            label="📥 下载完整结果 (TXT)",
-            data=full_txt_content,
-            file_name=f"完整股票扫描_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+        col_dl1, col_dl2 = st.columns(2)
         
-        # 也提供CSV下载
-        csv_data = df_valid.to_csv(index=False, encoding='utf-8-sig')
-        st.download_button(
-            label="📥 下载完整结果 (CSV)",
-            data=csv_data,
-            file_name=f"股票扫描_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        with col_dl1:
+            st.download_button(
+                label="📥 下载完整结果 (TXT)",
+                data=full_txt_content,
+                file_name=f"完整扫描_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        
+        with col_dl2:
+            csv_data = df_valid.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📥 下载完整结果 (CSV)",
+                data=csv_data,
+                file_name=f"股票扫描_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
         
         # 显示数据表格
         with st.expander("📊 查看数据表格"):
-            display_df = df_valid.copy()
             display_cols = ['评级', '代码', '名称', '价格', '涨幅%', 'RSI', '量比', 
-                           '信号分', '7日胜率%', '盈亏比', '触发信号', '成交额']
+                           '信号分', '胜率%', '盈亏比', '触发信号']
             
             st.dataframe(
-                display_df[display_cols],
+                df_valid[display_cols],
                 use_container_width=True,
                 height=400
             )
         
     else:
-        st.warning("没有成功获取到任何股票数据")
+        st.warning("没有获取到有效数据")
         
 else:
-    st.info("👈 请点击'开始扫描'按钮开始分析股票")
+    st.info("👈 点击'开始扫描'按钮开始分析")
     
-    # 显示股票池信息
     with st.expander("📋 查看股票池"):
         st.write(f"共 {len(STOCK_POOL)} 只股票")
         
-        # 显示前20只
+        # 显示示例
         sample_stocks = list(STOCK_POOL.items())[:20]
         sample_df = pd.DataFrame(sample_stocks, columns=['代码', '名称'])
         st.dataframe(sample_df, use_container_width=True)
@@ -661,17 +684,7 @@ else:
 # 页脚
 st.markdown("---")
 st.caption(
-    f"📊 数据源: yfinance + AKShare(列表) | "
+    f"📊 数据源: yfinance + AKShare | "
     f"股票总数: {len(STOCK_POOL)}只 | "
     f"更新时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 )
-
-# 调试信息
-with st.expander("🔧 调试信息"):
-    st.write(f"Session State:")
-    st.json({
-        "scan_results_count": len(st.session_state.scan_results),
-        "scanned_count": st.session_state.scanned_count,
-        "premium_count": st.session_state.premium_count,
-        "scanning": st.session_state.scanning
-    })

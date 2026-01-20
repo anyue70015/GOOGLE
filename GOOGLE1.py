@@ -3,13 +3,14 @@ import numpy as np
 import time
 import pandas as pd
 import random
-import baostock as bs
+import akshare as ak
 import os
 import json
 from datetime import datetime, timedelta
+from retrying import retry
 
-st.set_page_config(page_title="科创板 + 创业板短线扫描工具 (Baostock版)", layout="wide")
-st.title("科创板 + 创业板短线扫描工具（Baostock稳定版）")
+st.set_page_config(page_title="科创板 + 创业板短线扫描工具", layout="wide")
+st.title("科创板 + 创业板短线扫描工具（AKShare + 重试超时完整版）")
 
 # ── 持久化进度 ──
 progress_file = "kcb_cyb_scan_progress.json"
@@ -85,49 +86,28 @@ with col_resume:
             st.session_state.paused = False
             st.rerun()
 
-st.markdown("扫描科创板(688开头) + 创业板(300开头) 股票（Baostock源，按代码排序取前300各）。上市天数 > 360 天。优质信号（PF7>4 且 概率>68%）实时弹出。")
+st.markdown("扫描科创板(688开头) + 创业板(300开头) 最近成交额前300只（总≤600只）。上市天数 > 360 天。优质信号（PF7>4 且 概率>68%）实时弹出。")
 
-# ==================== 加载股票列表（Baostock版） ====================
+# ==================== 加载股票列表 ====================
 @st.cache_data(ttl=1800)
 def load_kcb_cyb_tickers():
     try:
-        st.info("Baostock加载科创板 + 创业板股票列表...")
-        lg = bs.login()
-        if lg.error_code != '0':
-            st.error(f"登录失败: {lg.error_msg}")
-            return [], {}
-        
-        rs = bs.query_all_stock(day=datetime.now().strftime("%Y-%m-%d"))
-        if rs.error_code != '0':
-            st.error(f"查询失败: {rs.error_msg}")
-            bs.logout()
-            return [], {}
-        
-        data_list = []
-        while rs.error_code == '0' and rs.next():
-            data_list.append(rs.get_row_data())
-        
-        df = pd.DataFrame(data_list, columns=rs.fields)
-        df['代码'] = df['code'].str[3:]  # 去sh./sz.前缀
-        df_target = df[df['代码'].str.startswith(('688', '300')) & (df['code_name'] != '')].copy()
-        
-        # 按代码排序，取各前300
-        df_target = df_target.sort_values('代码')
+        st.info("加载全市场实时行情 → 过滤科创板 + 创业板 → 按成交额前300...")
+        df = ak.stock_zh_a_spot_em()
+        df['代码'] = df['代码'].astype(str).str.zfill(6)
+        df_target = df[df['代码'].str.startswith(('688', '300'))].copy()
+        df_target['成交额'] = pd.to_numeric(df_target['成交额'], errors='coerce').fillna(0)
+        df_target = df_target.sort_values('成交额', ascending=False)
         kcb = df_target[df_target['代码'].str.startswith('688')].head(300)
         cyb = df_target[df_target['代码'].str.startswith('300')].head(300)
-        df_selected = pd.concat([kcb, cyb])
-        
+        df_selected = pd.concat([kcb, cyb], ignore_index=True)
         tickers = df_selected['代码'].tolist()
-        names = dict(zip(df_selected['代码'], df_selected['code_name']))
-        
-        bs.logout()
+        names = dict(zip(df_selected['代码'], df_selected['名称']))
         st.success(f"加载成功：{len(tickers)} 只")
         return tickers, names
     except Exception as e:
-        st.error(f"加载异常: {e}")
-        if 'lg' in locals():
-            bs.logout()
-        return [], {}
+        st.error(f"加载失败: {e}")
+        return ["688981", "300750"], {"688981": "中芯国际", "300750": "宁德时代"}
 
 tickers_to_scan, stock_names = load_kcb_cyb_tickers()
 st.write(f"扫描范围：{len(tickers_to_scan)} 只")
@@ -140,52 +120,33 @@ BACKTEST_CONFIG = {
     "2年":   {"days": 730},
 }
 
-# ==================== 获取日K - Baostock版 ====================
-@st.cache_data(ttl=3600 * 24, show_spinner=False)
+# ==================== 获取日K - 加重试 + 超时 ====================
+@retry(stop_max_attempt_number=3, wait_exponential_multiplier=1000, wait_exponential_max=10000)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_ohlcv_ak(symbol: str, days_back: int):
-    lg = bs.login()
-    if lg.error_code != '0':
-        return None, None, None, None
-    
     try:
-        bs_code = "sh." + symbol if symbol.startswith('688') else "sz." + symbol
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=days_back + 60)).strftime("%Y-%m-%d")
-        
-        rs = bs.query_history_k_data_plus(
-            code=bs_code,
-            fields="date,open,high,low,close,volume",
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=days_back + 60)).strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(
+            symbol=symbol,
+            period="daily",
             start_date=start_date,
             end_date=end_date,
-            frequency="d",
-            adjustflag="2"  # 前复权
+            adjust="qfq",
+            timeout=20
         )
-        
-        if rs.error_code != '0' or not rs.next():
-            bs.logout()
+        if df.empty or len(df) < 30:
             return None, None, None, None
-        
-        data_list = []
-        while rs.error_code == '0' and rs.next():
-            data_list.append(rs.get_row_data())
-        
-        df = pd.DataFrame(data_list, columns=rs.fields)
-        if len(df) < 30:
-            bs.logout()
-            return None, None, None, None
-        
-        close = pd.to_numeric(df['close']).values
-        high = pd.to_numeric(df['high']).values
-        low = pd.to_numeric(df['low']).values
-        volume = pd.to_numeric(df['volume']).values * 100
-        
-        bs.logout()
+        close = df['收盘'].values.astype(float)
+        high = df['最高'].values.astype(float)
+        low = df['最低'].values.astype(float)
+        volume = df['成交量'].values.astype(float) * 100
         return close, high, low, volume
-    except:
-        bs.logout()
-        return None, None, None, None
+    except Exception as e:
+        print(f"fetch_ohlcv_ak 失败 {symbol}: {str(e)}")
+        raise
 
-# ==================== 指标函数（原样保持） ====================
+# ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -246,59 +207,71 @@ def backtest_with_stats(close, score, steps):
     return win_rate, pf
 
 # ==================== 核心计算 ====================
-@st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
-    days = BACKTEST_CONFIG[cfg_key]["days"]
-    close, high, low, volume = fetch_ohlcv_ak(symbol, days)
-    if close is None:
+    try:
+        info = ak.stock_individual_info_em(symbol)
+        listing_str = info[info['item'] == '上市日期']['value'].values[0]
+        listing_date = pd.to_datetime(listing_str)
+        days_listed = (datetime.now() - listing_date).days
+        if days_listed <= 360:
+            return None
+
+        days = BACKTEST_CONFIG[cfg_key]["days"]
+        close, high, low, volume = fetch_ohlcv_ak(symbol, days)
+        if close is None:
+            return None
+
+        macd_hist = macd_hist_np(close)
+        rsi = rsi_np(close)
+        atr = atr_np(high, low, close)
+        obv = obv_np(close, volume)
+        vol_ma20 = rolling_mean_np(volume, 20)
+        atr_ma20 = rolling_mean_np(atr, 20)
+        obv_ma20 = rolling_mean_np(obv, 20)
+
+        sig_macd = macd_hist[-1] > 0
+        sig_vol = volume[-1] > vol_ma20[-1] * 1.1 if len(vol_ma20) > 0 else False
+        sig_rsi = rsi[-1] >= 60
+        sig_atr = atr[-1] > atr_ma20[-1] * 1.1 if len(atr_ma20) > 0 else False
+        sig_obv = obv[-1] > obv_ma20[-1] * 1.05 if len(obv_ma20) > 0 else False
+
+        score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
+
+        sig_details = {
+            "MACD>0": sig_macd, "放量": sig_vol, "RSI≥60": sig_rsi,
+            "ATR放大": sig_atr, "OBV上升": sig_obv
+        }
+
+        sig_macd_hist = (macd_hist > 0).astype(int)
+        sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int) if len(vol_ma20) > 0 else np.zeros_like(close, dtype=int)
+        sig_rsi_hist = (rsi >= 60).astype(int)
+        sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int) if len(atr_ma20) > 0 else np.zeros_like(close, dtype=int)
+        sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int) if len(obv_ma20) > 0 else np.zeros_like(close, dtype=int)
+        score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
+
+        prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+
+        price = close[-1]
+        change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
+        is_low_liquidity = (volume[-30:] * close[-30:]).mean() < 100000000 if len(close) >= 30 else True
+
+        return {
+            "symbol": symbol,
+            "name": stock_names.get(symbol, "未知"),
+            "price": round(price, 2),
+            "change": round(change, 2),
+            "score": score,
+            "prob7": prob7,
+            "pf7": pf7,
+            "prob7_pct": round(prob7 * 100, 1),
+            "is_low_liquidity": is_low_liquidity,
+            "signals": ", ".join([k for k, v in sig_details.items() if v]) or "无"
+        }
+    except Exception as e:
+        print(f"compute_stock_metrics 异常 {symbol}: {str(e)}")
         return None
 
-    macd_hist = macd_hist_np(close)
-    rsi = rsi_np(close)
-    atr = atr_np(high, low, close)
-    obv = obv_np(close, volume)
-    vol_ma20 = rolling_mean_np(volume, 20)
-    atr_ma20 = rolling_mean_np(atr, 20)
-    obv_ma20 = rolling_mean_np(obv, 20)
-
-    sig_macd = macd_hist[-1] > 0
-    sig_vol = volume[-1] > vol_ma20[-1] * 1.1 if len(vol_ma20) > 0 else False
-    sig_rsi = rsi[-1] >= 60
-    sig_atr = atr[-1] > atr_ma20[-1] * 1.1 if len(atr_ma20) > 0 else False
-    sig_obv = obv[-1] > obv_ma20[-1] * 1.05 if len(obv_ma20) > 0 else False
-
-    score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
-
-    sig_details = {
-        "MACD>0": sig_macd, "放量": sig_vol, "RSI≥60": sig_rsi,
-        "ATR放大": sig_atr, "OBV上升": sig_obv
-    }
-
-    sig_macd_hist = (macd_hist > 0).astype(int)
-    sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int) if len(vol_ma20) > 0 else np.zeros_like(close, dtype=int)
-    sig_rsi_hist = (rsi >= 60).astype(int)
-    sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int) if len(atr_ma20) > 0 else np.zeros_like(close, dtype=int)
-    sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int) if len(obv_ma20) > 0 else np.zeros_like(close, dtype=int)
-    score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
-
-    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
-
-    price = close[-1]
-    change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
-
-    return {
-        "symbol": symbol,
-        "name": stock_names.get(symbol, "未知"),
-        "price": round(price, 2),
-        "change": round(change, 2),
-        "score": score,
-        "prob7": prob7,
-        "pf7": pf7,
-        "prob7_pct": round(prob7 * 100, 1),
-        "signals": ", ".join([k for k, v in sig_details.items() if v]) or "无"
-    }
-
-# ==================== 主扫描逻辑 ====================
+# ==================== 主界面 ====================
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 
 for key in ['high_prob', 'scanned_symbols', 'failed_count', 'fully_scanned', 'scanning', 'paused']:
@@ -326,7 +299,7 @@ if st.button("🚀 开始/继续扫描"):
     st.session_state.scanning = True
 
 if st.session_state.scanning and current_completed < total and not st.session_state.paused:
-    with st.spinner("扫描中（每批10只，Baostock防卡）..."):
+    with st.spinner("扫描中（每批10只，已加重试+超时）..."):
         batch_size = 10
         processed = 0
         remaining = [s for s in tickers_to_scan if s not in st.session_state.scanned_symbols]
@@ -351,7 +324,7 @@ if st.session_state.scanning and current_completed < total and not st.session_st
 
             st.session_state.scanned_symbols.add(sym)
             processed += 1
-            time.sleep(random.uniform(5.0, 10.0))  # Baostock延时防限
+            time.sleep(random.uniform(8.0, 15.0))
 
         batch_time = time.time() - batch_start
         avg = batch_time / processed if processed > 0 else 0
@@ -360,7 +333,7 @@ if st.session_state.scanning and current_completed < total and not st.session_st
         if len(st.session_state.scanned_symbols & set(tickers_to_scan)) >= total:
             st.session_state.fully_scanned = True
             st.session_state.scanning = False
-            st.success("扫描完成！")
+            st.success("扫描完成！优质股已在上面实时显示")
 
         save_progress()
         st.rerun()
@@ -385,16 +358,35 @@ if high_prob_list:
 
     df_display = pd.concat([df_premium, df_others]) if not df_premium.empty else df_others
 
-    st.subheader(f"扫描结果共 {len(df_display)} 只，其中优质 {len(df_premium)} 只")
+    premium_count = len(df_premium)
+    total_count = len(df_display)
+
+    st.subheader(f"扫描结果共 {total_count} 只，其中优质 {premium_count} 只（实时已弹出，可全选复制）")
 
     display_lines = []
+    txt_lines = []
+
     for _, row in df_display.iterrows():
-        display_line = f"[{row['group']}] {row['symbol']}  {row['name']}  现价 {row['price']:.2f}  涨幅 {row['change']:+.2f}%  得分 {row['score']}  7日胜率 {row['prob7_pct']}%  PF7 {row['pf7']:.2f}  信号: {row['signals']}"
+        liq = "低流动性" if row.get('is_low_liquidity', False) else "正常流动性"
+        display_line = f"[{row['group']}] {row['symbol']}  {row['name']}  现价 {row['price']:.2f}  涨幅 {row['change']:+.2f}%  得分 {row['score']}  7日胜率 {row['prob7_pct']}%  PF7 {row['pf7']:.2f}  {liq}  信号: {row['signals']}"
         display_lines.append(display_line)
 
-    st.text_area("结果（优质已排最前）", "\n".join(display_lines), height=600)
+        txt_line = f"{row['symbol']}|{row['name']}|{row['price']:.2f}|{row['change']:.2f}|{row['score']}|{row['prob7_pct']}|{row['pf7']:.2f}|{liq}|{row['signals']}|{row['group']}"
+        txt_lines.append(txt_line)
+
+    st.text_area("结果（优质已排最前，可全选 Ctrl+A 复制）", "\n".join(display_lines), height=600)
+
+    txt_header = "股票代码|股票名称|现价|今日涨幅%|得分|7日历史胜率%|PF7|流动性|触发信号|分组\n"
+    txt_content = txt_header + "\n".join(txt_lines)
+
+    st.download_button(
+        "下载完整结果 TXT（优质在前，可导入Excel）",
+        txt_content,
+        file_name=f"科创创业板_扫描结果_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+        mime="text/plain"
+    )
 
 else:
-    st.info("暂无结果。请点击开始扫描")
+    st.info("暂无扫描结果。请点击“开始/继续扫描”")
 
-st.caption("Baostock完整版 | 2026年 | 防卡稳定 | 支持暂停/下载进度")
+st.caption("2026年完整版 | AKShare + 重试超时 | 前300活跃股 | 上市>360天 | 优质实时弹出 | 支持暂停/继续/下载")

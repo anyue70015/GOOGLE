@@ -6,7 +6,6 @@ import time
 import random
 from datetime import datetime, timedelta
 import warnings
-import akshare as ak
 warnings.filterwarnings('ignore')
 
 # ==================== 配置 ====================
@@ -26,10 +25,12 @@ BACKTEST_CONFIG = {
 def initialize_stock_pool():
     """初始化股票池：获取成交额前300股票"""
     try:
+        import akshare as ak
+        
         # 使用AKShare获取全市场实时行情
         df = ak.stock_zh_a_spot_em()
         
-        if df.empty:
+        if df.empty or len(df) < 100:
             return get_backup_stocks()
         
         # 数据清洗
@@ -72,6 +73,7 @@ def initialize_stock_pool():
             stock_dict[code] = row['名称']
             turnover_dict[code] = row['成交额']
         
+        print(f"股票池初始化: 科创板{len(kcb_top)}只, 创业板{len(cyb_top)}只")
         return stock_dict, turnover_dict
         
     except Exception as e:
@@ -80,29 +82,52 @@ def initialize_stock_pool():
 
 def get_backup_stocks():
     """备用股票池（当实时数据获取失败时使用）"""
+    print("使用备用股票池")
+    
     backup_stocks = {
-        # 科创板
+        # 科创板 - 前50只
         "688981": "中芯国际", "688111": "金山办公", "688126": "沪硅产业",
         "688008": "澜起科技", "688099": "晶晨股份", "688036": "传音控股",
         "688185": "康希诺", "688390": "固德威", "688169": "石头科技",
         "688399": "硕世生物", "688019": "安集科技", "688088": "虹软科技",
         "688116": "天奈科技", "688321": "微芯生物", "688363": "华熙生物",
         "688568": "中科星图", "688122": "西部超导", "688005": "容百科技",
-        "688777": "中控技术", "688278": "特宝生物",
-        # 创业板
+        "688777": "中控技术", "688278": "特宝生物", "688298": "东方生物",
+        "688310": "迈得医疗", "688366": "昊海生科", "688388": "嘉元科技",
+        "688516": "奥特维", "688550": "瑞联新材", "688599": "天合光能",
+        "688686": "奥普特", "688696": "极米科技", "688981": "中芯国际",
+        "688023": "安恒信息", "688029": "南微医学", "688030": "山石网科",
+        "688033": "天宜上佳", "688039": "当虹科技", "688058": "宝兰德",
+        "688066": "航天宏图", "688068": "热景生物", "688078": "龙软科技",
+        "688085": "三友医疗", "688086": "紫晶存储", "688089": "嘉必优",
+        "688090": "瑞松科技", "688098": "申联生物", "688100": "威胜信息",
+        "688101": "三达膜", "688106": "金宏气体", "688108": "赛诺医疗",
+        "688122": "西部超导", "688123": "聚辰股份",
+        
+        # 创业板 - 前50只
         "300750": "宁德时代", "300059": "东方财富", "300760": "迈瑞医疗",
         "300498": "温氏股份", "300142": "沃森生物", "300015": "爱尔眼科",
         "300124": "汇川技术", "300274": "阳光电源", "300122": "智飞生物",
         "300014": "亿纬锂能", "300347": "泰格医药", "300595": "欧普康视",
         "300601": "康泰生物", "300628": "亿联网络", "300676": "华大基因",
         "300782": "卓胜微", "300896": "爱美客", "300999": "金龙鱼",
-        "300413": "芒果超媒", "300433": "蓝思科技",
+        "300413": "芒果超媒", "300433": "蓝思科技", "300450": "先导智能",
+        "300454": "深信服", "300476": "胜宏科技", "300496": "中科创达",
+        "300502": "新易盛", "300558": "贝达药业", "300573": "兴齐眼药",
+        "300604": "长川科技", "300618": "寒锐钴业", "300003": "乐普医疗",
+        "300012": "华测检测", "300017": "网宿科技", "300024": "机器人",
+        "300033": "同花顺", "300037": "新宙邦", "300039": "上海凯宝",
+        "300054": "鼎龙股份", "300070": "碧水源", "300072": "三聚环保",
+        "300075": "数字政通", "300077": "国民技术", "300079": "数码视讯",
+        "300083": "劲胜智能", "300085": "银之杰", "300088": "长信科技",
+        "300094": "国联水产", "300098": "高新兴", "300101": "振芯科技",
+        "300115": "长盈精密", "300118": "东方日升",
     }
     
     # 添加模拟成交额
     turnover_dict = {}
     for code in backup_stocks.keys():
-        turnover_dict[code] = random.uniform(1e7, 1e9)
+        turnover_dict[code] = random.uniform(1e8, 5e9)  # 1亿到50亿
     
     return backup_stocks, turnover_dict
 
@@ -131,6 +156,7 @@ def fetch_yf_ohlcv(symbol: str, days_back: int):
         df = ticker.history(start=start_date, end=end_date)
         
         if df.empty or len(df) < 30:
+            print(f"{symbol}: 数据不足 ({len(df)}天)")
             return None, None, None, None
         
         close = df['Close'].values.astype(float)
@@ -138,10 +164,11 @@ def fetch_yf_ohlcv(symbol: str, days_back: int):
         low = df['Low'].values.astype(float)
         volume = df['Volume'].values.astype(float)
         
+        print(f"{symbol}: 获取成功 ({len(df)}天)")
         return close, high, low, volume
         
     except Exception as e:
-        print(f"数据获取失败 {symbol}: {str(e)}")
+        print(f"{symbol}: 数据获取失败 - {str(e)}")
         return None, None, None, None
 
 # ==================== 专业指标计算 ====================
@@ -209,7 +236,6 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     return win_rate, pf
 
 # ==================== 核心计算 ====================
-@st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     """计算股票技术指标"""
     try:
@@ -280,55 +306,8 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         }
         
     except Exception as e:
-        print(f"计算失败 {symbol}: {str(e)}")
+        print(f"{symbol}: 计算失败 - {str(e)}")
         return None
-
-# ==================== 扫描函数 ====================
-def scan_stock(stock_code, stock_name, period_key="1年", min_pf=4.0, min_win_rate=68):
-    """扫描单只股票"""
-    result = compute_stock_metrics(stock_code, period_key)
-    
-    if result is None:
-        return {
-            '代码': stock_code,
-            '名称': stock_name,
-            '价格': 0,
-            '涨幅%': 0,
-            '信号分': 0,
-            '7日胜率%': 0,
-            '盈亏比': 0,
-            '触发信号': "数据失败",
-            '评级': '❌ 失败',
-            'RSI': 0,
-            '成交额': 0,
-            '扫描时间': datetime.now().strftime("%H:%M:%S")
-        }
-    
-    # 判断评级
-    if result['pf7'] > min_pf and result['prob7_pct'] > min_win_rate:
-        rating = '🔥 优质'
-    elif result['score'] >= 3:
-        rating = '✅ 良好'
-    elif result['score'] >= 1:
-        rating = '📊 一般'
-    else:
-        rating = '⚠️ 弱势'
-    
-    return {
-        '代码': result['symbol'],
-        '名称': result['name'],
-        '价格': result['price'],
-        '涨幅%': result['change'],
-        '信号分': result['score'],
-        '7日胜率%': result['prob7_pct'],
-        '盈亏比': round(result['pf7'], 2),
-        'RSI': result['rsi'],
-        '成交额': result['turnover'],
-        '触发信号': result['signals'],
-        '评级': rating,
-        '数据点': result['data_points'],
-        '扫描时间': result['scan_time']
-    }
 
 # ==================== 主界面 ====================
 # 初始化session state
@@ -381,7 +360,7 @@ with st.sidebar:
         "扫描数量",
         min_value=10,
         max_value=min(600, total_count),
-        value=min(100, total_count),
+        value=min(50, total_count),  # 默认扫描50只
         step=10
     )
     
@@ -389,27 +368,14 @@ with st.sidebar:
     min_pf = st.slider("最小盈亏比", 2.0, 10.0, 4.0, 0.5)
     min_win_rate = st.slider("最小胜率%", 50, 95, 68, 2)
     
+    # 延迟设置
+    delay_time = st.slider("请求延迟(秒)", 0.1, 3.0, 0.8, 0.1)
+    
     # 刷新按钮
     if st.button("🔄 刷新股票池", use_container_width=True):
-        # 重新初始化股票池
-        new_stock_pool, new_turnover_data = initialize_stock_pool()
-        # 更新全局变量（通过session state传递）
-        st.session_state.new_stock_pool = new_stock_pool
-        st.session_state.new_turnover_data = new_turnover_data
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
-
-# 检查是否有新的股票池数据
-if hasattr(st.session_state, 'new_stock_pool'):
-    STOCK_POOL = st.session_state.new_stock_pool
-    TURNOVER_DATA = st.session_state.new_turnover_data
-    # 更新计数
-    kcb_count = len([c for c in STOCK_POOL.keys() if c.startswith('688')])
-    cyb_count = len([c for c in STOCK_POOL.keys() if c.startswith('300')])
-    total_count = len(STOCK_POOL)
-    # 清理临时数据
-    del st.session_state.new_stock_pool
-    del st.session_state.new_turnover_data
 
 # 控制面板
 st.markdown("---")
@@ -434,7 +400,11 @@ with col3:
         st.session_state.scanned_count = 0
         st.rerun()
 
-# 扫描进度
+# 扫描进度显示
+progress_container = st.empty()
+status_container = st.empty()
+
+# 扫描逻辑
 if st.session_state.scanning:
     all_stocks = list(STOCK_POOL.items())[:stock_count]
     total_stocks = len(all_stocks)
@@ -442,42 +412,80 @@ if st.session_state.scanning:
     scanned = st.session_state.scanned_count
     
     if scanned < total_stocks:
-        batch_size = 5
+        batch_size = 3  # 减小批次大小，提高稳定性
         batch_end = min(scanned + batch_size, total_stocks)
         
-        progress_bar = st.progress(scanned / total_stocks)
-        status_text = st.empty()
+        # 创建进度条
+        progress_bar = progress_container.progress(scanned / total_stocks)
+        status_text = status_container.text(f"准备扫描...")
         
         for i in range(scanned, batch_end):
             code, name = all_stocks[i]
             
             progress = (i + 1) / total_stocks
             progress_bar.progress(progress)
-            status_text.text(f"扫描: {code} {name} ({i+1}/{total_stocks})")
+            status_text = status_container.text(f"扫描: {code} {name} ({i+1}/{total_stocks})")
             
             # 扫描股票
-            result = scan_stock(code, name, period_key, min_pf, min_win_rate)
-            st.session_state.scan_results.append(result)
+            result = compute_stock_metrics(code, period_key)
             
-            # 检查优质股票
-            if result['评级'] == '🔥 优质':
-                st.session_state.premium_count += 1
-                st.success(f"🎯 {code} {name} | "
-                          f"价:{result['价格']} | 涨:{result['涨幅%']:+.2f}% | "
-                          f"分:{result['信号分']} | 胜:{result['7日胜率%']}% | "
-                          f"PF:{result['盈亏比']:.2f}")
+            if result:
+                # 判断评级
+                if result['pf7'] > min_pf and result['prob7_pct'] > min_win_rate:
+                    rating = '🔥 优质'
+                    st.session_state.premium_count += 1
+                elif result['score'] >= 3:
+                    rating = '✅ 良好'
+                elif result['score'] >= 1:
+                    rating = '📊 一般'
+                else:
+                    rating = '⚠️ 弱势'
+                
+                stock_result = {
+                    '代码': result['symbol'],
+                    '名称': result['name'],
+                    '价格': result['price'],
+                    '涨幅%': result['change'],
+                    '信号分': result['score'],
+                    '7日胜率%': result['prob7_pct'],
+                    '盈亏比': round(result['pf7'], 2),
+                    'RSI': result['rsi'],
+                    '成交额': result['turnover'],
+                    '触发信号': result['signals'],
+                    '评级': rating,
+                    '数据点': result['data_points'],
+                    '扫描时间': result['scan_time']
+                }
+                
+                st.session_state.scan_results.append(stock_result)
+                
+                # 实时显示优质股票
+                if rating == '🔥 优质':
+                    st.success(f"🎯 {code} {name} | "
+                              f"价:{result['price']} | 涨:{result['change']:+.2f}% | "
+                              f"分:{result['score']} | 胜:{result['prob7_pct']}% | "
+                              f"PF:{result['pf7']:.2f}")
             
             st.session_state.scanned_count += 1
-            time.sleep(0.8)  # 延迟避免请求过快
+            time.sleep(delay_time)  # 延迟避免请求过快
         
-        # 自动继续下一批
-        time.sleep(0.5)
-        st.rerun()
+        # 检查是否完成
+        if st.session_state.scanned_count >= total_stocks:
+            st.session_state.scanning = False
+            progress_bar.progress(1.0)
+            status_text = status_container.text(f"✅ 扫描完成! 共{total_stocks}只，优质{st.session_state.premium_count}只")
+            st.balloons()
+        
+        # 自动继续下一批（如果还没完成）
+        if st.session_state.scanning:
+            time.sleep(0.5)
+            st.rerun()
     else:
         st.session_state.scanning = False
-        progress_bar.progress(1.0)
+        if 'progress_bar' in locals():
+            progress_bar.progress(1.0)
+        status_container.text(f"✅ 扫描完成! 共{total_stocks}只，优质{st.session_state.premium_count}只")
         st.balloons()
-        st.success(f"✅ 扫描完成! 共{total_stocks}只，优质{st.session_state.premium_count}只")
 
 # 显示结果
 st.markdown("---")

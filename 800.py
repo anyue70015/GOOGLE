@@ -1,11 +1,11 @@
 import streamlit as st
-import requests
+import yfinance as yf
 import numpy as np
 import time
 import re
 
 # ==================== 页面设置 ====================
-st.set_page_config(page_title="回测信号面板 - 自助扫描", layout="wide")
+st.set_page_config(page_title="回测信号面板 - yfinance 版", layout="wide")
 
 st.markdown(
     """
@@ -19,22 +19,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("回测信号面板 - 自助扫描（按PF7排序）")
+st.title("回测信号面板 - 自助扫描（yfinance 版，按 PF7 排序）")
 
 # ==================== 配置 ====================
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-}
-
 BACKTEST_OPTIONS = ["3个月", "6个月", "1年", "2年", "3年", "5年", "10年"]
 BACKTEST_CONFIG = {
-    "3个月": {"range": "3mo", "interval": "1d"},
-    "6个月": {"range": "6mo", "interval": "1d"},
-    "1年":  {"range": "1y",  "interval": "1d"},
-    "2年":  {"range": "2y",  "interval": "1d"},
-    "3年":  {"range": "3y",  "interval": "1d"},
-    "5年":  {"range": "5y",  "interval": "1d"},
-    "10年": {"range": "10y", "interval": "1d"},
+    "3个月": {"period": "3mo", "interval": "1d"},
+    "6个月": {"period": "6mo", "interval": "1d"},
+    "1年":  {"period": "1y",  "interval": "1d"},
+    "2年":  {"period": "2y",  "interval": "1d"},
+    "3年":  {"period": "3y",  "interval": "1d"},
+    "5年":  {"period": "5y",  "interval": "1d"},
+    "10年": {"period": "10y", "interval": "1d"},
 }
 
 # ==================== 工具函数 ====================
@@ -51,42 +47,38 @@ def format_symbol_for_yahoo(symbol: str) -> str:
 def get_current_prices_batch(symbols: list):
     if not symbols:
         return {}
-    yahoo_syms = ",".join(format_symbol_for_yahoo(s) for s in symbols)
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={yahoo_syms}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()["quoteResponse"]["result"]
-        result = {}
-        for d in data:
-            if d and 'symbol' in d:
-                orig_sym = d["symbol"].replace(".SS","").replace(".SZ","").upper()
-                price = d.get("regularMarketPrice") or d.get("regularMarketPreviousClose")
-                change = d.get("regularMarketChangePercent", 0) * 100
-                result[orig_sym] = (float(price) if price else None, float(change))
-        return result
-    except Exception as e:
-        st.warning(f"批量价格获取失败: {str(e)}")
-        return {}
+    tickers_list = [format_symbol_for_yahoo(s) for s in symbols]
+    tickers = yf.Tickers(tickers_list)
+    result = {}
+    for orig_sym, ticker in zip(symbols, tickers.tickers):
+        try:
+            info = ticker.info
+            price = info.get("regularMarketPrice") or info.get("regularMarketPreviousClose") or info.get("previousClose")
+            change_pct = info.get("regularMarketChangePercent", 0) * 100
+            result[orig_sym.upper()] = (float(price) if price else None, float(change_pct))
+        except Exception as e:
+            st.warning(f"价格获取失败 {orig_sym}: {str(e)}")
+            result[orig_sym.upper()] = (None, 0.0)
+    return result
 
 @st.cache_data(ttl=3600)
-def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
+def fetch_yahoo_ohlcv(symbol: str, period: str, interval: str):
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        data = resp.json()["chart"]["result"][0]
-        quote = data["indicators"]["quote"][0]
-        close = np.array(quote["close"], dtype=float)
-        high = np.array(quote["high"], dtype=float)
-        low = np.array(quote["low"], dtype=float)
-        volume = np.array(quote["volume"], dtype=float)
-        mask = ~np.isnan(close)
-        return close[mask], high[mask], low[mask], volume[mask]
+        ticker = yf.Ticker(format_symbol_for_yahoo(symbol))
+        df = ticker.history(period=period, interval=interval, auto_adjust=False, prepost=False)
+        if df.empty or len(df) < 80:
+            st.warning(f"数据不足 {symbol}")
+            return None, None, None, None
+        close = df["Close"].values
+        high = df["High"].values
+        low = df["Low"].values
+        volume = df["Volume"].values
+        return close, high, low, volume
     except Exception as e:
-        st.warning(f"OHLCV加载失败 {yahoo_symbol}: {str(e)}")
+        st.warning(f"OHLCV 加载失败 {symbol}: {str(e)}")
         return None, None, None, None
 
+# ==================== 指标计算函数（原样保留） ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -141,24 +133,22 @@ def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
 
 def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     if len(close) <= steps + 1:
-        return 0.5, 0.0, 0.0, 0.0
+        return 0.5, 0.0
     idx = np.where(score[:-steps] >= 3)[0]
     if len(idx) == 0:
-        return 0.5, 0.0, 0.0, 0.0
+        return 0.5, 0.0
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
-    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
-    avg_win = rets[rets > 0].mean() if (rets > 0).any() else 0
-    avg_loss = rets[rets <= 0].mean() if (rets <= 0).any() else 0
-    return win_rate, pf, avg_win, avg_loss
+    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum() or 1)  # 避免除零
+    return win_rate, pf
 
 # ==================== 计算单股票 ====================
 def compute_stock_metrics(symbol: str, cfg_key: str):
     yahoo_symbol = format_symbol_for_yahoo(symbol)
     try:
-        close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"], "1d")
-        if close is None or len(close) < 80:
-            return {"symbol": symbol.upper(), "error": "数据不足或加载失败"}
+        close, high, low, volume = fetch_yahoo_ohlcv(symbol, BACKTEST_CONFIG[cfg_key]["period"], "1d")
+        if close is None:
+            return {"symbol": symbol.upper(), "error": "数据加载失败"}
 
         macd_hist = macd_hist_np(close)
         rsi = rsi_np(close)
@@ -176,11 +166,11 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
         score_arr = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
 
         steps7 = 7
-        prob7, pf7, _, _ = backtest_with_stats(close[:-1], score_arr[:-1], steps7)
+        prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], steps7)
 
         return {
             "symbol": symbol.upper(),
-            "price": None,  # 后面批量覆盖
+            "price": None,
             "change": 0.0,
             "prob7": prob7,
             "pf7": pf7,
@@ -197,74 +187,38 @@ def compute_stock_metrics(symbol: str, cfg_key: str):
 # ==================== 交互 ====================
 col1, col2 = st.columns([3, 1])
 with col1:
-    default_tickers = """LLY
-GEV
-MIRM
-ABBV
-HWM
-GE
-MU
-HII
-SCCO
-SNDK
-WDC
-SLV
-STX
-JNJ
-WBD
-FOXA
-BK
-RTX
-WELL
-PH
-GVA
-AHR
-ATRO
-GLW
-CMI
-APH
-PM
-COR
-CAH
-HCA
-NEM"""
+    default_tickers = """LLY GEV MIRM ABBV HWM GE MU HII SCCO SNDK WDC SLV STX JNJ WBD FOXA BK RTX WELL PH GVA AHR ATRO GLW CMI APH PM COR CAH HCA NEM"""
     tickers_input = st.text_area(
-        "输入股票代码（一行一个，或逗号/空格分隔）",
+        "输入股票代码（空格/逗号/换行分隔）",
         value=default_tickers,
-        height=200,
+        height=180,
         key="tickers_input"
     )
 
 with col2:
+    mode = st.selectbox("回测周期", BACKTEST_OPTIONS, index=3, key="mode")  # 默认 2年
     if st.button("开始扫描", type="primary", use_container_width=True):
         raw = tickers_input.strip()
-        symbols = []
-        for line in raw.splitlines():
-            cleaned = re.sub(r'[^A-Za-z0-9.\-]', ' ', line).strip()
-            symbols.extend([s for s in cleaned.split() if s])
-        symbols = list(dict.fromkeys([s.upper() for s in symbols if s]))  # 去重
+        symbols = re.findall(r'[A-Za-z0-9.\-]+', raw.upper())
+        symbols = list(dict.fromkeys(symbols))  # 去重
 
         if not symbols:
             st.warning("请输入至少一个股票代码")
         else:
-            with st.spinner(f"扫描中... ({len(symbols)} 个股票)"):
+            with st.spinner(f"使用 yfinance 扫描 {len(symbols)} 个股票..."):
                 batch_prices = get_current_prices_batch(symbols)
 
                 results = []
                 for sym in symbols:
-                    metrics = compute_stock_metrics(sym, st.session_state.get("mode", "2年"))
+                    metrics = compute_stock_metrics(sym, mode)
                     if sym in batch_prices:
                         metrics["price"], metrics["change"] = batch_prices[sym]
-                    else:
-                        metrics["price"] = "N/A"
-                        metrics["change"] = 0.0
                     results.append(metrics)
-                    time.sleep(0.4)  # 防限流
+                    time.sleep(0.3)  # 轻微延时，yfinance 较友好
 
-                # 存储结果
                 st.session_state["scan_results"] = results
 
-# ==================== 显示结果（纯文本，按PF7降序） ====================
+# ==================== 显示结果（纯文本，按 PF7 降序） ====================
 if "scan_results" in st.session_state:
     results = st.session_state["scan_results"]
     valid_results = [r for r in results if "error" not in r and isinstance(r.get("pf7"), (int, float))]
@@ -274,6 +228,7 @@ if "scan_results" in st.session_state:
 
         lines = []
         for row in valid_results:
+            price_str = f"{row['price']:.2f}" if row['price'] is not None else "N/A"
             change_str = f"{row['change']:+.2f}%"
             score_str = f"{int(row['score'])}/5"
             macd_str = "是" if row["macd_yes"] else "否"
@@ -281,7 +236,6 @@ if "scan_results" in st.session_state:
             rsi_str  = "是" if row["rsi_yes"] else "否"
             atr_str  = "是" if row["atr_yes"] else "否"
             obv_str  = "是" if row["obv_yes"] else "否"
-            price_str = f"{row['price']:.2f}" if isinstance(row['price'], (int, float)) else row['price']
 
             line = (
                 f"{row['symbol']} - "
@@ -295,9 +249,8 @@ if "scan_results" in st.session_state:
         st.subheader("扫描结果（按 PF7 降序）")
         st.code("\n".join(lines), language="text")
 
-        if st.button("复制到剪贴板（实验性）"):
-            st.write("请手动选中上面代码块 → Ctrl+C 复制")
+        st.info("数据来自 yfinance (Yahoo Finance 非官方接口)，实时性取决于市场开盘状态。")
     else:
-        st.info("暂无有效结果，或所有股票加载失败。请检查网络/Yahoo数据。")
+        st.warning("无有效结果（可能加载失败或数据不足）。请检查股票代码或网络。")
 
-st.caption("数据来源: Yahoo Finance | 仅供研究参考，不构成投资建议 | 当前时间: 2026年1月")
+st.caption("Powered by yfinance | 仅供研究参考，不构成投资建议 | 当前时间: 2026年1月")

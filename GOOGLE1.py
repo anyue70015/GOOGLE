@@ -298,7 +298,6 @@ if st.session_state.high_prob:
             df['change'] = df['change'].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
             df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
             df['pf7'] = df['pf7'].round(2)
-            # 统一排序：先按选择的字段降序，0分的自然排后面
             if sort_by == "PF7 (盈利因子)":
                 df = df.sort_values("pf7", ascending=False)
             else:
@@ -309,7 +308,9 @@ if st.session_state.high_prob:
         
         st.subheader(f"全部30只结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
         
-        for _, row in df_display.iterrows():
+        # 紧凑显示：不加额外空行
+        for i, row in enumerate(df_display.iterrows()):
+            _, row = row
             details = row['sig_details']
             detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
             liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
@@ -319,7 +320,7 @@ if st.session_state.high_prob:
                 score_str = "得分: 0/5 - 无信号"
                 prob_pf_str = "**7日概率: 0.0% | PF7: 0.0**"
             elif row['pf7'] > 4.0 and row['prob7'] > 0.70:
-                prefix = ""  # 去掉火焰，平齐显示
+                prefix = ""
                 score_str = f"**超级优质** 得分: {row['score']}/5 - {detail_str}"
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             else:
@@ -327,7 +328,14 @@ if st.session_state.high_prob:
                 score_str = f"得分: {row['score']}/5 - {detail_str}"
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             
-            st.markdown(f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}")
+            line = f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}"
+            
+            # 使用 markdown 紧凑显示，每行之间不加空行
+            st.markdown(line, unsafe_allow_html=True)
+            
+            # 只在不是最后一行时加分隔线（可选，更紧凑）
+            if i < len(df_display) - 1:
+                st.markdown("---", unsafe_allow_html=True)  # 细线分隔，可删除这行让更紧凑
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
@@ -383,4 +391,4 @@ if st.session_state.scanning and current_completed < total:
 if current_completed >= total:
     st.success("已完成全部30只扫描！结果已全部更新")
 
-st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 超级优质去掉火焰图标，与优质平齐 | 直接复制运行")
+st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间无空行 | 直接复制运行")

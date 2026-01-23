@@ -64,7 +64,7 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.rerun()
 
 st.write("当前只扫描以下 **我的30只股票**：")
-st.write("LLY, GEV, MIRM, ABBV, HWM, GE, MU, HII, SCCO, SNDK, WDC, SLV, STX, JNJ, FOXA, BK, RTX, WELL, PH, GVA, AHR, ATRO, GLW, CMI, APH, SMH, TPR, SOXX, COR, CAH, HCA, NEM")
+st.write("LLY, GEV, MIRM, ABBV, HWM, GE, MU, HII, SCCO, SNDK, WDC, SLV, STX, JNJ, FOXA, BK, RTX, WELL, PH, GVA, AHR, ATRO, GLW, CMI, APH, SMH, TPR, SOXX, COR, CAH, HCA, TSM, NESR, RGLD, OKLO, SMR, URNM, URA, NVDA, GOOG, TTMI, TMC, SVM, SKE, RVMD, RGC, RDW, POWL, PL, ONDS, LMND, HYMC, HL, FTAI, EXK, ERAS, DFTX, CDE, ASTS, APLD, NEM")
 st.write("点击「开始/继续扫描」后会自动持续运行。所有30只都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。低流动性标的会标注⚠️。")
 
 # ==================== 核心常量 ====================
@@ -230,7 +230,7 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 my_30 = [
     "LLY", "GEV", "MIRM", "ABBV", "HWM", "GE", "MU", "HII", "SCCO", "SNDK",
     "WDC", "SLV", "STX", "JNJ", "FOXA", "BK", "RTX", "WELL", "PH", "GVA",
-    "AHR", "ATRO", "GLW", "CMI", "APH", "SMH", "TPR", "SOXX", "COR", "CAH", "HCA", "NEM"
+    "AHR", "ATRO", "GLW", "CMI", "APH", "SMH", "TPR", "SOXX", "COR","TSM", "NESR", "RGLD", "OKLO", "SMR", "URNM", "URA", "NVDA", "GOOG", "TTMI", "TMC", "SVM", "SKE", "RVMD", "RGC", "RDW", "POWL", "PL", "ONDS", "LMND", "HYMC", "HL" "FTAI", "EXK", "ERAS", "DFTX", "CDE", "ASTS", "APLD", "CAH", "HCA", "NEM"
 ]
 
 tickers_to_scan = my_30
@@ -386,4 +386,5 @@ if current_completed >= total:
     st.success("已完成全部30只扫描！结果已全部更新")
 
 st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间亲密无间无空行无横线 | 直接复制运行")
+
 

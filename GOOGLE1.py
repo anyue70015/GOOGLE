@@ -4,18 +4,15 @@ import numpy as np
 import time
 import pandas as pd
 import random
-import requests
-from io import StringIO
 import os
 import json
 
-st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 + 热门ETF + 加密币 + 罗素2000 短线扫描工具")
+st.set_page_config(page_title="30只强势股 短线扫描工具", layout="wide")
+st.title("30只强势股 短线扫描工具")
 
 # ── 持久化进度文件 ──
-progress_file = "scan_progress.json"
+progress_file = "scan_progress_30.json"
 
-# 只加载一次进度
 if 'progress_loaded' not in st.session_state:
     st.session_state.progress_loaded = True
     if os.path.exists(progress_file):
@@ -26,9 +23,9 @@ if 'progress_loaded' not in st.session_state:
             st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
             st.session_state.failed_count = data.get("failed_count", 0)
             st.session_state.fully_scanned = data.get("fully_scanned", False)
-            st.success("检测到历史进度，已自动加载（可继续扫描）")
+            st.success("已加载历史进度，可继续扫描")
         except Exception as e:
-            st.warning(f"加载进度失败: {e}，将从头开始")
+            st.warning(f"加载进度失败: {e}，从头开始")
 
 def save_progress():
     data = {
@@ -43,55 +40,32 @@ def save_progress():
     except:
         pass
 
-# ── 清缓存 + 重置按钮 ──
-if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
-    st.cache_data.clear()
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False
-    st.session_state.scanning = False
-    if os.path.exists(progress_file):
-        os.remove(progress_file)
-    st.rerun()
+# ── 重置按钮 ──
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
+        st.cache_data.clear()
+        st.session_state.high_prob = []
+        st.session_state.scanned_symbols = set()
+        st.session_state.failed_count = 0
+        st.session_state.fully_scanned = False
+        st.session_state.scanning = False
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+        st.rerun()
 
-if st.button("🔄 重置所有进度（从头开始）"):
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False
-    st.session_state.scanning = False
-    if os.path.exists(progress_file):
-        os.remove(progress_file)
-    st.rerun()
+with col2:
+    if st.button("🔄 重置所有进度（从头开始）"):
+        st.session_state.high_prob = []
+        st.session_state.scanned_symbols = set()
+        st.session_state.failed_count = 0
+        st.session_state.fully_scanned = False
+        st.session_state.scanning = False
+        if os.path.exists(progress_file):
+            os.remove(progress_file)
+        st.rerun()
 
-st.write("支持完整罗素2000（动态从iShares官网下载最新持仓CSV，约2000只）。点击「开始扫描」一次后会自动持续运行（每100只刷新一次页面，不会停）。低流动性标的会保留并标注⚠️。")
-
-# ==================== 扫描范围选择 ====================
-scan_mode = st.selectbox("选择扫描范围", 
-                         ["全部", "只扫币圈", "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)", 
-                          "只扫罗素2000 (完整~2000只)", "30只强势股"])
-
-# ==================== 动态加载罗素2000 ====================
-@st.cache_data(ttl=86400)
-def load_russell2000_tickers():
-    url = "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1467271812596.ajax?fileType=csv&fileName=IWM_holdings&dataType=fund"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-        df = pd.read_csv(StringIO(resp.text), skiprows=9)
-        if 'Ticker' not in df.columns:
-            st.error("CSV格式变化，使用备用列表")
-            return ["IWM"]
-        tickers = df['Ticker'].dropna().astype(str).tolist()
-        tickers = [t.strip().upper() for t in tickers if t.strip() != '-' and t.strip() != 'TICKER' and len(t.strip()) <= 5 and t.strip().isalnum()]
-        tickers = list(set(tickers))
-        st.success(f"成功加载罗素2000最新持仓（{len(tickers)} 只）")
-        return tickers
-    except Exception as e:
-        st.error(f"加载罗素2000失败: {str(e)}，使用IWM代表")
-        return ["IWM"]
+st.write("当前只扫描以下 **30只强势股**，低流动性标的会标注⚠️。点击开始扫描后会自动持续运行（每批次刷新一次）。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -108,7 +82,7 @@ BACKTEST_CONFIG = {
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(0.15, 0.45))
+        time.sleep(random.uniform(0.2, 0.6))
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
         if df.empty or len(df) < 50:
@@ -125,7 +99,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     except Exception:
         return None, None, None, None
 
-# ==================== 指标函数 ====================
+# ==================== 指标函数（保持原样） ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -192,8 +166,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
 # ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
-    is_crypto = symbol.upper() in crypto_set
-    yahoo_symbol = f"{symbol.upper()}-USD" if is_crypto else symbol.upper()
+    yahoo_symbol = symbol.upper()  # 全部美股，无需-USD
     
     close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
     
@@ -249,71 +222,24 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "prob7": prob7,
         "pf7": pf7,
         "sig_details": sig_details,
-        "is_crypto": is_crypto,
+        "is_crypto": False,
         "is_low_liquidity": is_low_liquidity
     }
 
-# ==================== 完整成分股列表 ====================
-sp500 = [ ... ]  # 保持原样，省略内容以节省空间，你可以直接用之前的sp500列表
-
-ndx100 = [ ... ]  # 同上
-
-extra_etfs = [ ... ]  # 同上
-
-gate_top200 = [ ... ]  # 同上
-
-crypto_tickers = list(set(gate_top200))
-crypto_set = set(c.upper() for c in crypto_tickers)
-
-stock_etf_tickers = list(set(sp500 + ndx100 + extra_etfs))
-
-all_tickers = list(set(stock_etf_tickers + crypto_tickers))
-all_tickers.sort()
-
-# 新增：30只强势股（独立范围）
+# ==================== 唯一扫描列表：30只强势股 ====================
 strong_30 = [
     "SMCI", "CRDO", "WDAY", "KLAC", "LRCX", "AMD", "NVDA", "TSLA", "META", "AMZN",
     "MSFT", "GOOGL", "AVGO", "ARM", "QCOM", "MRVL", "CDNS", "SNPS", "PANW", "CRWD",
     "FTNT", "DDOG", "ZS", "APP", "PLTR", "MSTR", "COIN", "FCX", "AA", "ALB"
 ]
 
-# 根据选择设置扫描列表
-if scan_mode == "全部":
-    tickers_to_scan = all_tickers
-    st.write(f"扫描范围：全部（总计 {len(all_tickers)} 只）")
-elif scan_mode == "只扫币圈":
-    tickers_to_scan = crypto_tickers
-    st.write(f"扫描范围：只扫币圈（{len(crypto_tickers)} 只）")
-elif scan_mode == "只扫美股大盘 (标普500 + 纳斯达克100 + ETF)":
-    tickers_to_scan = stock_etf_tickers
-    st.write(f"扫描范围：只扫美股大盘（{len(stock_etf_tickers)} 只）")
-elif scan_mode == "只扫罗素2000 (完整~2000只)":
-    tickers_to_scan = load_russell2000_tickers()
-    st.write(f"扫描范围：罗素2000（完整 {len(tickers_to_scan)} 只，动态最新）")
-elif scan_mode == "30只强势股":
-    tickers_to_scan = strong_30
-    st.write(f"扫描范围：30只强势股（共 {len(strong_30)} 只，强制全部显示）")
+tickers_to_scan = strong_30
+st.write(f"扫描标的：30只强势股（共 {len(tickers_to_scan)} 只）")
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-# ==================== 参数变更处理 ====================
-tickers_set = set(tickers_to_scan)
-total = len(tickers_to_scan)
-
-if st.session_state.get("prev_mode") != mode:
-    st.session_state.high_prob = []
-    st.session_state.fully_scanned = False
-    st.info("🔄 回测周期已变更，已清除旧结果（需重新计算）")
-
-if st.session_state.get("prev_scan_mode") != scan_mode:
-    st.session_state.fully_scanned = False
-    st.info("🔄 扫描范围已变更，已重置完成状态")
-
-st.session_state.prev_mode = mode
-st.session_state.prev_scan_mode = scan_mode
-
-# session_state 初始化
+# ==================== session_state 初始化 ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -325,48 +251,52 @@ if 'fully_scanned' not in st.session_state:
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 
-# ==================== 强制显示逻辑：只针对“30只强势股”模式强制全部显示 ====================
-if scan_mode == "30只强势股":
-    forced_symbols = set(strong_30)
-    computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x}
-    missing = forced_symbols - computed_symbols
+# ==================== 强制全部30只显示 ====================
+forced_symbols = set(strong_30)
+computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x}
+missing = forced_symbols - computed_symbols
 
-    for sym in missing:
-        st.session_state.high_prob.append({
-            "symbol": sym.upper(),
-            "display_symbol": sym.upper() + " (强势组 - 待计算或无数据)",
-            "price": 0.0,
-            "change": "N/A",
-            "score": 0,
-            "prob7": 0.0,
-            "pf7": 0.0,
-            "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
-            "is_crypto": False,
-            "is_low_liquidity": False
-        })
+for sym in missing:
+    st.session_state.high_prob.append({
+        "symbol": sym.upper(),
+        "display_symbol": sym.upper() + " (待计算或无数据)",
+        "price": 0.0,
+        "change": "N/A",
+        "score": 0,
+        "prob7": 0.0,
+        "pf7": 0.0,
+        "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
+        "is_crypto": False,
+        "is_low_liquidity": False
+    })
+
+# ==================== 参数变更处理 ====================
+total = len(tickers_to_scan)
+
+if st.session_state.get("prev_mode") != mode:
+    st.session_state.high_prob = []
+    st.session_state.fully_scanned = False
+    st.info("回测周期变更，已清除旧结果")
+
+st.session_state.prev_mode = mode
 
 # ==================== 进度条 ====================
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-current_completed = len(st.session_state.scanned_symbols.intersection(tickers_set))
+current_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
 progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
 progress_bar.progress(progress_val)
 
 # ==================== 显示结果 ====================
-# （以下显示部分保持原样，只需把 sp500/ndx100 等列表补回原内容即可）
-
 if st.session_state.high_prob:
-    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in tickers_set])
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in tickers_to_scan])
     
     if not df_all.empty:
-        stock_df = df_all[~df_all['is_crypto']].copy()
-        crypto_df = df_all[df_all['is_crypto']].copy()
+        stock_df = df_all[~df_all['is_crypto']].copy()  # 全部是股票
         
         super_stock = stock_df[(stock_df['pf7'] > 4.0) & (stock_df['prob7'] > 0.70)].copy()
         normal_stock = stock_df[((stock_df['pf7'] >= 3.6) | (stock_df['prob7'] >= 0.68)) & ~stock_df['symbol'].isin(super_stock['symbol'])].copy()
-        
-        crypto_filtered = crypto_df[crypto_df['prob7'] > 0.5].copy()
         
         def format_and_sort(df):
             df = df.copy()
@@ -380,9 +310,77 @@ if st.session_state.high_prob:
                 df = df.sort_values("prob7", ascending=False)
             return df
         
-        # 显示逻辑同原代码...
-        # （这里省略重复的显示代码，你直接用你原来的显示部分替换即可）
+        if not super_stock.empty:
+            df_s = format_and_sort(super_stock)
+            st.subheader(f"🔥 超级优质（PF>4 & 7日>70%） 共 {len(df_s)} 只")
+            for _, row in df_s.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+                st.markdown(f"**🔥 {row['display_symbol']}** - ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
+        
+        if not normal_stock.empty:
+            df_n = format_and_sort(normal_stock)
+            st.subheader(f"🔹 优质标的 共 {len(df_n)} 只")
+            for _, row in df_n.iterrows():
+                details = row['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+                st.markdown(f"**{row['display_symbol']}** - ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
+        
+        if super_stock.empty and normal_stock.empty:
+            st.warning("当前无满足条件的标的")
 
-# 其余部分（进度、扫描逻辑、st.info 等）保持不变...
+st.info(f"总标的: {total} | 已完成: {current_completed} | 有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-st.caption("2026年1月版 | 新增「30只强势股」独立扫描范围 | 直接复制运行")
+# ==================== 扫描逻辑 ====================
+if st.button("🚀 开始/继续扫描（自动持续运行）"):
+    st.session_state.scanning = True
+
+if st.session_state.scanning and current_completed < total:
+    with st.spinner("扫描中（每批次刷新一次）..."):
+        batch_size = 100  # 实际只有30只，所以一次跑完也行
+        processed_in_this_run = 0
+        
+        remaining = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
+        
+        for sym in remaining:
+            if processed_in_this_run >= batch_size:
+                break
+            
+            anticipated = current_completed + processed_in_this_run + 1
+            progress_val = min(1.0, max(0.0, anticipated / total))
+            
+            status_text.text(f"计算 {sym} ({anticipated}/{total})")
+            progress_bar.progress(progress_val)
+            
+            try:
+                metrics = compute_stock_metrics(sym, mode)
+                if metrics:
+                    st.session_state.high_prob.append(metrics)
+                else:
+                    st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            except Exception as e:
+                st.warning(f"{sym} 异常: {str(e)}")
+                st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            
+            processed_in_this_run += 1
+        
+        save_progress()
+        
+        new_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
+        progress_bar.progress(min(1.0, max(0.0, new_completed / total)))
+        
+        if new_completed >= total:
+            st.session_state.fully_scanned = True
+            st.session_state.scanning = False
+            st.success("扫描完成！")
+        
+        st.rerun()
+
+if current_completed >= total:
+    st.success("已完成全部30只扫描！")
+
+st.caption("极简版 - 只保留30只强势股 | 2026年1月")

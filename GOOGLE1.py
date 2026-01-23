@@ -319,8 +319,8 @@ if st.session_state.high_prob:
                 score_str = "得分: 0/5 - 无信号"
                 prob_pf_str = "**7日概率: 0.0% | PF7: 0.0**"
             elif row['pf7'] > 4.0 and row['prob7'] > 0.70:
-                prefix = "**🔥 超级优质** "
-                score_str = f"得分: {row['score']}/5 - {detail_str}"
+                prefix = ""  # 去掉火焰，平齐显示
+                score_str = f"**超级优质** 得分: {row['score']}/5 - {detail_str}"
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             else:
                 prefix = ""
@@ -383,4 +383,4 @@ if st.session_state.scanning and current_completed < total:
 if current_completed >= total:
     st.success("已完成全部30只扫描！结果已全部更新")
 
-st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 直接复制运行")
+st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 超级优质去掉火焰图标，与优质平齐 | 直接复制运行")

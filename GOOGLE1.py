@@ -289,53 +289,45 @@ progress_bar.progress(progress_val)
 
 # ==================== 显示结果 ====================
 if st.session_state.high_prob:
-    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in tickers_to_scan])
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in set(tickers_to_scan)])
     
     if not df_all.empty:
-        # 因为全部是股票，无需区分 crypto
-        super_stock = df_all[(df_all['pf7'] > 4.0) & (df_all['prob7'] > 0.70)].copy()
-        normal_stock = df_all[((df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)) & ~df_all['symbol'].isin(super_stock['symbol'])].copy()
-        
         def format_and_sort(df):
             df = df.copy()
             df['price'] = df['price'].round(2)
             df['change'] = df['change'].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
             df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
             df['pf7'] = df['pf7'].round(2)
+            # 统一排序：先按选择的字段降序，0分的自然排后面
             if sort_by == "PF7 (盈利因子)":
                 df = df.sort_values("pf7", ascending=False)
             else:
                 df = df.sort_values("prob7", ascending=False)
             return df
         
-        if not super_stock.empty:
-            df_s = format_and_sort(super_stock)
-            st.subheader(f"🔥 超级优质股票（PF>4 & 7日>70%） 共 {len(df_s)} 只")
-            for _, row in df_s.iterrows():
-                details = row['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
-                st.markdown(f"**🔥 {row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
+        df_display = format_and_sort(df_all)
         
-        if not normal_stock.empty:
-            df_n = format_and_sort(normal_stock)
-            st.subheader(f"🔹 优质股票 共 {len(df_n)} 只")
-            for _, row in df_n.iterrows():
-                details = row['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-                liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
-                st.markdown(f"**{row['display_symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - 得分: {row['score']}/5 - {detail_str} - **7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**{liquidity_warning}")
+        st.subheader(f"全部30只结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
         
-        # 显示所有 N/A 的（如果有）
-        na_stock = df_all[(df_all['pf7'] == 0.0) & (df_all['prob7'] == 0.0)].copy()
-        if not na_stock.empty:
-            df_na = format_and_sort(na_stock)
-            st.subheader(f"🔸 待计算或数据不可用 共 {len(df_na)} 只")
-            for _, row in df_na.iterrows():
-                st.markdown(f"**{row['display_symbol']}** - 价格: N/A - 得分: 0/5 - 无信号 - **7日概率: 0.0% | PF7: 0.0**")
-
-        if super_stock.empty and normal_stock.empty and na_stock.empty:
-            st.warning("当前无任何数据（可能网络问题，请重试）")
+        for _, row in df_display.iterrows():
+            details = row['sig_details']
+            detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+            liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+            
+            if row['pf7'] == 0.0 and row['prob7'] == 0.0:
+                prefix = "**待计算/无数据** "
+                score_str = "得分: 0/5 - 无信号"
+                prob_pf_str = "**7日概率: 0.0% | PF7: 0.0**"
+            elif row['pf7'] > 4.0 and row['prob7'] > 0.70:
+                prefix = "**🔥 超级优质** "
+                score_str = f"得分: {row['score']}/5 - {detail_str}"
+                prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+            else:
+                prefix = ""
+                score_str = f"得分: {row['score']}/5 - {detail_str}"
+                prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+            
+            st.markdown(f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}")
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 

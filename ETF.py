@@ -1,24 +1,71 @@
 import streamlit as st
-import yfinance as yf  # 替换 requests 为 yfinance，防限流更好
+import yfinance as yf
 import numpy as np
 import time
 import pandas as pd
-from io import StringIO
-import random  # 加随机延时
+import random
+import os
+import json
 
-st.set_page_config(page_title="标普500 + 纳斯达克100 + 热门ETF 极品短线扫描工具", layout="wide")
-st.title("标普500 + 纳斯达克100 + 热门ETF 短线扫描工具（PF7≥3.6 或 7日≥68%）")
+st.set_page_config(page_title="我的30只股票 短线扫描工具", layout="wide")
+st.title("我的30只股票 短线扫描工具")
 
-# ── 新增清缓存按钮 ──
+# ── 持久化进度文件 ──
+progress_file = "scan_progress_my30.json"
+
+# 只加载一次进度
+if 'progress_loaded' not in st.session_state:
+    st.session_state.progress_loaded = True
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, "r") as f:
+                data = json.load(f)
+            st.session_state.high_prob = data.get("high_prob", [])
+            st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
+            st.session_state.failed_count = data.get("failed_count", 0)
+            st.session_state.fully_scanned = data.get("fully_scanned", False)
+            st.success("检测到历史进度，已自动加载（可继续扫描）")
+        except Exception as e:
+            st.warning(f"加载进度失败: {e}，将从头开始")
+
+def save_progress():
+    data = {
+        "high_prob": st.session_state.high_prob,
+        "scanned_symbols": list(st.session_state.scanned_symbols),
+        "failed_count": st.session_state.failed_count,
+        "fully_scanned": st.session_state.fully_scanned
+    }
+    try:
+        with open(progress_file, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
+
+# ── 清缓存 + 重置按钮 ──
 if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
     st.cache_data.clear()
     st.session_state.high_prob = []
     st.session_state.scanned_symbols = set()
     st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False  # 重置扫描标志
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
     st.rerun()
 
-st.write("点击上方按钮可强制获取最新数据（尤其在美股刚收盘后推荐使用）")
+if st.button("🔄 重置所有进度（从头开始）"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+    st.rerun()
+
+st.write("当前只扫描以下 **我的30只股票**：")
+st.write("LLY, GEV, MIRM, ABBV, HWM, GE, MU, HII, SCCO, SNDK, WDC, SLV, STX, JNJ, FOXA, BK, RTX, WELL, PH, GVA, AHR, ATRO, GLW, CMI, APH, SMH, TPR, SOXX, COR, CAH, HCA, TSM, NESR, RGLD, OKLO, SMR, URNM, URA, NVDA, GOOG, TTMI, TMC, SVM, SKE, RVMD, RGC, RDW, POWL, PL, ONDS, LMND, HYMC, HL, FTAI, EXK, ERAS, DFTX, CDE, ASTS, APLD, NEM")
+st.write("点击「开始/继续扫描」后会自动持续运行。所有30只都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。低流动性标的会标注⚠️。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -32,25 +79,25 @@ BACKTEST_CONFIG = {
 }
 
 # ==================== 数据拉取 ====================
-@st.cache_data(ttl=1800, show_spinner=False)  # 缓存延长到30分钟
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        # 随机延时 10-18 秒防限流
-        time.sleep(random.uniform(10, 18))
-        
+        time.sleep(random.uniform(0.3, 0.8))
         ticker = yf.Ticker(yahoo_symbol)
-        df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False)
-        if df.empty or len(df) < 100:
-            raise ValueError("数据不足")
+        df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
+        if df.empty or len(df) < 50:
+            return None, None, None, None
         close = df['Close'].values.astype(float)
         high = df['High'].values.astype(float)
         low = df['Low'].values.astype(float)
         volume = df['Volume'].values.astype(float)
         mask = ~np.isnan(close)
         close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
+        if len(close) < 50:
+            return None, None, None, None
         return close, high, low, volume
-    except Exception as e:
-        raise ValueError(f"yfinance失败: {str(e)}")
+    except Exception:
+        return None, None, None, None
 
 # ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
@@ -120,7 +167,11 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     yahoo_symbol = symbol.upper()
+    
     close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
+    
+    if close is None:
+        return None
 
     macd_hist = macd_hist_np(close)
     rsi = rsi_np(close)
@@ -130,7 +181,6 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     atr_ma20 = rolling_mean_np(atr, 20)
     obv_ma20 = rolling_mean_np(obv, 20)
 
-    # 5个指标的具体判断 + 记录详情
     sig_macd = macd_hist[-1] > 0
     sig_vol = volume[-1] > vol_ma20[-1] * 1.1
     sig_rsi = rsi[-1] >= 60
@@ -159,122 +209,36 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     price = close[-1]
     change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
 
+    avg_daily_dollar_vol_recent = (volume[-30:] * close[-30:]).mean() if len(close) >= 30 else 0
+    is_low_liquidity = avg_daily_dollar_vol_recent < 50_000_000
+    liquidity_note = " (低流动性⚠️)" if is_low_liquidity else ""
+
     return {
         "symbol": symbol.upper(),
+        "display_symbol": symbol.upper() + liquidity_note,
         "price": price,
         "change": change,
         "score": score,
         "prob7": prob7,
         "pf7": pf7,
-        "sig_details": sig_details
+        "sig_details": sig_details,
+        "is_crypto": False,
+        "is_low_liquidity": is_low_liquidity
     }
 
-# ==================== 完整硬编码成分股 + 热门ETF ====================
-@st.cache_data(ttl=86400)
-def load_sp500_tickers():
-    # 2025年12月完整S&P500成分股（503只，每行15个，共34行）
-    return [
-        "NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "AVGO", "TSLA", "BRK.B", "LLY", "JPM", "WMT", "V", "ORCL",
-        "MA", "XOM", "JNJ", "PLTR", "BAC", "ABBV", "NFLX", "COST", "AMD", "HD", "PG", "GE", "MU", "CSCO", "UNH",
-        "KO", "CVX", "WFC", "MS", "IBM", "CAT", "GS", "MRK", "AXP", "PM", "CRM", "RTX", "APP", "TMUS", "LRCX",
-        "MCD", "TMO", "ABT", "C", "AMAT", "ISRG", "DIS", "LIN", "PEP", "INTU", "QCOM", "SCHW", "GEV", "AMGN", "BKNG",
-        "T", "TJX", "INTC", "VZ", "BA", "UBER", "BLK", "APH", "KLAC", "NEE", "ACN", "ANET", "DHR", "TXN", "SPGI",
-        "NOW", "COF", "GILD", "ADBE", "PFE", "BSX", "UNP", "LOW", "ADI", "SYK", "PGR", "PANW", "WELL", "DE", "HON",
-        "ETN", "MDT", "CB", "CRWD", "BX", "PLD", "VRTX", "KKR", "NEM", "COP", "CEG", "PH", "LMT", "BMY", "HCA",
-        "CMCSA", "HOOD", "ADP", "MCK", "CVS", "DASH", "CME", "SBUX", "MO", "SO", "ICE", "MCO", "GD", "MMC", "SNPS",
-        "DUK", "NKE", "WM", "TT", "CDNS", "CRH", "APO", "MMM", "DELL", "USB", "UPS", "HWM", "MAR", "PNC", "ABNB",
-        "AMT", "REGN", "NOC", "BK", "SHW", "RCL", "ORLY", "ELV", "GM", "CTAS", "GLW", "AON", "EMR", "FCX", "MNST",
-        "ECL", "EQIX", "JCI", "CI", "TDG", "ITW", "WMB", "CMI", "WBD", "MDLZ", "FDX", "TEL", "HLT", "CSX", "AJG",
-        "COR", "RSG", "NSC", "TRV", "TFC", "PWR", "CL", "COIN", "ADSK", "MSI", "STX", "WDC", "CVNA", "AEP", "SPG",
-        "FTNT", "KMI", "PCAR", "ROST", "WDAY", "SRE", "AFL", "AZO", "NDAQ", "SLB", "EOG", "PYPL", "NXPI", "BDX",
-        "ZTS", "LHX", "APD", "IDXX", "APD", "VST", "ALL", "DLR", "F", "MET", "URI", "O", "PSX", "EA", "D", "VLO",
-        "CMG", "CAH", "MPC", "CBRE", "GWW", "ROP", "DDOG", "AME", "FAST", "TTWO", "AIG", "AMP", "AXON", "DAL", "OKE",
-        "PSA", "CTVA", "MPWR", "CARR", "TGT", "ROK", "LVS", "BKR", "XEL", "MSCI", "EXC", "DHI", "YUM", "FANG", "FICO",
-        "ETR", "CTSH", "PAYX", "CCL", "PEG", "KR", "PRU", "GRMN", "TRGP", "OXY", "A", "MLM", "VMC", "EL", "HIG",
-        "IQV", "EBAY", "CCI", "KDP", "GEHC", "NUE", "CPRT", "WAB", "VTR", "HSY", "ARES", "STT", "UAL", "SNDK", "FISV",
-        "ED", "RMD", "SYY", "KEYS", "EXPE", "MCHP", "FIS", "ACGL", "PCG", "WEC", "OTIS", "FIX", "LYV", "XYL", "EQT",
-        "KMB", "ODFL", "KVUE", "HPE", "RJF", "IR", "WTW", "FITB", "MTB", "TER", "HUM", "SYF", "NRG", "VRSK", "DG",
-        "VICI", "IBKR", "ROL", "MTD", "FSLR", "KHC", "CSGP", "EME", "HBAN", "ADM", "EXR", "BRO", "DOV", "ATO", "EFX",
-        "TSCO", "AEE", "ULTA", "TPR", "WRB", "CHTR", "CBOE", "DTE", "BR", "NTRS", "DXCM", "EXE", "BIIB", "PPL", "AVB",
-        "FE", "LEN", "CINF", "CFG", "STLD", "AWK", "VLTO", "ES", "JBL", "OMC", "GIS", "STE", "CNP", "DLTR", "LULU",
-        "RF", "TDY", "STZ", "IRM", "HUBB", "EQR", "LDOS", "HAL", "PPG", "PHM", "KEY", "WAT", "EIX", "TROW", "VRSN",
-        "WSM", "DVN", "ON", "L", "DRI", "NTAP", "RL", "CPAY", "HPQ", "LUV", "CMS", "IP", "LH", "PTC", "TSN",
-        "SBAC", "CHD", "EXPD", "PODD", "SW", "NVR", "CNC", "TYL", "TPL", "NI", "WST", "INCY", "PFG", "CTRA", "DGX",
-        "CHRW", "AMCR", "TRMB", "GPN", "JBHT", "PKG", "TTD", "MKC", "SNA", "SMCI", "IT", "CDW", "ZBH", "FTV", "ALB",
-        "Q", "GPC", "LII", "PNR", "DD", "IFF", "BG", "GDDY", "TKO", "GEN", "WY", "ESS", "INVH", "LNT", "EVRG",
-        "APTV", "HOLX", "DOW", "COO", "MAA", "J", "TXT", "FOXA", "FOX", "FFIV", "DECK", "PSKY", "ERIE", "BBY", "DPZ",
-        "UHS", "VTRS", "EG", "BALL", "AVY", "SOLV", "LYB", "ALLE", "KIM", "HII", "NDSN", "IEX", "JKHY", "MAS", "HRL",
-        "WYNN", "REG", "AKAM", "HST", "BEN", "ZBRA", "MRNA", "BF.B", "CF", "UDR", "AIZ", "CLX", "IVZ", "EPAM", "SWK",
-        "CPT", "HAS", "BLDR", "ALGN", "GL", "DOC", "DAY", "BXP", "RVTY", "FDS", "SJM", "PNW", "NCLH", "MGM", "CRL",
-        "AES", "BAX", "NWSA", "SWKS", "AOS", "TECH", "TAP", "HSIC", "FRT", "PAYC", "POOL", "APA", "MOS", "MTCH", "LW",
-        "NWS"
-    ]
-
-ndx100 = [
-    "ADBE","AMD","ABNB","ALNY","GOOGL","GOOG","AMZN","AEP","AMGN","ADI","AAPL","AMAT","APP","ARM","ASML",
-    "AZN","TEAM","ADSK","ADP","AXON","BKR","BKNG","AVGO","CDNS","CHTR","CTAS","CSCO","CCEP","CTSH","CMCSA",
-    "CEG","CPRT","CSGP","COST","CRWD","CSX","DDOG","DXCM","FANG","DASH","EA","EXC","FAST","FER","FTNT",
-    "GEHC","GILD","HON","IDXX","INSM","INTC","INTU","ISRG","KDP","KLAC","KHC","LRCX","LIN","MAR","MRVL",
-    "MELI","META","MCHP","MU","MSFT","MSTR","MDLZ","MPWR","MNST","NFLX","NVDA","NXPI","ORLY","ODFL","PCAR",
-    "PLTR","PANW","PAYX","PYPL","PDD","PEP","QCOM","REGN","ROP","ROST","STX","SHOP","SBUX","SNPS","TMUS",
-    "TTWO","TSLA","TXN","TRI","VRSK","VRTX","WBD","WDC","WDAY","XEL","ZS"
+# ==================== 我的30只股票 ====================
+my_30 = [
+    "LLY", "GEV", "MIRM", "ABBV", "HWM", "GE", "MU", "HII", "SCCO", "SNDK",
+    "WDC", "SLV", "STX", "JNJ", "FOXA", "BK", "RTX", "WELL", "PH", "GVA",
+    "AHR", "ATRO", "GLW", "CMI", "APH", "SMH", "TPR", "SOXX", "COR","TSM", "NESR", "RGLD", "OKLO", "SMR", "URNM", "URA", "NVDA", "GOOG", "TTMI", "TMC", "SVM", "SKE", "RVMD", "RGC", "RDW", "POWL", "PL", "ONDS", "LMND", "HYMC", "HL" "FTAI", "EXK", "ERAS", "DFTX", "CDE", "ASTS", "APLD", "CAH", "HCA", "NEM"
 ]
 
-extra_etfs = [
-    "SPY","QQQ","VOO","IVV","VTI","VUG","SCHG","IWM","DIA","SLV","GLD","GDX","GDXJ","SIL","SLVP",
-    "RING","SGDJ","SMH","SOXX","SOXL","TQQQ","BITO","MSTR","ARKK","XLK","XLF","XLE","XLV","XLI","XLY","XLP"
-]
-
-# 新增：GATE.io 交易量前200币种（基于2026年1月数据，常见top crypto ticker）
-gate_top200 = [
-    "BTC", "ETH", "SOL", "USDT", "BNB", "XRP", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
-    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
-    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
-    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
-    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
-    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
-    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
-    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KSM", "LRC", "OSMO", "DASH", "HOT",
-    "ZRO", "CRV", "CELO", "KDA", "ENJ", "BAT", "QTUM", "ELF", "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL",
-    "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP", "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF",
-    "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY", "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC",
-    "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY", "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT",
-    "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP", "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR",
-    "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX", "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP",
-    "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI", "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC",
-    "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT", "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT",
-    "DG"
-]
-
-# 新增：OKX 交易量前200币种（基于2026年1月数据，常见top crypto ticker，部分与Gate重叠）
-okx_top200 = [
-    "BTC", "ETH", "USDT", "SOL", "XRP", "BNB", "DOGE", "TON", "ADA", "SHIB", "AVAX", "TRX", "LINK", "DOT", "BCH",
-    "NEAR", "LTC", "MATIC", "LEO", "PEPE", "UNI", "ICP", "ETC", "APT", "KAS", "XMR", "FDUSD", "STX", "FIL", "HBAR", 
-    "OKB", "MNT", "CRO", "ATOM", "XLM", "ARB", "RNDR", "VET", "IMX", "MKR", "INJ", "GRT", "TAO", "AR", "OP", "FLOKI",
-    "THETA", "FTM", "RUNE", "BONK", "TIA", "SEI", "JUP", "LDO", "PYTH", "CORE", "ALGO", "SUI", "GALA", "AAVE", "BEAM",
-    "FLOW", "BGB", "QNT", "BSV", "EGLD", "ORDI", "DYDX", "AXS", "BTT", "FLR", "CHZ", "WLD", "STRK", "SAND", "EOS",
-    "KCS", "NEO", "AKT", "ONDO", "XTZ", "CFX", "JASMY", "RON", "GT", "1000SATS", "SNX", "AGIX", "WIF", "USDD", "KLAY",
-    "PENDLE", "AXL", "CHEEL", "MEW", "XEC", "GNO", "ZEC", "ENS", "NEXO", "XAUt", "CBETH", "CKB", "FRAX", "BLUR", "SUPER",
-    "MINA", "SAFE", "1INCH", "NFT", "IOST", "COMP", "GMT", "LPT", "ZIL", "GLM", "KDA", "ENJ", "BAT", "QTUM", "ELF",
-    "TURBO", "RVN", "ZRX", "SC", "ANKR", "RSR", "T", "GAL", "ILV", "YFI", "UMA", "API3", "SUSHI", "BAL", "BAND", "AMP",
-    "CHR", "AUDIO", "YGG", "ONE", "TRB", "ACH", "SFP", "RIF", "POWR", "POLS", "ALPHA", "FOR", "FIDA", "POLS", "RAY",
-    "STEP", "TORN", "TRIBE", "AKRO", "MLN", "GTC", "KAR", "BNC", "HARD", "DDX", "CREAM", "QUICK", "CQT", "SUKU", "RLY",
-    "RAD", "FARM", "CLV", "ALCX", "MASK", "TOKE", "YLD", "DNT", "CELL", "GNO", "DODO", "POLS", "SWAP", "BNT", "KEEP",
-    "NU", "TBTC", "UMA", "LON", "REQ", "MIR", "KP3R", "BANCOR", "PNT", "WHALE", "SRM", "OXY", "TRU", "PDEX", "BZRX",
-    "HEGIC", "ESD", "BAC", "MTA", "VALUE", "YAX", "AMPL", "CVP", "RGT", "HEGIC", "CREAM", "YAM", "SASHIMI", "SUSHI",
-    "YFV", "YFI", "UNI", "AAVE", "COMP", "BAL", "CRV", "REN", "KNC", "SNX", "ZRX", "BNT", "OMG", "MKR", "LRC", "BAT",
-    "DAI", "USDC", "USDT", "TUSD", "PAX", "BUSD", "HUSD", "EURT", "XAUT", "DG"
-]
-
-sp500 = load_sp500_tickers()
-all_tickers = list(set(sp500 + ndx100 + extra_etfs + gate_top200 + okx_top200))
-all_tickers.sort()
-
-st.write(f"总计 {len(all_tickers)} 只（标普500 + 纳斯达克100 + 热门ETF + GATE & OKX top 200 币种） | 2026年1月最新")
+tickers_to_scan = my_30
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
+# ==================== session_state 初始化 ====================
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -283,118 +247,143 @@ if 'failed_count' not in st.session_state:
     st.session_state.failed_count = 0
 if 'fully_scanned' not in st.session_state:
     st.session_state.fully_scanned = False
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
 
-result_container = st.container()
+# ==================== 强制全部30只显示（每次渲染页面都重新检查并补齐） ====================
+forced_symbols = set([s.upper() for s in my_30])
+computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
+missing = forced_symbols - computed_symbols
+
+for sym in missing:
+    st.session_state.high_prob.append({
+        "symbol": sym,
+        "display_symbol": sym + " (待计算或数据不可用)",
+        "price": 0.0,
+        "change": "N/A",
+        "score": 0,
+        "prob7": 0.0,
+        "pf7": 0.0,
+        "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
+        "is_crypto": False,
+        "is_low_liquidity": False
+    })
+
+# ==================== 参数变更处理 ====================
+total = len(tickers_to_scan)
+
+if st.session_state.get("prev_mode") != mode:
+    st.session_state.high_prob = []
+    st.session_state.fully_scanned = False
+    st.info("🔄 回测周期已变更，已清除旧结果（需重新计算）")
+
+st.session_state.prev_mode = mode
+
+# ==================== 进度条 ====================
 progress_bar = st.progress(0)
 status_text = st.empty()
 
+current_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
+progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
+progress_bar.progress(progress_val)
+
+# ==================== 显示结果 ====================
 if st.session_state.high_prob:
-    df_all = pd.DataFrame(st.session_state.high_prob)
+    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in set(tickers_to_scan)])
     
-    filtered_df = df_all[(df_all['pf7'] >= 3.6) | (df_all['prob7'] >= 0.68)].copy()
-    
-    if filtered_df.empty:
-        st.warning("当前扫描中暂无满足 PF7≥3.6 或 7日概率≥68% 的股票，继续扫描中...")
-    else:
-        df_display = filtered_df.copy()
-        df_display['price'] = df_display['price'].round(2)
-        df_display['change'] = df_display['change'].apply(lambda x: f"{x:+.2f}%")
-        df_display['prob7'] = (df_display['prob7'] * 100).round(1).map("{:.1f}%".format)
-        df_display['pf7'] = df_display['pf7'].round(2)
+    if not df_all.empty:
+        def format_and_sort(df):
+            df = df.copy()
+            df['price'] = df['price'].round(2)
+            df['change'] = df['change'].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
+            df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
+            df['pf7'] = df['pf7'].round(2)
+            if sort_by == "PF7 (盈利因子)":
+                df = df.sort_values("pf7", ascending=False)
+            else:
+                df = df.sort_values("prob7", ascending=False)
+            return df
         
-        if sort_by == "PF7 (盈利因子)":
-            df_display = df_display.sort_values("pf7", ascending=False)
-        else:
-            df_display = df_display.sort_values("prob7", ascending=False)
+        df_display = format_and_sort(df_all)
         
-        with result_container:
-            st.subheader(f"短线优质股票（PF7≥3.6 或 7日概率≥68%） 共 {len(df_display)} 只  |  排序：{sort_by}")
-            for _, row in df_display.iterrows():
-                details = row['sig_details']
-                detail_str = " | ".join([
-                    f"MACD>0: {'是' if details['MACD>0'] else '否'}",
-                    f"放量: {'是' if details['放量'] else '否'}",
-                    f"RSI≥60: {'是' if details['RSI≥60'] else '否'}",
-                    f"ATR放大: {'是' if details['ATR放大'] else '否'}",
-                    f"OBV上升: {'是' if details['OBV上升'] else '否'}"
-                ])
-                
-                st.markdown(
-                    f"**{row['symbol']}** - 价格: ${row['price']:.2f} ({row['change']}) - "
-                    f"得分: {row['score']}/5 - "
-                    f"{detail_str} - "
-                    f"**7日概率: {row['prob7']}  |  PF7: {row['pf7']}**"
-                )
+        st.subheader(f"全部30只结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
         
-        csv_data = df_display[['symbol', 'price', 'change', 'score', 'prob7', 'pf7']].to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📄 导出结果为 CSV",
-            data=csv_data,
-            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.csv",
-            mime="text/csv"
-        )
-        
-        txt_lines = []
-        txt_lines.append(f"短线优质股票扫描结果")
-        txt_lines.append(f"扫描时间：{time.strftime('%Y-%m-%d %H:%M')}")
-        txt_lines.append(f"筛选条件：PF7 ≥ 3.6  或  7日上涨概率 ≥ 68%")
-        txt_lines.append(f"回测周期：{mode}  |  排序：{sort_by}")
-        txt_lines.append(f"符合股票数量：{len(df_display)} 只")
-        txt_lines.append("=" * 60)
-        txt_lines.append("")
-        
+        # 紧凑连续显示：行与行之间零间隙
         for _, row in df_display.iterrows():
-            txt_lines.append(
-                f"{row['symbol']:6} | 价格 ${row['price']:8.2f}  {row['change']:>8} | "
-                f"得分 {row['score']}/5 | "
-                f"7日概率 {row['prob7']:>6}  |  PF7 {row['pf7']:>5}"
-            )
-        
-        txt_content = "\n".join(txt_lines)
-        
-        st.download_button(
-            label="📜 导出结果为 TXT（推荐，清晰对齐）",
-            data=txt_content.encode('utf-8'),
-            file_name=f"短线优质股票_PF≥3.6_or_7日≥68%_{time.strftime('%Y%m%d')}.txt",
-            mime="text/plain"
-        )
-        
-        with st.expander("🔍 TXT 预览"):
-            st.text(txt_content)
+            details = row['sig_details']
+            detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+            liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+            
+            if row['pf7'] == 0.0 and row['prob7'] == 0.0:
+                prefix = "**待计算/无数据** "
+                score_str = "得分: 0/5 - 无信号"
+                prob_pf_str = "**7日概率: 0.0% | PF7: 0.0**"
+            elif row['pf7'] > 4.0 and row['prob7'] > 0.70:
+                prefix = ""
+                score_str = f"**超级优质** 得分: {row['score']}/5 - {detail_str}"
+                prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+            else:
+                prefix = ""
+                score_str = f"得分: {row['score']}/5 - {detail_str}"
+                prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
+            
+            line = f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}"
+            
+            # 每行直接输出，不加任何额外换行或分隔
+            st.markdown(line)
 
-st.info(f"已扫描: {len(st.session_state.scanned_symbols)}/{len(all_tickers)} | 失败: {st.session_state.failed_count} | 优质股票: {len([x for x in st.session_state.high_prob if x['pf7']>=3.6 or x['prob7']>=0.68])}")
+st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-# 改成按钮触发扫描，避免部署时自动跑循环卡死
-if not st.session_state.fully_scanned:
-    if st.button("🚀 开始/继续全量扫描（时间较长，保持页面打开）"):
-        with st.spinner("自动扫描中（保持页面打开，不要关闭）..."):
-            for sym in all_tickers:
-                if sym in st.session_state.scanned_symbols:
-                    continue
-                status_text.text(f"正在计算 {sym} ({len(st.session_state.scanned_symbols)+1}/{len(all_tickers)})")
-                progress_bar.progress((len(st.session_state.scanned_symbols) + 1) / len(all_tickers))
-                try:
-                    metrics = compute_stock_metrics(sym, mode)
-                    st.session_state.scanned_symbols.add(sym)
+# ==================== 扫描逻辑 ====================
+if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
+    st.session_state.scanning = True
+
+if st.session_state.scanning and current_completed < total:
+    with st.spinner("扫描进行中（每批次刷新一次页面）..."):
+        batch_size = 15
+        processed_in_this_run = 0
+        
+        remaining_tickers = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
+        
+        for sym in remaining_tickers:
+            if processed_in_this_run >= batch_size:
+                break
+            
+            anticipated_completed = current_completed + processed_in_this_run + 1
+            progress_val = min(1.0, max(0.0, anticipated_completed / total)) if total > 0 else 0.0
+            
+            status_text.text(f"正在计算 {sym} ({anticipated_completed}/{total})")
+            progress_bar.progress(progress_val)
+            
+            try:
+                metrics = compute_stock_metrics(sym, mode)
+                if metrics is not None:
                     st.session_state.high_prob.append(metrics)
-                    st.rerun()
-                except Exception as e:
+                else:
                     st.session_state.failed_count += 1
-                    st.warning(f"{sym} 失败: {str(e)}")
-                    st.session_state.scanned_symbols.add(sym)
-                # 加大延时到12秒
-                time.sleep(12)
+                st.session_state.scanned_symbols.add(sym)
+            except Exception as e:
+                st.warning(f"{sym} 异常: {str(e)}")
+                st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            
+            processed_in_this_run += 1
+        
+        save_progress()
+        
+        new_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
+        accurate_progress = min(1.0, max(0.0, new_completed / total)) if total > 0 else 0.0
+        progress_bar.progress(accurate_progress)
+        
+        if new_completed >= total:
             st.session_state.fully_scanned = True
-            st.success("所有股票扫描完成！结果已更新")
-            st.rerun()
-else:
-    st.success("已完成全扫描！如需重新扫描，请点击上方强制刷新按钮。")
+            st.session_state.scanning = False
+            st.success("扫描完成！")
+        
+        st.rerun()
 
-if st.button("🔄 重置所有进度（从头开始）"):
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False
-    st.rerun()
+if current_completed >= total:
+    st.success("已完成全部30只扫描！结果已全部更新")
 
-st.caption("2026年1月完整修复版 | 完整534只硬编码 | 已加入热门ETF + 加密币 | PF7≥3.6 或 7日≥68% | 防限流 + 按钮触发 | 稳定运行")
+st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间亲密无间无空行无横线 | 直接复制运行")
+

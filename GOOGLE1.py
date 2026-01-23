@@ -65,7 +65,7 @@ if st.button("🔄 重置所有进度（从头开始）"):
 
 st.write("当前只扫描以下 **我的30只股票**：")
 st.write("LLY, GEV, MIRM, ABBV, HWM, GE, MU, HII, SCCO, SNDK, WDC, SLV, STX, JNJ, FOXA, BK, RTX, WELL, PH, GVA, AHR, ATRO, GLW, CMI, APH, PM, COR, CAH, HCA, NEM")
-st.write("点击「开始/继续扫描」后会自动持续运行。所有30只都会强制显示在结果中（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。低流动性标的会标注⚠️。")
+st.write("点击「开始/继续扫描」后会自动持续运行。所有30只都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。低流动性标的会标注⚠️。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -308,9 +308,8 @@ if st.session_state.high_prob:
         
         st.subheader(f"全部30只结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
         
-        # 紧凑显示：不加额外空行
-        for i, row in enumerate(df_display.iterrows()):
-            _, row = row
+        # 紧凑连续显示：行与行之间零间隙
+        for _, row in df_display.iterrows():
             details = row['sig_details']
             detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
             liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
@@ -330,12 +329,8 @@ if st.session_state.high_prob:
             
             line = f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}"
             
-            # 使用 markdown 紧凑显示，每行之间不加空行
-            st.markdown(line, unsafe_allow_html=True)
-            
-            # 只在不是最后一行时加分隔线（可选，更紧凑）
-            if i < len(df_display) - 1:
-                st.markdown("---", unsafe_allow_html=True)  # 细线分隔，可删除这行让更紧凑
+            # 每行直接输出，不加任何额外换行或分隔
+            st.markdown(line)
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
@@ -345,7 +340,7 @@ if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不
 
 if st.session_state.scanning and current_completed < total:
     with st.spinner("扫描进行中（每批次刷新一次页面）..."):
-        batch_size = 15  # 小批量，避免一次性太多请求被限
+        batch_size = 15
         processed_in_this_run = 0
         
         remaining_tickers = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
@@ -376,7 +371,6 @@ if st.session_state.scanning and current_completed < total:
         
         save_progress()
         
-        # 刷新后重新计算准确进度
         new_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
         accurate_progress = min(1.0, max(0.0, new_completed / total)) if total > 0 else 0.0
         progress_bar.progress(accurate_progress)
@@ -391,4 +385,4 @@ if st.session_state.scanning and current_completed < total:
 if current_completed >= total:
     st.success("已完成全部30只扫描！结果已全部更新")
 
-st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间无空行 | 直接复制运行")
+st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间亲密无间无空行无横线 | 直接复制运行")

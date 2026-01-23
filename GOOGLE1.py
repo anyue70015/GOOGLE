@@ -13,7 +13,6 @@ st.title("我的30只股票 短线扫描工具")
 # ── 持久化进度文件 ──
 progress_file = "scan_progress_my30.json"
 
-# 只加载一次进度
 if 'progress_loaded' not in st.session_state:
     st.session_state.progress_loaded = True
     if os.path.exists(progress_file):
@@ -250,7 +249,7 @@ if 'fully_scanned' not in st.session_state:
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 
-# ==================== 强制全部30只显示（每次渲染页面都重新检查并补齐） ====================
+# ==================== 强制全部30只显示 ====================
 forced_symbols = set([s.upper() for s in my_30])
 computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
 missing = forced_symbols - computed_symbols
@@ -287,7 +286,7 @@ current_completed = len(st.session_state.scanned_symbols.intersection(set(ticker
 progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
 progress_bar.progress(progress_val)
 
-# ==================== 显示结果 ====================
+# ==================== 显示结果 - 所有行合并成一个字符串，零间隙 ====================
 if st.session_state.high_prob:
     df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in set(tickers_to_scan)])
     
@@ -308,7 +307,8 @@ if st.session_state.high_prob:
         
         st.subheader(f"全部30只结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
         
-        # 紧凑连续显示：行与行之间零间隙
+        # 合并所有行成一个大字符串，用纯换行符连接
+        lines = []
         for _, row in df_display.iterrows():
             details = row['sig_details']
             detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
@@ -328,9 +328,11 @@ if st.session_state.high_prob:
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             
             line = f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}"
-            
-            # 每行直接输出，不加任何额外换行或分隔
-            st.markdown(line)
+            lines.append(line)
+        
+        # 一次性输出所有行，用 \n 连接，实现亲密无间
+        full_text = "\n".join(lines)
+        st.markdown(full_text)
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
@@ -385,4 +387,4 @@ if st.session_state.scanning and current_completed < total:
 if current_completed >= total:
     st.success("已完成全部30只扫描！结果已全部更新")
 
-st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间亲密无间无空行无横线 | 直接复制运行")
+st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间亲密无间（合并输出无额外间距） | 直接复制运行")

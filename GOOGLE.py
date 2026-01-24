@@ -374,7 +374,7 @@ if st.session_state.high_prob and tickers_to_scan:
             line = f"{prefix}{row['symbol']} - 价格: ${row['price']:.2f} ({change}) - 得分: {row['score']}/5 - {detail_str} - 7日概率: {prob7_fmt} | PF7: {row['pf7']:.2f}"
             lines.append(line)
         
-        txt_content = "\n".join(lines)
+        txt_content = "\r\n".join(lines)  # 使用 \r\n 以兼容 Windows 记事本
         
         st.download_button(
             label="📥 下载结果 (按PF7排序 txt)",

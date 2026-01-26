@@ -7,3 +7,4 @@ ccxt
 plotly
 akshare
 baostock
+matplotlib

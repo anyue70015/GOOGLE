@@ -7,8 +7,8 @@ import random
 from datetime import datetime, timedelta
 
 # ==================== 页面配置 ====================
-st.set_page_config(page_title="短线扫描器-纯文本终极版", layout="wide")
-st.title("📈 股票短线扫描 (已补全涨幅 + TXT 绝对换行)")
+st.set_page_config(page_title="短线扫描器-深度汇总版", layout="wide")
+st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
 
 # --- 周期设定 ---
 END_DATE_STR = "2026-01-24"
@@ -92,7 +92,6 @@ def compute_stock_comprehensive(symbol):
             })
         
         f_prob, f_pf = backtest_with_stats(close[:-1], score_arr[:-1], 7)
-        # 计算最新一日的涨幅
         last_chg = (close[-1]/close[-2]-1)*100 if len(close) > 1 else 0
         
         return {
@@ -125,30 +124,47 @@ if st.session_state.results:
     st.subheader("🏆 年度排行榜")
     st.dataframe(df_main[["symbol", "pf7", "prob7", "score", "price", "chg"]], use_container_width=True)
 
-    # --- 汇总下载 (纯 TXT 格式，强制 \r\n 换行) ---
+    # --- 汇总下载 1: 年度排行 ---
     summary_txt = f"{'代码':<10} {'PF7':<10} {'胜率':<10} {'得分':<10} {'价格':<10} {'涨幅':<10}\r\n"
     summary_txt += "-"*65 + "\r\n"
     for _, r in df_main.iterrows():
         summary_txt += f"{r['symbol']:<10} {r['pf7']:<10.2f} {r['prob7']*100:<10.1f}% {r['score']:<10} {r['price']:<10.2f} {r['chg']:<10}\r\n"
     
-    st.download_button("📥 下载汇总报告 (TXT)", summary_txt, file_name="Summary_Report.txt")
+    # --- 汇总下载 2: PF7 > 3.5 优质票 40日明细打包 (新增功能) ---
+    premium_txt = "=== PF7 > 3.5 优质股票近40日明细汇总报告 ===\r\n\r\n"
+    premium_stocks = [r for r in st.session_state.results if r['pf7'] > 3.5]
+    premium_stocks = sorted(premium_stocks, key=lambda x: x['pf7'], reverse=True) # 按 PF7 降序排列
+
+    if premium_stocks:
+        for p_stock in premium_stocks:
+            premium_txt += f"【股票代码: {p_stock['symbol']} | 年度PF7: {p_stock['pf7']:.2f}】\r\n"
+            premium_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
+            premium_txt += "-"*65 + "\r\n"
+            for d in p_stock['details']:
+                premium_txt += f"{d['日期']:<12} {d['价格']:<10.2f} {d['涨跌']:<10} {d['得分']:<8} {d['胜率']:<10} {d['PF7']:<10.2f}\r\n"
+            premium_txt += "\r\n" + "="*65 + "\r\n\r\n"
+    else:
+        premium_txt += "本次扫描未发现 PF7 > 3.5 的股票。\r\n"
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button("📥 下载汇总排行 (TXT)", summary_txt, file_name="Summary_Report.txt")
+    with col2:
+        st.download_button("🔥 下载优质票(PF7>3.5)明细打包 (TXT)", premium_txt, file_name="Premium_Stocks_40D_Details.txt")
 
     st.divider()
     
-    # --- 逐日明细 ---
-    selected = st.selectbox("选择股票查看 40 日明细", options=df_main["symbol"].tolist())
+    # --- 单个股票逐日明细展示 ---
+    selected = st.selectbox("选择股票查看 40 日明细 (同步排序)", options=df_main["symbol"].tolist())
     if selected:
         res_data = next(r for r in st.session_state.results if r['symbol'] == selected)
         df_detail = pd.DataFrame(res_data['details'])
         
-        # --- 逐日明细下载 (纯 TXT 格式，强制 \r\n 换行) ---
-        detail_txt = f"股票: {selected} 最近 40 日明细统计\r\n"
+        detail_txt = f"股票: {selected} 最近 40 日明细\r\n"
         detail_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
         detail_txt += "-"*65 + "\r\n"
         for _, d in df_detail.iterrows():
             detail_txt += f"{d['日期']:<12} {d['价格']:<10.2f} {d['涨跌']:<10} {d['得分']:<8} {d['胜率']:<10} {d['PF7']:<10.2f}\r\n"
         
         st.download_button(f"📥 下载 {selected} 逐日明细 (TXT)", detail_txt, file_name=f"{selected}_Detail.txt")
-        
-        # 页面显示
         st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))

@@ -7,8 +7,8 @@ import random
 from datetime import datetime, timedelta
 
 # ==================== 页面配置 ====================
-st.set_page_config(page_title="股票短线扫描-专业版", layout="wide")
-st.title("🚀 股票短线深度扫描 (逐日统计 + 下载功能)")
+st.set_page_config(page_title="短线专家扫描器", layout="wide")
+st.title("📊 股票短线深度扫描 (优化版)")
 
 # --- 周期设定 ---
 END_DATE_STR = "2026-01-24"
@@ -18,7 +18,7 @@ START_DATE = start_dt.strftime("%Y-%m-%d")
 
 st.info(f"📅 测算周期：{START_DATE} 至 {END_DATE_STR}")
 
-# ==================== 核心算法函数 ====================
+# ==================== 算法工具 ====================
 def ema_np(x, span):
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -55,7 +55,6 @@ def obv_np(close, volume):
     return np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
 
 def backtest_with_stats(close, score, steps=7):
-    # 得分 >= 3 视为信号点
     idx = np.where(score[:-steps] >= 3)[0]
     if len(idx) == 0: return 0.0, 0.0
     rets = close[idx + steps] / close[idx] - 1
@@ -65,11 +64,11 @@ def backtest_with_stats(close, score, steps=7):
     pf = pos_ret / neg_ret if neg_ret > 0 else (9.9 if pos_ret > 0 else 0.0)
     return win_rate, pf
 
-# ==================== 数据分析核心 ====================
+# ==================== 分析核心 ====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def compute_stock_comprehensive(symbol):
     try:
-        time.sleep(random.uniform(0.3, 0.6))
+        time.sleep(random.uniform(0.3, 0.5))
         df = yf.Ticker(symbol).history(start=START_DATE, end=END_DATE_STR, interval="1d")
         if df.empty or len(df) < 50: return None
         
@@ -79,7 +78,6 @@ def compute_stock_comprehensive(symbol):
         volume = df['Volume'].values.astype(float)
         dates = df.index.strftime("%Y-%m-%d").values
 
-        # 1. 指标计算
         macd_line = ema_np(close, 12) - ema_np(close, 26)
         macd_hist = macd_line - ema_np(macd_line, 9)
         rsi = rsi_np(close)
@@ -89,7 +87,6 @@ def compute_stock_comprehensive(symbol):
         atr_ma20 = rolling_mean_np(atr, 20)
         obv_ma20 = rolling_mean_np(obv, 20)
 
-        # 2. 判定信号 (您的逻辑)
         sig_macd = (macd_hist > 0).astype(int)
         sig_vol = (volume > vol_ma20 * 1.1).astype(int)
         sig_rsi = (rsi >= 60).astype(int)
@@ -97,21 +94,19 @@ def compute_stock_comprehensive(symbol):
         sig_obv = (obv > obv_ma20 * 1.05).astype(int)
         score_arr = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
 
-        # 3. 详情列表
         detail_len = min(40, len(close))
         details = []
         for i in range(len(close) - detail_len, len(close)):
-            # 这里的 sub_prob 是计算到那一天为止的胜率
             sub_prob, sub_pf = backtest_with_stats(close[:i], score_arr[:i], 7)
             chg = (close[i]/close[i-1]-1)*100 if i > 0 else 0
             details.append({
                 "日期": dates[i],
                 "价格": round(close[i], 2),
                 "涨跌": f"{chg:+.2f}%",
-                "得分": int(score_arr[i]), # 这里改名为“得分”，与下方渲染保持一致
+                "得分": int(score_arr[i]),
                 "当日胜率": f"{sub_prob*100:.1f}%",
                 "当日PF7": round(sub_pf, 2),
-                "指标状态": f"M:{sig_macd[i]}|V:{sig_vol[i]}|R:{sig_rsi[i]}|A:{sig_atr[i]}|O:{sig_obv[i]}"
+                "指标": f"M:{sig_macd[i]}|V:{sig_vol[i]}|R:{sig_rsi[i]}|A:{sig_atr[i]}|O:{sig_obv[i]}"
             })
 
         final_prob, final_pf = backtest_with_stats(close[:-1], score_arr[:-1], 7)
@@ -120,64 +115,83 @@ def compute_stock_comprehensive(symbol):
             "prob7": final_prob,
             "pf7": final_pf,
             "current_price": close[-1],
+            "last_score": int(score_arr[-1]), # 获取最新得分
             "details": details[::-1],
             "signal_count": len(np.where(score_arr[:-7] >= 3)[0])
         }
     except Exception:
         return None
 
-# ==================== UI 界面 ====================
-if 'all_results' not in st.session_state: st.session_state.all_results = []
-if 'processed_set' not in st.session_state: st.session_set = set()
+# ==================== 界面逻辑 ====================
+if 'results' not in st.session_state: st.session_state.results = []
+if 'processed' not in st.session_state: st.session_state.processed = set()
 
 with st.sidebar:
     st.header("操作面板")
-    file = st.file_uploader("上传股票代码 TXT", type=["txt"])
-    if st.button("🗑️ 清空进度"):
-        st.session_state.all_results = []
-        st.session_set = set()
+    file = st.file_uploader("上传 TXT 列表", type=["txt"])
+    if st.button("🗑️ 清空结果"):
+        st.session_state.results = []
+        st.session_state.processed = set()
         st.rerun()
 
 if not file:
-    st.warning("请上传 TXT 文件。")
+    st.info("请先上传 TXT 文件")
     st.stop()
 
 tickers = list(dict.fromkeys([t.strip().upper() for t in file.read().decode().replace(","," ").split() if t.strip()]))
 
-if st.button("🚀 开始分析"):
+if st.button("🚀 开始扫描分析"):
     progress = st.progress(0)
-    remaining = [s for s in tickers if s not in getattr(st.session_state, 'processed_set', set())]
+    remaining = [s for s in tickers if s not in st.session_state.processed]
     for i, s in enumerate(remaining):
         res = compute_stock_comprehensive(s)
-        if res: st.session_state.all_results.append(res)
-        if 'processed_set' not in st.session_state: st.session_state.processed_set = set()
-        st.session_state.processed_set.add(s)
+        if res: st.session_state.results.append(res)
+        st.session_state.processed.add(s)
         progress.progress((i + 1) / len(remaining))
 
-if st.session_state.all_results:
-    # 汇总表
+if st.session_state.results:
+    # --- 1. 数据整理与排序 ---
     df_main = pd.DataFrame([
-        {"代码": r['symbol'], "7日胜率(年)": f"{r['prob7']*100:.1f}%", "PF7(年)": r['pf7'], "现价": r['current_price'], "raw_pf": r['pf7']}
-        for r in st.session_state.all_results
+        {
+            "代码": r['symbol'], 
+            "7日胜率(年)": f"{r['prob7']*100:.1f}%", 
+            "PF7(年)": r['pf7'], 
+            "最新5指得分": r['last_score'], # 新增分数显示
+            "现价": r['current_price'],
+            "信号数": r['signal_count'],
+            "raw_pf": r['pf7']
+        } for r in st.session_state.results
     ]).sort_values("raw_pf", ascending=False)
-    
-    st.subheader("🏆 年度排行榜")
+
+    st.subheader("🏆 年度排行榜 (按盈利因子 PF7 排序)")
     st.dataframe(df_main.drop(columns=['raw_pf']), use_container_width=True)
 
-    # 下载 TXT
-    report_lines = [f"{r['symbol']}: 胜率 {r['prob7']*100:.1f}%, PF7 {r['pf7']:.2f}" for r in st.session_state.all_results]
-    st.download_button("📥 下载 TXT 报告", "\n".join(report_lines), file_name="report.txt")
+    # --- 2. 规范化 TXT 下载 ---
+    # 每一行一只股票，字段对齐
+    report_header = f"{'代码':<10} | {'胜率':<10} | {'PF7':<10} | {'得分':<10} | {'现价':<10}\n" + "-"*60 + "\n"
+    report_body = ""
+    for _, row in df_main.iterrows():
+        report_body += f"{row['代码']:<10} | {row['7日胜率(年)']:<10} | {row['PF7(年)']:<10.2f} | {row['最新5指得分']:<10} | {row['现价']:<10.2f}\n"
+    
+    st.download_button(
+        label="📥 下载一行一票规范报告 (TXT)",
+        data=report_header + report_body,
+        file_name=f"Stock_Report_{datetime.now().strftime('%Y%m%d')}.txt"
+    )
 
     st.divider()
     
-    # 明细表
-    selected = st.selectbox("查看详情", options=[r['symbol'] for r in st.session_state.all_results])
+    # --- 3. 详情查看 (同步排行榜顺序) ---
+    st.subheader("🔍 逐日明细查看 (已按 PF7 从高到低排序)")
+    # 此处的 options 直接使用 df_main 的顺序
+    sorted_tickers = df_main["代码"].tolist()
+    selected = st.selectbox("选择要查看的股票", options=sorted_tickers)
+    
     if selected:
-        stock_res = next(r for r in st.session_state.all_results if r['symbol'] == selected)
+        stock_res = next(r for r in st.session_state.results if r['symbol'] == selected)
         df_detail = pd.DataFrame(stock_res['details'])
         
-        # 修正 KeyError：确保 subset 中的名称与 DataFrame 列名完全一致
-        # 我们上面在 details 字典里定义的是 "得分"
+        # 显示明细表并应用颜色渐变
         st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))
 
-st.caption("注：逐日胜率/PF7 反映的是截至当天的历史回测表现。")
+st.caption("提示：详情下拉列表顺序已与上方排行榜完全一致。")

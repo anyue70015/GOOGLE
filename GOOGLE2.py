@@ -7,8 +7,8 @@ import random
 from datetime import datetime, timedelta
 
 # ==================== 页面配置 ====================
-st.set_page_config(page_title="短线扫描器-纯文本修正版", layout="wide")
-st.title("📊 股票短线扫描 (TXT 绝对一行一个)")
+st.set_page_config(page_title="短线扫描器-纯文本终极版", layout="wide")
+st.title("📈 股票短线扫描 (已补全涨幅 + TXT 绝对换行)")
 
 # --- 周期设定 ---
 END_DATE_STR = "2026-01-24"
@@ -81,54 +81,74 @@ def compute_stock_comprehensive(symbol):
         details = []
         for i in range(len(close) - detail_len, len(close)):
             sub_prob, sub_pf = backtest_with_stats(close[:i], score_arr[:i], 7)
+            chg = (close[i]/close[i-1]-1)*100 if i > 0 else 0
             details.append({
-                "日期": dates[i], "价格": round(close[i], 2), "得分": int(score_arr[i]),
-                "胜率": f"{sub_prob*100:.1f}%", "PF7": round(sub_pf, 2), "指标": f"M{score_arr[i]}"
+                "日期": dates[i], 
+                "价格": round(close[i], 2), 
+                "涨跌": f"{chg:+.2f}%",
+                "得分": int(score_arr[i]),
+                "胜率": f"{sub_prob*100:.1f}%", 
+                "PF7": round(sub_pf, 2)
             })
+        
         f_prob, f_pf = backtest_with_stats(close[:-1], score_arr[:-1], 7)
-        return {"symbol": symbol.upper(), "prob7": f_prob, "pf7": f_pf, "price": close[-1], "score": int(score_arr[-1]), "details": details[::-1]}
+        # 计算最新一日的涨幅
+        last_chg = (close[-1]/close[-2]-1)*100 if len(close) > 1 else 0
+        
+        return {
+            "symbol": symbol.upper(), 
+            "prob7": f_prob, 
+            "pf7": f_pf, 
+            "price": close[-1], 
+            "chg": f"{last_chg:+.2f}%",
+            "score": int(score_arr[-1]), 
+            "details": details[::-1]
+        }
     except: return None
 
 # ==================== UI 展示 ====================
 if 'results' not in st.session_state: st.session_state.results = []
 with st.sidebar:
     file = st.file_uploader("上传代码 TXT", type=["txt"])
-    if st.button("清空"): st.session_state.results = []
+    if st.button("清空结果"): st.session_state.results = []
 
 if file:
     tickers = list(dict.fromkeys([t.strip().upper() for t in file.read().decode().split() if t.strip()]))
     if st.button("开始分析"):
         for s in tickers:
             res = compute_stock_comprehensive(s)
-            if res: st.session_state.results.append(res)
+            if res and res not in st.session_state.results: 
+                st.session_state.results.append(res)
 
 if st.session_state.results:
     df_main = pd.DataFrame(st.session_state.results).sort_values("pf7", ascending=False)
-    st.dataframe(df_main[["symbol", "pf7", "prob7", "score", "price"]], use_container_width=True)
+    st.subheader("🏆 年度排行榜")
+    st.dataframe(df_main[["symbol", "pf7", "prob7", "score", "price", "chg"]], use_container_width=True)
 
-    # --- 汇总下载 (纯 TXT 格式，强制换行) ---
-    summary_txt = "代码       PF7       胜率       得分       现价\n"
-    summary_txt += "-------------------------------------------\n"
+    # --- 汇总下载 (纯 TXT 格式，强制 \r\n 换行) ---
+    summary_txt = f"{'代码':<10} {'PF7':<10} {'胜率':<10} {'得分':<10} {'价格':<10} {'涨幅':<10}\r\n"
+    summary_txt += "-"*65 + "\r\n"
     for _, r in df_main.iterrows():
-        # 使用固定的列宽，并在末尾加 \r\n 确保 Windows 记事本强制换行
-        line = f"{r['symbol']:<10} {r['pf7']:<10.2f} {r['prob7']*100:<10.1f}% {r['score']:<10} {r['price']:<10.2f}\r\n"
-        summary_txt += line
+        summary_txt += f"{r['symbol']:<10} {r['pf7']:<10.2f} {r['prob7']*100:<10.1f}% {r['score']:<10} {r['price']:<10.2f} {r['chg']:<10}\r\n"
     
-    st.download_button("📥 下载汇总排行榜 (纯 TXT)", summary_txt, file_name="Summary.txt")
+    st.download_button("📥 下载汇总报告 (TXT)", summary_txt, file_name="Summary_Report.txt")
 
     st.divider()
+    
+    # --- 逐日明细 ---
     selected = st.selectbox("选择股票查看 40 日明细", options=df_main["symbol"].tolist())
     if selected:
         res_data = next(r for r in st.session_state.results if r['symbol'] == selected)
         df_detail = pd.DataFrame(res_data['details'])
         
-        # --- 逐日明细下载 (纯 TXT 格式，强制换行) ---
-        detail_txt = f"股票: {selected} 最近 40 日明细\n"
-        detail_txt += "日期         价格     得分     胜率     PF7\n"
-        detail_txt += "-------------------------------------------\n"
+        # --- 逐日明细下载 (纯 TXT 格式，强制 \r\n 换行) ---
+        detail_txt = f"股票: {selected} 最近 40 日明细统计\r\n"
+        detail_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
+        detail_txt += "-"*65 + "\r\n"
         for _, d in df_detail.iterrows():
-            d_line = f"{d['日期']:<12} {d['价格']:<8.2f} {d['得分']:<8} {d['胜率']:<8} {d['PF7']:<8.2f}\r\n"
-            detail_txt += d_line
+            detail_txt += f"{d['日期']:<12} {d['价格']:<10.2f} {d['涨跌']:<10} {d['得分']:<8} {d['胜率']:<10} {d['PF7']:<10.2f}\r\n"
         
-        st.download_button(f"📥 下载 {selected} 逐日明细 (纯 TXT)", detail_txt, file_name=f"{selected}_Detail.txt")
-        st.table(df_detail)
+        st.download_button(f"📥 下载 {selected} 逐日明细 (TXT)", detail_txt, file_name=f"{selected}_Detail.txt")
+        
+        # 页面显示
+        st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))

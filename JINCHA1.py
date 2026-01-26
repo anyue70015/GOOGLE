@@ -13,7 +13,7 @@ st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
 # --- 周期设定 ---
 END_DATE_STR = "2026-01-24"
 end_dt = datetime.strptime(END_DATE_STR, "%Y-%m-%d")
-start_dt = end_dt - timedelta(days=360) 
+start_dt = end_dt - timedelta(days=385) 
 START_DATE = start_dt.strftime("%Y-%m-%d")
 
 # ==================== 核心算法 ====================
@@ -53,13 +53,19 @@ def obv_np(close, volume):
     return np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
 
 def backtest_with_stats(close, score, steps=7):
+    if len(close) <= steps + 1:
+        return 0.5, 0.0
     idx = np.where(score[:-steps] >= 3)[0]
-    if len(idx) == 0: return 0.0, 0.0
+    if len(idx) == 0:
+        return 0.5, 0.0
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
     pos_ret = rets[rets > 0].sum()
     neg_ret = abs(rets[rets <= 0].sum())
-    pf = pos_ret / neg_ret if neg_ret > 0 else (9.9 if pos_ret > 0 else 0.0)
+    if (rets <= 0).any():
+        pf = pos_ret / neg_ret if neg_ret > 0 else 0.0
+    else:
+        pf = 999.0 if pos_ret > 0 else 0.0
     return win_rate, pf
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -77,7 +83,7 @@ def compute_stock_comprehensive(symbol):
                     (atr_np(high, low, close) > rolling_mean_np(atr_np(high, low, close), 20) * 1.1).astype(int) + \
                     (obv_np(close, volume) > rolling_mean_np(obv_np(close, volume), 20) * 1.05).astype(int)
 
-        # ── 整合提供的计算逻辑 ──
+        # 当前最新一天信号（使用 [-1]）
         sig_macd = macd_hist[-1] > 0
         sig_vol = volume[-1] > rolling_mean_np(volume, 20)[-1] * 1.1
         sig_rsi = rsi_np(close)[-1] >= 60
@@ -86,9 +92,10 @@ def compute_stock_comprehensive(symbol):
 
         score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
 
-        # 整体回测使用[:-1]
+        # 整体回测：使用[:-1]，排除最后一天信号（无前视偏差）
         f_prob, f_pf = backtest_with_stats(close[:-1], score_arr[:-1], 7)
 
+        # 逐日细节（保持原滚动方式，用于稳定性观察）
         detail_len = min(40, len(close))
         details = []
         for i in range(len(close) - detail_len, len(close)):
@@ -141,10 +148,10 @@ if st.session_state.results:
     for _, r in df_main.iterrows():
         summary_txt += f"{r['symbol']:<10} {r['pf7']:<10.2f} {r['prob7']*100:<10.1f}% {r['score']:<10} {r['price']:<10.2f} {r['chg']:<10}\r\n"
     
-    # --- 汇总下载 2: PF7 > 3.5 优质票 40日明细打包 (新增功能) ---
+    # --- 汇总下载 2: PF7 > 3.5 优质票 40日明细打包 ---
     premium_txt = "=== PF7 > 3.5 优质股票近40日明细汇总报告 ===\r\n\r\n"
     premium_stocks = [r for r in st.session_state.results if r['pf7'] > 3.5]
-    premium_stocks = sorted(premium_stocks, key=lambda x: x['pf7'], reverse=True) # 按 PF7 降序排列
+    premium_stocks = sorted(premium_stocks, key=lambda x: x['pf7'], reverse=True)
 
     if premium_stocks:
         for p_stock in premium_stocks:
@@ -179,4 +186,3 @@ if st.session_state.results:
         
         st.download_button(f"📥 下载 {selected} 逐日明细 (TXT)", detail_txt, file_name=f"{selected}_Detail.txt")
         st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))
-

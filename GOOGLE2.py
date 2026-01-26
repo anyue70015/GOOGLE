@@ -7,8 +7,8 @@ import random
 from datetime import datetime, timedelta
 
 # ==================== 页面配置 ====================
-st.set_page_config(page_title="短线专家扫描器", layout="wide")
-st.title("📊 股票短线深度扫描 (优化版)")
+st.set_page_config(page_title="短线扫描器-增强版", layout="wide")
+st.title("📊 股票短线深度扫描 (支持双向下载)")
 
 # --- 周期设定 ---
 END_DATE_STR = "2026-01-24"
@@ -18,7 +18,7 @@ START_DATE = start_dt.strftime("%Y-%m-%d")
 
 st.info(f"📅 测算周期：{START_DATE} 至 {END_DATE_STR}")
 
-# ==================== 算法工具 ====================
+# ==================== 核心算法 ====================
 def ema_np(x, span):
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -64,11 +64,10 @@ def backtest_with_stats(close, score, steps=7):
     pf = pos_ret / neg_ret if neg_ret > 0 else (9.9 if pos_ret > 0 else 0.0)
     return win_rate, pf
 
-# ==================== 分析核心 ====================
+# ==================== 抓取与分析 ====================
 @st.cache_data(ttl=3600, show_spinner=False)
 def compute_stock_comprehensive(symbol):
     try:
-        time.sleep(random.uniform(0.3, 0.5))
         df = yf.Ticker(symbol).history(start=START_DATE, end=END_DATE_STR, interval="1d")
         if df.empty or len(df) < 50: return None
         
@@ -115,83 +114,76 @@ def compute_stock_comprehensive(symbol):
             "prob7": final_prob,
             "pf7": final_pf,
             "current_price": close[-1],
-            "last_score": int(score_arr[-1]), # 获取最新得分
-            "details": details[::-1],
-            "signal_count": len(np.where(score_arr[:-7] >= 3)[0])
+            "last_score": int(score_arr[-1]),
+            "details": details[::-1]
         }
-    except Exception:
-        return None
+    except: return None
 
-# ==================== 界面逻辑 ====================
+# ==================== UI 展示 ====================
 if 'results' not in st.session_state: st.session_state.results = []
-if 'processed' not in st.session_state: st.session_state.processed = set()
 
 with st.sidebar:
-    st.header("操作面板")
-    file = st.file_uploader("上传 TXT 列表", type=["txt"])
-    if st.button("🗑️ 清空结果"):
+    file = st.file_uploader("上传代码 TXT", type=["txt"])
+    if st.button("🗑️ 清空"):
         st.session_state.results = []
-        st.session_state.processed = set()
         st.rerun()
 
-if not file:
-    st.info("请先上传 TXT 文件")
-    st.stop()
+if not file: st.stop()
 
 tickers = list(dict.fromkeys([t.strip().upper() for t in file.read().decode().replace(","," ").split() if t.strip()]))
 
-if st.button("🚀 开始扫描分析"):
-    progress = st.progress(0)
-    remaining = [s for s in tickers if s not in st.session_state.processed]
-    for i, s in enumerate(remaining):
+if st.button("🚀 开始分析"):
+    for s in tickers:
         res = compute_stock_comprehensive(s)
         if res: st.session_state.results.append(res)
-        st.session_state.processed.add(s)
-        progress.progress((i + 1) / len(remaining))
 
 if st.session_state.results:
-    # --- 1. 数据整理与排序 ---
+    # 1. 年度排行榜
     df_main = pd.DataFrame([
         {
             "代码": r['symbol'], 
-            "7日胜率(年)": f"{r['prob7']*100:.1f}%", 
             "PF7(年)": r['pf7'], 
-            "最新5指得分": r['last_score'], # 新增分数显示
-            "现价": r['current_price'],
-            "信号数": r['signal_count'],
-            "raw_pf": r['pf7']
+            "7日胜率(年)": f"{r['prob7']*100:.1f}%", 
+            "最新5指得分": r['last_score'],
+            "现价": r['current_price']
         } for r in st.session_state.results
-    ]).sort_values("raw_pf", ascending=False)
+    ]).sort_values("PF7(年)", ascending=False)
 
-    st.subheader("🏆 年度排行榜 (按盈利因子 PF7 排序)")
-    st.dataframe(df_main.drop(columns=['raw_pf']), use_container_width=True)
+    st.subheader("🏆 年度排行榜 (按 PF7 排序)")
+    st.dataframe(df_main, use_container_width=True)
 
-    # --- 2. 规范化 TXT 下载 ---
-    # 每一行一只股票，字段对齐
-    report_header = f"{'代码':<10} | {'胜率':<10} | {'PF7':<10} | {'得分':<10} | {'现价':<10}\n" + "-"*60 + "\n"
-    report_body = ""
+    # 2. 下载汇总报告
+    txt_summary = f"{'代码':<10} | {'胜率':<10} | {'PF7':<10} | {'得分':<10} | {'现价':<10}\n" + "-"*55 + "\n"
     for _, row in df_main.iterrows():
-        report_body += f"{row['代码']:<10} | {row['7日胜率(年)']:<10} | {row['PF7(年)']:<10.2f} | {row['最新5指得分']:<10} | {row['现价']:<10.2f}\n"
+        txt_summary += f"{row['代码']:<10} | {row['7日胜率(年)']:<10} | {row['PF7(年)']:<10.2f} | {row['最新5指得分']:<10} | {row['现价']:<10.2f}\n"
     
-    st.download_button(
-        label="📥 下载一行一票规范报告 (TXT)",
-        data=report_header + report_body,
-        file_name=f"Stock_Report_{datetime.now().strftime('%Y%m%d')}.txt"
-    )
+    st.download_button("📥 下载汇总排行榜 (TXT)", txt_summary, file_name="Summary_Report.txt")
 
     st.divider()
-    
-    # --- 3. 详情查看 (同步排行榜顺序) ---
-    st.subheader("🔍 逐日明细查看 (已按 PF7 从高到低排序)")
-    # 此处的 options 直接使用 df_main 的顺序
+
+    # 3. 逐日明细及详情下载
+    st.subheader("🔍 40日逐日明细统计")
     sorted_tickers = df_main["代码"].tolist()
-    selected = st.selectbox("选择要查看的股票", options=sorted_tickers)
+    selected = st.selectbox("选择要分析的股票 (已按 PF7 排序)", options=sorted_tickers)
     
     if selected:
-        stock_res = next(r for r in st.session_state.results if r['symbol'] == selected)
-        df_detail = pd.DataFrame(stock_res['details'])
+        res_data = next(r for r in st.session_state.results if r['symbol'] == selected)
+        df_detail = pd.DataFrame(res_data['details'])
         
-        # 显示明细表并应用颜色渐变
+        # --- 详情下载逻辑 ---
+        detail_txt = f"股票代码: {selected} | 最近40个交易日逐日统计\n"
+        detail_txt += f"{'日期':<12} | {'价格':<8} | {'涨跌':<8} | {'得分':<5} | {'胜率':<8} | {'PF7':<8} | {'指标细节'}\n"
+        detail_txt += "-"*80 + "\n"
+        for _, d in df_detail.iterrows():
+            detail_txt += f"{d['日期']:<12} | {d['价格']:<8.2f} | {d['涨跌']:<8} | {d['得分']:<5} | {d['当日胜率']:<8} | {d['当日PF7']:<8.2f} | {d['指标']}\n"
+        
+        col1, col2 = st.columns([3, 1])
+        with col2:
+            st.download_button(f"📥 下载 {selected} 逐日明细", detail_txt, file_name=f"{selected}_daily_details.txt")
+        
+        with col1:
+            st.write(f"当前查看：**{selected}**")
+
         st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))
 
-st.caption("提示：详情下拉列表顺序已与上方排行榜完全一致。")
+st.caption("提示：汇总报告与逐日明细均已优化为一行一个记录，方便记事本直接查看。")

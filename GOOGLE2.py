@@ -1,124 +1,102 @@
-import streamlit as st
-import yfinance as yf
-import numpy as np
-import time
-import pandas as pd
-import random
-import os
-import json
-from datetime import datetime
-
-st.set_page_config(page_title="量化实战版-30只精选扫描", layout="wide")
-st.title("🛡️ 我的30只股票-滚动回测终极版")
-
-# ── 进度持久化 ──
-progress_file = "scan_progress_final.json"
-
-if 'high_prob' not in st.session_state:
-    st.session_state.high_prob = []
-    if os.path.exists(progress_file):
-        try:
-            with open(progress_file, "r") as f:
-                data = json.load(f)
-                st.session_state.high_prob = data.get("high_prob", [])
-                st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
-        except: pass
-
-# ==================== 科学计算引擎 (核心改进) ====================
-def ema_np(x, span):
-    alpha = 2 / (span + 1)
-    ema = np.empty_like(x); ema[0] = x[0]
-    for i in range(1, len(x)): ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
-    return ema
-
-def backtest_with_stats(close, score, steps=7):
-    """最核心改进：严格计算盈亏比，排除虚高"""
-    if len(close) <= steps + 1: return 0.5, 0.0
-    idx = np.where(score[:-steps] >= 3)[0] # 只有3分以上才算有效信号
-    if len(idx) == 0: return 0.5, 0.0
+# ==================== 核心回测逻辑：好的计算方式 ====================
+def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
+    """
+    科学计算方式：
+    1. 严格隔离未来数据
+    2. 计算真实的期望盈亏比 (Profit Factor)
+    """
+    if len(close) <= steps + 1:
+        return 0.5, 0.0
+        
+    # 找到历史上所有符合买入条件（得分>=3）的索引
+    idx = np.where(score[:-steps] >= 3)[0]
     
+    if len(idx) == 0:
+        return 0.5, 0.0
+        
+    # 计算持仓7天后的收益率
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
-    pos_sum = rets[rets > 0].sum()
-    neg_sum = abs(rets[rets <= 0].sum())
     
-    # PF计算：盈利总额/亏损总额，若无亏损则封顶9.9
-    pf = pos_sum / neg_sum if neg_sum > 0 else (9.9 if pos_sum > 0 else 0.0)
+    pos_ret_sum = rets[rets > 0].sum()
+    neg_ret_sum = abs(rets[rets <= 0].sum())
+    
+    # 科学处理 PF 边界：如果有亏损，计算比例；若无亏损，给一个合理的上限
+    if neg_ret_sum > 0:
+        pf = pos_ret_sum / neg_ret_sum
+    else:
+        pf = 9.9 if pos_ret_sum > 0 else 0.0
+        
     return win_rate, pf
 
-@st.cache_data(ttl=1800)
-def compute_premium_metrics(symbol, period_str="1y"):
-    try:
-        df = yf.Ticker(symbol).history(period=period_str, interval="1d", auto_adjust=True)
-        if len(df) < 50: return None
-        
-        close, high, low, vol = df['Close'].values, df['High'].values, df['Low'].values, df['Volume'].values
-        
-        # 指标计算
-        macd = (ema_np(close, 12) - ema_np(close, 26)) - ema_np((ema_np(close, 12) - ema_np(close, 26)), 9)
-        # 这里的Score判定更严格
-        s_macd = (macd > 0).astype(int)
-        s_vol = (vol > pd.Series(vol).rolling(20).mean().values * 1.1).astype(int)
-        s_rsi = (pd.Series(close).rolling(14).apply(lambda x: 100 - (100/(1+(x.diff().where(x.diff()>0,0).mean()/x.diff().where(x.diff()<0,0).abs().mean()))), raw=False) >= 60).astype(int)
-        
-        score_arr = s_macd + s_vol + (s_rsi.fillna(0).values)
-        
-        # --- 学习过来的好东西：滚动切片计算 ---
-        # 只拿截至昨天的历史数据算PF，避免今天涨了拉高历史分数的舞弊
-        prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
-        
-        # 增加流动性检查 (134万资金安全线)
-        dollar_vol = (vol[-10:] * close[-10:]).mean()
-        is_safe = dollar_vol > 50_000_000 # 日均5000万美金才安全
-        
-        return {
-            "symbol": symbol,
-            "price": close[-1],
-            "score": int(score_arr[-1]),
-            "prob7": prob7,
-            "pf7": pf7,
-            "is_safe": is_safe,
-            "change": (close[-1]/close[-2]-1)*100
-        }
-    except: return None
-
-# ==================== UI & 自动扫描 ====================
-my_30 = ["LLY", "GEV", "MIRM", "ABBV", "HWM", "GE", "MU", "HII", "SCCO", "SNDK", "WDC", "SLV", "STX", "JNJ", "FOXA", "BK", "RTX", "WELL", "PH", "GVA", "AHR", "ATRO", "GLW", "CMI", "APH", "SMH", "TPR", "SOXX", "COR", "TSM", "NVDA", "GOOG", "ASTS"]
-
-if 'scanned_symbols' not in st.session_state: st.session_state.scanned_symbols = set()
-
-col_ctrl1, col_ctrl2 = st.columns(2)
-with col_ctrl1:
-    if st.button("🚀 开始全量科学扫描"):
-        st.session_state.scanning = True
-with col_ctrl2:
-    if st.button("🔄 重置"):
-        st.session_state.high_prob = []; st.session_state.scanned_symbols = set()
-        if os.path.exists(progress_file): os.remove(progress_file)
-        st.rerun()
-
-# 自动循环执行
-if st.session_state.get('scanning', False):
-    remaining = [s for s in my_30 if s not in st.session_state.scanned_symbols]
-    if remaining:
-        target = remaining[0]
-        res = compute_premium_metrics(target)
-        if res: st.session_state.high_prob.append(res)
-        st.session_state.scanned_symbols.add(target)
-        # 保存进度
-        with open(progress_file, "w") as f:
-            json.dump({"high_prob": st.session_state.high_prob, "scanned_symbols": list(st.session_state.scanned_symbols)}, f)
-        st.rerun()
-    else:
-        st.session_state.scanning = False
-        st.success("全部扫描完成！")
-
-# 结果展示
-if st.session_state.high_prob:
-    df = pd.DataFrame(st.session_state.high_prob).sort_values("pf7", ascending=False)
+# ==================== 核心计算函数：好的计算方式 ====================
+@st.cache_data(show_spinner=False)
+def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
+    yahoo_symbol = symbol.upper()
+    close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
     
-    for _, r in df.iterrows():
-        safe_tag = "✅ 安全" if r['is_safe'] else "⚠️ 低流动性"
-        color = "green" if r['score'] >= 3 else "black"
-        # 紧凑显示：单行展示核心数据
-        st.markdown(f":{color}[**{r['symbol']}**] | PF7: **{r['pf7']:.2f}** | 胜率: {r['prob7']*100:.1f}% | 得分: **{r['score']}** | 价格: ${r['price']:.2f} ({r['change']:+.2f}%) | {safe_tag}")
+    if close is None:
+        return None
+
+    # --- 1. 指标计算 ---
+    macd_hist = macd_hist_np(close)
+    rsi = rsi_np(close)
+    atr = atr_np(high, low, close)
+    obv = obv_np(close, volume)
+    vol_ma20 = rolling_mean_np(volume, 20)
+    atr_ma20 = rolling_mean_np(atr, 20)
+    obv_ma20 = rolling_mean_np(obv, 20)
+
+    # --- 2. 信号生成 (Score Array) ---
+    s1 = (macd_hist > 0).astype(int)
+    s2 = (volume > vol_ma20 * 1.1).astype(int)
+    s3 = (rsi >= 60).astype(int)
+    s4 = (atr > atr_ma20 * 1.1).astype(int)
+    s5 = (obv > obv_ma20 * 1.05).astype(int)
+    score_arr = s1 + s2 + s3 + s4 + s5
+
+    # --- 3. 核心计算改进：滚动回测 40 日明细 ---
+    # 这一步是为了让你在界面上看到的每一行 PF7 都是动态变化的
+    detail_len = min(40, len(close))
+    details = []
+    dates = pd.date_range(end="2026-01-24", periods=len(close)).strftime("%Y-%m-%d").values # 简便日期处理
+
+    for i in range(len(close) - detail_len, len(close)):
+        # 关键改进：close[:i] 确保计算每一天时只参考历史，PF7 会因此每天都波动，非常准确
+        sub_prob, sub_pf = backtest_with_stats(close[:i], score_arr[:i], 7)
+        chg = (close[i]/close[i-1]-1)*100 if i > 0 else 0
+        details.append({
+            "日期": dates[i], 
+            "价格": round(close[i], 2), 
+            "涨跌": f"{chg:+.2f}%",
+            "得分": int(score_arr[i]),
+            "胜率": f"{sub_prob*100:.1f}%", 
+            "PF7": round(sub_pf, 2)
+        })
+
+    # --- 4. 整体数据汇总 ---
+    # 使用 [:-1] 排除掉最后一天，计算截止到目前的真实历史战绩
+    f_prob, f_pf = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+
+    # 134万资金所需的流动性检查
+    avg_dollar_vol = (volume[-20:] * close[-20:]).mean()
+    is_low_liquidity = avg_dollar_vol < 50_000_000
+
+    return {
+        "symbol": symbol.upper(),
+        "display_symbol": symbol.upper() + (" (⚠️低流动)" if is_low_liquidity else ""),
+        "price": close[-1],
+        "change": (close[-1]/close[-2]-1)*100 if len(close)>1 else 0,
+        "score": int(score_arr[-1]),
+        "prob7": f_prob,
+        "pf7": f_pf,
+        "sig_details": {
+            "MACD>0": bool(s1[-1]),
+            "放量": bool(s2[-1]),
+            "RSI≥60": bool(s3[-1]),
+            "ATR放大": bool(s4[-1]),
+            "OBV上升": bool(s5[-1])
+        },
+        "is_low_liquidity": is_low_liquidity,
+        "details": details[::-1] # 这里的 details 现在每天都不一样了
+    }

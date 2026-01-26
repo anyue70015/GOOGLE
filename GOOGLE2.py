@@ -1,190 +1,127 @@
 import streamlit as st
-import requests
+import yfinance as yf
 import numpy as np
 import time
+import pandas as pd
+import random
+import os
+import json
+from datetime import datetime, timedelta  # 新增：处理日期
 
-# ==================== 页面设置 ====================
-st.set_page_config(page_title="回测信号面板", layout="wide")
+st.set_page_config(page_title="我的股票 短线扫描工具", layout="wide")
+st.title("我的股票 短线扫描工具")
 
-st.markdown(
-    """
-    <style>
-    body { background:#05060a; }
-    .main { background:#05060a; padding-top:10px !important; }
-    h1 { font-size:26px !important; font-weight:700 !important; margin-bottom:6px !important; }
+# ── 持久化进度文件 ──
+progress_file = "scan_progress_my_stocks.json"
 
-    .card {
-        background:#14151d;
-        border-radius:14px;
-        padding:14px 16px 12px;
-        border:1px solid #262736;
-        box-shadow:0 18px 36px rgba(0,0,0,0.45);
-        color:#f5f5f7;
-        font-size:13px;
-        transition:0.15s;
-        margin-bottom:18px;
-    }
-    .card:hover {
-        transform:translateY(-3px);
-        box-shadow:0 26px 48px rgba(0,0,0,0.6);
-    }
+# 只加载一次进度
+if 'progress_loaded' not in st.session_state:
+    st.session_state.progress_loaded = True
+    if os.path.exists(progress_file):
+        try:
+            with open(progress_file, "r") as f:
+                data = json.load(f)
+            st.session_state.high_prob = data.get("high_prob", [])
+            st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
+            st.session_state.failed_count = data.get("failed_count", 0)
+            st.session_state.fully_scanned = data.get("fully_scanned", False)
+            st.success("检测到历史进度，已自动加载（可继续扫描）")
+        except Exception as e:
+            st.warning(f"加载进度失败: {e}，将从头开始")
 
-    .card-section {
-        display:flex;
-        justify-content:space-between;
-        align-items:flex-end;
-        gap:10px;
+def save_progress():
+    data = {
+        "high_prob": st.session_state.high_prob,
+        "scanned_symbols": list(st.session_state.scanned_symbols),
+        "failed_count": st.session_state.failed_count,
+        "fully_scanned": st.session_state.fully_scanned
     }
-    .section-divider {
-        border-bottom:1px solid #1f2030;
-        margin:10px 0;
-    }
-
-    .symbol-line {
-        display:flex;
-        gap:10px;
-        align-items:center;
-        font-size:19px;
-        margin-bottom:2px;
-    }
-    .symbol-name { font-weight:800; }
-    .symbol-ticker {
-        font-size:12px;
-        color:#9ca3af;
-        padding:2px 6px;
-        border:1px solid #262736;
-        border-radius:10px;
-        background:#0d0e13;
-    }
-    .symbol-price {
-        font-size:19px;
-    }
-    .change-up { color:#4ade80; font-size:14px; }
-    .change-down { color:#fb7185; font-size:14px; }
-
-    .indicator-grid {
-        display:flex;
-        flex-direction:column;
-        gap:8px;
-        margin-top:4px;
-    }
-    .indicator-item {
-        display:flex;
-        align-items:center;
-        justify-content:space-between;
-        width:100%;
-        background:#191b27;
-        border:1px solid #202233;
-        border-radius:10px;
-        padding:8px 10px;
-        font-size:12px;
-        color:#d4d4d8;
-    }
-    .dot { width:6px;height:6px;border-radius:2px;display:inline-block;margin-left:6px; }
-    .dot-bull { background:#4ade80; box-shadow:0 0 0 1px rgba(74,222,128,0.25); }
-    .dot-neutral { background:#facc15; box-shadow:0 0 0 1px rgba(250,204,21,0.25); }
-    .dot-bear { background:#fb7185; box-shadow:0 0 0 1px rgba(251,113,133,0.25); }
-
-    .label { color:#9ca3af; }
-    .prob-good { color:#4ade80; font-weight:600; }
-    .prob-mid { color:#facc15; font-weight:600; }
-    .prob-bad { color:#fb7185; font-weight:600; }
-
-    .score{
-        font-size:12px;
-        color:#9ca3af;
-        margin-top:8px;
-        display:flex;
-        align-items:center;
-        gap:8px;
-    }
-    .score-label{
-        font-size:13px;
-        font-weight:700;
-        color:#e5e7eb;
-        min-width:70px;
-    }
-    .dot-score{
-        width:9px;
-        height:9px;
-        border-radius:50%;
-        display:inline-block;
-        margin-right:2px;
-    }
-    .dot-score-buy{ background:#4ade80; }
-    .dot-score-hold{ background:#facc15; }
-    .dot-score-sell{ background:#fb7185; }
-    .dot-score-off{ background:#4b5563; }
-    .advice-text{
-        font-size:13px;
-        font-weight:600;
-    }
-    .advice-buy{ color:#4ade80; }
-    .advice-hold{ color:#facc15; }
-    .advice-sell{ color:#fb7185; }
-    .profit-row { font-size:12px; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-st.title("回测信号面板")
-
-# ==================== 配置 ====================
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
-}
-
-BACKTEST_OPTIONS = ["3个月", "6个月", "1年", "2年", "3年", "5年", "10年"]
-BACKTEST_CONFIG = {
-    "3个月": {"range": "3mo", "interval": "1d", "steps_per_day": 1},
-    "6个月": {"range": "6mo", "interval": "1d", "steps_per_day": 1},
-    "1年":  {"range": "1y",  "interval": "1d", "steps_per_day": 1},
-    "2年":  {"range": "2y",  "interval": "1d", "steps_per_day": 1},
-    "3年":  {"range": "3y",  "interval": "1d", "steps_per_day": 1},
-    "5年":  {"range": "5y",  "interval": "1d", "steps_per_day": 1},
-    "10年": {"range": "10y", "interval": "1d", "steps_per_day": 1},
-}
-
-# ==================== 工具函数 ====================
-def format_symbol_for_yahoo(symbol: str) -> str:
-    sym = symbol.strip().upper()
-    if sym.isdigit() and len(sym) == 6:
-        if sym.startswith(("600", "601", "603", "605", "688")):
-            return f"{sym}.SS"
-        if sym.startswith(("000", "001", "002", "003", "300", "301")):
-            return f"{sym}.SZ"
-    return sym
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_current_price(yahoo_symbol: str):
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={yahoo_symbol}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        data = resp.json()["quoteResponse"]["result"][0]
-        price = data.get("regularMarketPrice") or data.get("regularMarketPreviousClose")
-        change = data.get("regularMarketChangePercent", 0) * 100
-        return float(price), float(change)
+        with open(progress_file, "w") as f:
+            json.dump(data, f)
+    except:
+        pass
+
+# ── 清缓存 + 重置按钮 ──
+if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
+    st.cache_data.clear()
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+    st.rerun()
+
+if st.button("🔄 重置所有进度（从头开始）"):
+    st.session_state.high_prob = []
+    st.session_state.scanned_symbols = set()
+    st.session_state.failed_count = 0
+    st.session_state.fully_scanned = False
+    st.session_state.scanning = False
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+    st.rerun()
+
+st.write("上传包含股票代码的txt文件（代码之间用空格或换行分隔）")
+
+uploaded_file = st.file_uploader("选择股票列表文件 (.txt)", type=["txt"])
+
+if uploaded_file is not None:
+    try:
+        content = uploaded_file.read().decode("utf-8")
+        # 支持空格、换行、逗号等多种分隔
+        raw = content.replace("\n", " ").replace(",", " ").strip()
+        tickers_to_scan = [t.strip().upper() for t in raw.split() if t.strip()]
+        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))  # 去重
+        st.success(f"成功读取 {len(tickers_to_scan)} 只股票")
+        st.write("股票列表预览：", ", ".join(tickers_to_scan[:15]) + " ..." if len(tickers_to_scan)>15 else ", ".join(tickers_to_scan))
+    except:
+        st.error("文件读取失败，请确保是纯文本txt格式")
+        tickers_to_scan = []
+else:
+    st.info("请先上传股票列表txt文件")
+    tickers_to_scan = []
+    # 可选：保留一个默认小列表用于测试
+    # tickers_to_scan = ["NVDA", "TSM", "LLY"]
+
+# 如果没有上传，则不执行后续扫描逻辑
+if not tickers_to_scan:
+    st.stop()
+
+st.write("点击「开始/继续扫描」后会自动持续运行。所有股票都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。")
+
+# ==================== 核心常量 ====================
+# 修改为固定日期范围：从2025-12-26到2026-01-23（假设用户意为2025-12-26，因为当前2026-01-26）
+# 注意：yfinance的end日期不包括当天，所以end设为2026-01-24以包括1/23
+START_DATE = "2025-12-26"
+END_DATE = "2026-01-24"  # 包括1/23收盘
+INTERVAL = "1d"
+
+# ==================== 数据拉取 ====================
+@st.cache_data(ttl=300, show_spinner=False)  # 缩短TTL以避免数据滞后
+def fetch_yahoo_ohlcv(yahoo_symbol: str):
+    try:
+        time.sleep(random.uniform(1.2, 2.8))  # 防限流
+        ticker = yf.Ticker(yahoo_symbol)
+        df = ticker.history(start=START_DATE, end=END_DATE, interval=INTERVAL, auto_adjust=True, prepost=False, timeout=30)
+        if df.empty or len(df) < 20:  # 至少需要20日数据
+            return None, None, None, None, None
+        dates = df.index.strftime("%Y-%m-%d").values  # 新增：提取日期
+        close = df['Close'].values.astype(float)
+        high = df['High'].values.astype(float)
+        low = df['Low'].values.astype(float)
+        volume = df['Volume'].values.astype(float)
+        mask = ~np.isnan(close)
+        dates, close, high, low, volume = dates[mask], close[mask], high[mask], low[mask], volume[mask]
+        if len(close) < 20:
+            return None, None, None, None, None
+        return dates, close, high, low, volume
     except Exception:
-        return None, None
+        return None, None, None, None, None
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?range={range_str}&interval={interval}"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()["chart"]["result"][0]
-    quote = data["indicators"]["quote"][0]
-    close = np.array(quote["close"], dtype=float)
-    high = np.array(quote["high"], dtype=float)
-    low = np.array(quote["low"], dtype=float)
-    volume = np.array(quote["volume"], dtype=float)
-    mask = ~np.isnan(close)
-    close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
-    if len(close) < 80:
-        raise ValueError("数据不足")
-    return close, high, low, volume
-
+# ==================== 指标函数 ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -228,7 +165,7 @@ def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 1
 
 def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
     if len(x) < window:
-        return np.full_like(x, x.mean())
+        return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
     cumsum = np.cumsum(np.insert(x, 0, 0.0))
     ma = (cumsum[window:] - cumsum[:-window]) / window
     return np.concatenate([np.full(window-1, ma[0]), ma])
@@ -239,172 +176,252 @@ def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
 
 def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     if len(close) <= steps + 1:
-        return 0.5, 0.0, 0.0, 0.0, 0, 0.0, 0.0
+        return 0.5, 0.0
     idx = np.where(score[:-steps] >= 3)[0]
     if len(idx) == 0:
-        return 0.5, 0.0, 0.0, 0.0, 0, 0.0, 0.0
+        return 0.5, 0.0
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
-    avg_win = rets[rets > 0].mean() if (rets > 0).any() else 0
-    avg_loss = rets[rets <= 0].mean() if (rets <= 0).any() else 0
-    return win_rate, pf, avg_win, avg_loss
+    return win_rate, pf
 
-def prob_class(p): return "prob-good" if p >= 0.65 else "prob-mid" if p >= 0.45 else "prob-bad"
-
-def decide_advice(prob: float, pf: float):
-    if prob >= 0.60 and pf >= 1.2:
-        kind = "buy"; intensity = 3 + (prob > 0.65) + (pf > 1.6)
-    elif prob <= 0.40 and pf <= 0.8:
-        kind = "sell"; intensity = 3 + (prob < 0.35) + (pf < 0.6)
-    else:
-        kind = "hold"; intensity = 3
-    intensity = max(1, min(5, intensity))
-    label = "建议买入" if kind == "buy" else "建议卖出" if kind == "sell" else "观望"
-    return label, intensity, kind
-
-# ==================== 计算股票 ====================
+# ==================== 核心计算 ====================
 @st.cache_data(show_spinner=False)
-def compute_stock_metrics(symbol: str, cfg_key: str):
-    yahoo_symbol = format_symbol_for_yahoo(symbol)
-    current_price, current_change = get_current_price(yahoo_symbol)
-    close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"], "1d")
+def compute_stock_metrics(symbol: str):
+    yahoo_symbol = symbol.upper()
+    
+    dates, close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol)
+    
+    if dates is None:
+        return None
+
+    # 限制到近20个交易日（如果数据多于20，取最后20）
+    n_days = min(20, len(close))
+    dates = dates[-n_days:]
+    close = close[-n_days:]
+    high = high[-n_days:]
+    low = low[-n_days:]
+    volume = volume[-n_days:]
 
     macd_hist = macd_hist_np(close)
     rsi = rsi_np(close)
     atr = atr_np(high, low, close)
     obv = obv_np(close, volume)
-    vol_ma20 = rolling_mean_np(volume, 20)
-    atr_ma20 = rolling_mean_np(atr, 20)
-    obv_ma20 = rolling_mean_np(obv, 20)
+    vol_ma20 = rolling_mean_np(volume, min(20, len(volume)))  # 适应短数据
+    atr_ma20 = rolling_mean_np(atr, min(20, len(atr)))
+    obv_ma20 = rolling_mean_np(obv, min(20, len(obv)))
 
-    sig_macd = (macd_hist > 0).astype(int)
-    sig_vol = (volume > vol_ma20 * 1.1).astype(int)
-    sig_rsi = (rsi >= 60).astype(int)
-    sig_atr = (atr > atr_ma20 * 1.1).astype(int)
-    sig_obv = (obv > obv_ma20 * 1.05).astype(int)
-    score_arr = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
+    # 计算每日信号和得分
+    daily_metrics = []
+    for i in range(len(close)):
+        sig_macd = macd_hist[i] > 0
+        sig_vol = volume[i] > vol_ma20[i] * 1.1 if i >= 19 else False  # 对于短数据，MA需足够长
+        sig_rsi = rsi[i] >= 60
+        sig_atr = atr[i] > atr_ma20[i] * 1.1 if i >= 19 else False
+        sig_obv = obv[i] > obv_ma20[i] * 1.05 if i >= 19 else False
 
-    steps7 = 7
-    steps30 = 30
-    prob7, pf7, avg_win7, avg_loss7 = backtest_with_stats(close[:-1], score_arr[:-1], steps7)
-    prob30, pf30, avg_win30, avg_loss30 = backtest_with_stats(close[:-1], score_arr[:-1], steps30)
+        score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
 
-    price = current_price if current_price is not None else close[-1]
-    change = current_change if current_change is not None else (close[-1]/close[-2]-1)*100 if len(close)>=2 else 0
+        sig_details = {
+            "MACD>0": sig_macd,
+            "放量": sig_vol,
+            "RSI≥60": sig_rsi,
+            "ATR放大": sig_atr,
+            "OBV上升": sig_obv
+        }
 
-    indicators = [
-        {"name": "MACD 多头/空头", "status": "bull" if macd_hist[-1] > 0 else "bear", "desc": ""},
-        {"name": "成交量相对20日均量", "status": "bull" if volume[-1] > vol_ma20[-1]*1.1 else "bear" if volume[-1] < vol_ma20[-1]*0.9 else "neutral", "desc": f"1.10 / {volume[-1]/vol_ma20[-1]:.2f}"},
-        {"name": "RSI 区间", "status": "bull" if rsi[-1] >= 60 else "bear" if rsi[-1] <= 40 else "neutral", "desc": f"60.0 / {rsi[-1]:.1f}"},
-        {"name": "ATR 波动率", "status": "bull" if atr[-1] > atr_ma20[-1]*1.1 else "bear" if atr[-1] < atr_ma20[-1]*0.9 else "neutral", "desc": f"1.10 / {atr[-1]/atr_ma20[-1]:.2f}"},
-        {"name": "OBV 资金趋势", "status": "bull" if obv[-1] > obv_ma20[-1]*1.05 else "bear" if obv[-1] < obv_ma20[-1]*0.95 else "neutral", "desc": f"1.05 / {obv[-1]/obv_ma20[-1]:.2f}"},
-    ]
+        price = close[i]
+        change = (close[i] / close[i-1] - 1) * 100 if i >= 1 else 0
+
+        daily_metrics.append({
+            "date": dates[i],
+            "price": price,
+            "change": change,
+            "score": score,
+            "sig_details": sig_details
+        })
+
+    # 整体回测：基于整个近20日数据计算7日prob和pf
+    sig_macd_hist = (macd_hist > 0).astype(int)
+    sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int)
+    sig_rsi_hist = (rsi >= 60).astype(int)
+    sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int)
+    sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
+    score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
+
+    prob7, pf7 = backtest_with_stats(close, score_arr, 7)  # 注意：数据短，可能idx有限
+
+    # 新增：近3日得分是否严格递增 + 今天放量+ATR放大（仅最后一天）
+    recent_rising = False
+    if len(score_arr) >= 3:
+        s3, s2, s1 = score_arr[-3], score_arr[-2], score_arr[-1]
+        if s1 > s2 > s3 and sig_vol_hist[-1] and sig_atr_hist[-1]:
+            recent_rising = True
 
     return {
         "symbol": symbol.upper(),
-        "display_name": symbol.upper(),
-        "price": price,
-        "change": change,
+        "display_symbol": symbol.upper(),
         "prob7": prob7,
-        "prob30": prob30,
         "pf7": pf7,
-        "pf30": pf30,
-        "avg_win7": avg_win7 * 100,
-        "avg_loss7": avg_loss7 * 100,
-        "avg_win30": avg_win30 * 100,
-        "avg_loss30": avg_loss30 * 100,
-        "indicators": indicators,
+        "daily_metrics": daily_metrics,  # 20行每日数据
+        "is_crypto": False,
+        "recent_rising放量ATR": recent_rising
     }
 
-# ==================== 交互 ====================
-if "watchlist" not in st.session_state:
-    st.session_state.watchlist = ["WDC", "APH", "GEV", "ZS", "HWM", "GE", "JNJ", "CTSH", "NUE", "COR", "HOOD", "NEM", "BE", "TSM", "SLV", "ABBV", "CAH", 
-"PM","STX","NDAQ","CTAS","INSM","CZR","GLW","RMD","CSX","NSC","EVRG","SBUX","ADP","BA","AEE","DLTR","WEC","AZN","ES","EL","SCHW","LRCX","TPR","CTVA","TRI","AEP","EPAM"]
-if "mode" not in st.session_state:
-    st.session_state.mode = "1年"
+sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-col1, col2, col3, col4 = st.columns([2.5, 1, 1, 1.5])
-with col1:
-    new = st.text_input("添加股票", placeholder="NVDA / 600519", key="new")
-with col2:
-    if st.button("添加"):
-        if st.session_state.new.strip():
-            sym = st.session_state.new.strip().upper()
-            if sym not in st.session_state.watchlist:
-                st.session_state.watchlist.insert(0, sym)
-            st.rerun()
-with col3:
-    if st.button("清空缓存"):
-        st.cache_data.clear()
-        st.success("缓存已清空")
+# ==================== session_state 初始化 ====================
+if 'high_prob' not in st.session_state:
+    st.session_state.high_prob = []
+if 'scanned_symbols' not in st.session_state:
+    st.session_state.scanned_symbols = set()
+if 'failed_count' not in st.session_state:
+    st.session_state.failed_count = 0
+if 'fully_scanned' not in st.session_state:
+    st.session_state.fully_scanned = False
+if 'scanning' not in st.session_state:
+    st.session_state.scanning = False
+
+# ==================== 强制全部股票显示（每次渲染页面都重新检查并补齐） ====================
+forced_symbols = set([s.upper() for s in tickers_to_scan])
+computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
+missing = forced_symbols - computed_symbols
+
+for sym in missing:
+    st.session_state.high_prob.append({
+        "symbol": sym,
+        "display_symbol": sym + " (待计算或数据不可用)",
+        "prob7": 0.0,
+        "pf7": 0.0,
+        "daily_metrics": [{"date": "N/A", "price": 0.0, "change": "N/A", "score": 0, "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False}}] * 20,
+        "is_crypto": False,
+        "recent_rising放量ATR": False
+    })
+
+# ==================== 进度条 ====================
+progress_bar = st.progress(0)
+status_text = st.empty()
+
+total = len(tickers_to_scan)
+current_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
+progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
+progress_bar.progress(progress_val)
+
+# ==================== 显示结果 ====================
+if st.session_state.high_prob:
+    all_metrics = [x for x in st.session_state.high_prob if x is not None and x["symbol"] in set(tickers_to_scan)]
+    
+    if all_metrics:
+        # 排序
+        df_all = pd.DataFrame(all_metrics)
+        if sort_by == "PF7 (盈利因子)":
+            df_all = df_all.sort_values("pf7", ascending=False)
+        else:
+            df_all = df_all.sort_values("prob7", ascending=False)
+        
+        st.subheader(f"全部结果（按 {sort_by} 排序） 共 {len(df_all)} 只")
+        
+        # 为每个股票显示20行（每日一行）
+        for _, row in df_all.iterrows():
+            prefix = ""
+            if row.get("recent_rising放量ATR", False):
+                prefix = "↑↑↑放量ATR连升 "
+            
+            prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
+            pf7 = row['pf7'].round(2)
+            
+            st.markdown(f"### {prefix}{row['display_symbol']} - 整体7日概率: {prob7_fmt} | PF7: {pf7}")
+            
+            for dm in row['daily_metrics']:
+                details = dm['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                change = f"{dm['change']:+.2f}%" if isinstance(dm['change'], (int, float)) else dm['change']
+                line = f"{dm['date']} - 价格: ${dm['price']:.2f} ({change}) - 得分: {dm['score']}/5 - {detail_str}"
+                st.markdown(line)  # 每行直接输出
+
+st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
+
+# ==================== 下载结果 ====================
+if st.session_state.high_prob and tickers_to_scan:
+    # 准备下载内容 - 按 PF7 降序
+    all_metrics = [x for x in st.session_state.high_prob if x is not None]
+    if all_metrics:
+        df_download = pd.DataFrame(all_metrics).sort_values("pf7", ascending=False)
+        
+        lines = []
+        for _, row in df_download.iterrows():
+            prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
+            prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
+            pf7 = row['pf7'].round(2)
+            lines.append(f"{prefix}{row['symbol']} - 整体7日概率: {prob7_fmt} | PF7: {pf7}")
+            
+            for dm in row['daily_metrics']:
+                details = dm['sig_details']
+                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                change = f"{dm['change']:+.2f}%" if isinstance(dm['change'], (int, float)) else dm['change']
+                line = f"  {dm['date']} - 价格: ${dm['price']:.2f} ({change}) - 得分: {dm['score']}/5 - {detail_str}"
+                lines.append(line)
+        
+        txt_content = "\n".join(lines)  # 使用 \n 即可，兼容性好
+        
+        st.download_button(
+            label="📥 下载结果 (按PF7排序 txt)",
+            data=txt_content,
+            file_name="scan_result_my_stocks.txt",
+            mime="text/plain"
+        )
+
+# ==================== 扫描逻辑 ====================
+if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
+    st.session_state.scanning = True
+
+if st.session_state.scanning and current_completed < total:
+    with st.spinner("扫描进行中（每批次刷新一次页面）..."):
+        batch_size = 8  # 降低以防限流
+        processed_in_this_run = 0
+        
+        remaining_tickers = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
+        
+        for sym in remaining_tickers:
+            if processed_in_this_run >= batch_size:
+                break
+            
+            anticipated_completed = current_completed + processed_in_this_run + 1
+            progress_val = min(1.0, max(0.0, anticipated_completed / total)) if total > 0 else 0.0
+            
+            status_text.text(f"正在计算 {sym} ({anticipated_completed}/{total})")
+            progress_bar.progress(progress_val)
+            
+            try:
+                metrics = compute_stock_metrics(sym)
+                if metrics is not None:
+                    # 如果已存在占位符，替换它
+                    st.session_state.high_prob = [m for m in st.session_state.high_prob if m["symbol"] != sym]
+                    st.session_state.high_prob.append(metrics)
+                else:
+                    st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            except Exception as e:
+                st.warning(f"{sym} 异常: {str(e)}")
+                st.session_state.failed_count += 1
+                st.session_state.scanned_symbols.add(sym)
+            
+            processed_in_this_run += 1
+        
+        save_progress()
+        
+        new_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
+        accurate_progress = min(1.0, max(0.0, new_completed / total)) if total > 0 else 0.0
+        progress_bar.progress(accurate_progress)
+        
+        if new_completed >= total:
+            st.session_state.fully_scanned = True
+            st.session_state.scanning = False
+            st.success("扫描完成！")
+        
         st.rerun()
-with col4:
-    st.selectbox("回测周期", BACKTEST_OPTIONS, index=BACKTEST_OPTIONS.index(st.session_state.mode), key="mode")
 
-# ==================== 加载数据 ====================
-rows = []
-for sym in st.session_state.watchlist:
-    try:
-        with st.spinner(f"加载 {sym}..."):
-            metrics = compute_stock_metrics(sym, st.session_state.mode)
-        rows.append(metrics)
-        time.sleep(1)  # 防限流
-    except Exception as e:
-        st.warning(f"{sym} 加载失败: {str(e)}")
+if current_completed >= total:
+    st.success("已完成全部扫描！结果已全部更新")
 
-# ==================== 展示卡片 ====================
-if not rows:
-    st.info("暂无数据，请添加股票或检查网络")
-else:
-    for i in range(0, len(rows), 4):
-        cols = st.columns(4)
-        for j, row in enumerate(rows[i:i+4]):
-            with cols[j]:
-                change_class = "change-up" if row["change"] >= 0 else "change-down"
-                change_str = f"{row['change']:+.2f}%"
-
-                indicators_html = "".join(
-                    f"<div class='indicator-item'><span>{ind['name']} {f'({ind['desc']})' if ind['desc'] else ''}</span><span class='dot dot-{ind['status']}'></span></div>"
-                    for ind in row["indicators"]
-                )
-
-                adv7_label, adv7_intensity, adv7_kind = decide_advice(row["prob7"], row["pf7"])
-                adv30_label, adv30_intensity, adv30_kind = decide_advice(row["prob30"], row["pf30"])
-
-                dots7 = f"<span class='dot-score dot-score-{'buy' if adv7_kind=='buy' else 'sell' if adv7_kind=='sell' else 'hold'}'></span>" * adv7_intensity + "<span class='dot-score dot-score-off'></span>" * (5 - adv7_intensity)
-                dots30 = f"<span class='dot-score dot-score-{'buy' if adv30_kind=='buy' else 'sell' if adv30_kind=='sell' else 'hold'}'></span>" * adv30_intensity + "<span class='dot-score dot-score-off'></span>" * (5 - adv30_intensity)
-
-                html = f'''
-                <div class="card">
-                  <div class="card-section">
-                    <div class="symbol-line">
-                      <span class="symbol-name">{row["display_name"]}</span>
-                      <span class="symbol-ticker">{row["symbol"]}</span>
-                    </div>
-                    <div style="display:flex;gap:6px;align-items:center;">
-                      <span class="symbol-price">${row["price"]:.2f}</span>
-                      <span class="{change_class}">{change_str}</span>
-                    </div>
-                  </div>
-                  <div class="section-divider"></div>
-                  <div class="indicator-grid">{indicators_html}</div>
-                  <div class="section-divider"></div>
-                  <div class="profit-row" style="display:flex;justify-content:space-between;margin-bottom:4px;">
-                    <div><span class="label">7日盈利概率</span> <span class="{prob_class(row["prob7"])}">{row["prob7"]*100:.1f}%</span></div>
-                    <div class="label">均盈 {row["avg_win7"]:+.1f}% / 均亏 {row["avg_loss7"]:+.1f}% / PF {row["pf7"]:.2f}</div>
-                  </div>
-                  <div class="profit-row" style="display:flex;justify-content:space-between;">
-                    <div><span class="label">30日盈利概率</span> <span class="{prob_class(row["prob30"])}">{row["prob30"]*100:.1f}%</span></div>
-                    <div class="label">均盈 {row["avg_win30"]:+.1f}% / 均亏 {row["avg_loss30"]:+.1f}% / PF {row["pf30"]:.2f}</div>
-                  </div>
-                  <div class="section-divider"></div>
-                  <div class="score"><span class="score-label">7日信号</span> <span class="advice-text advice-{adv7_kind}">{adv7_label}</span> {dots7}</div>
-                  <div class="score"><span class="score-label">30日信号</span> <span class="advice-text advice-{adv30_kind}">{adv30_label}</span> {dots30}</div>
-                </div>
-                '''
-                st.markdown(html, unsafe_allow_html=True)
-
-st.caption("数据来源 Yahoo Finance。回测基于历史信号统计，仅供研究参考，不构成投资建议。")
-
-
+st.caption("2026年1月版 | 支持txt上传 | 强制全部显示 | 结果行间亲密无间无空行无横线 | 直接复制运行")

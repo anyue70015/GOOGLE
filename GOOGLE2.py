@@ -71,7 +71,7 @@ if uploaded_file is not None:
         content = uploaded_file.read().decode("utf-8")
         raw = content.replace("\n", " ").replace(",", " ").strip()
         tickers_to_scan = [t.strip().upper() for t in raw.split() if t.strip()]
-        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))  # 去重
+        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))
         st.success(f"成功读取 {len(tickers_to_scan)} 只股票")
         st.write("股票列表预览：", ", ".join(tickers_to_scan[:15]) + " ..." if len(tickers_to_scan)>15 else ", ".join(tickers_to_scan))
     except:
@@ -88,7 +88,7 @@ st.write("点击「开始/继续扫描」后会自动持续运行。所有股票
 
 # ==================== 核心常量 ====================
 START_DATE = "2025-12-26"
-END_DATE = "2026-01-24"  # 包含1月23日收盘
+END_DATE = "2026-01-24"
 INTERVAL = "1d"
 
 # ==================== 数据拉取 ====================
@@ -113,7 +113,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str):
     except Exception:
         return None, None, None, None, None
 
-# ==================== 指标函数 ====================
+# ==================== 指标函数（保持原样） ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -270,10 +270,15 @@ if 'fully_scanned' not in st.session_state:
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 
-# ==================== 强制显示所有股票 ====================
+# ==================== 强制显示所有股票（优化：避免重复追加占位） ====================
 forced_symbols = set([s.upper() for s in tickers_to_scan])
-computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
-missing = forced_symbols - computed_symbols
+
+# 移除旧的占位符行（防止污染）
+st.session_state.high_prob = [x for x in st.session_state.high_prob if x["symbol"] not in forced_symbols or "待计算或数据不可用" not in x.get("display_symbol", "")]
+
+# 添加缺失的占位符
+existing_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
+missing = forced_symbols - existing_symbols
 
 for sym in missing:
     st.session_state.high_prob.append({
@@ -281,7 +286,8 @@ for sym in missing:
         "display_symbol": sym + " (待计算或数据不可用)",
         "prob7": 0.0,
         "pf7": 0.0,
-        "daily_metrics": [{"date": "N/A", "price": 0.0, "change": "N/A", "score": 0, "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False}}] * 20,
+        "daily_metrics": [{"date": "N/A", "price": 0.0, "change": "N/A", "score": 0, 
+                           "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False}}] * 20,
         "is_crypto": False,
         "recent_rising放量ATR": False
     })
@@ -295,13 +301,12 @@ current_completed = len(st.session_state.scanned_symbols.intersection(set(ticker
 progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
 progress_bar.progress(progress_val)
 
-# ==================== 显示结果 ====================
+# ==================== 显示结果（优化：折叠 + 无数据提示） ====================
 if st.session_state.high_prob:
     all_metrics = [x for x in st.session_state.high_prob if x is not None and x["symbol"] in set(tickers_to_scan)]
     
     if all_metrics:
         df_all = pd.DataFrame(all_metrics)
-        # 关键修复：强制转换为数值，nan转为0.0
         df_all['prob7'] = pd.to_numeric(df_all['prob7'], errors='coerce').fillna(0.0)
         df_all['pf7']   = pd.to_numeric(df_all['pf7'],   errors='coerce').fillna(0.0)
         
@@ -314,18 +319,22 @@ if st.session_state.high_prob:
         
         for _, row in df_all.iterrows():
             prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
-            
             prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
-            pf7_str = f"{row['pf7']:.2f}"
+            pf7_str = f"{row['pf7']:.2f}" if row['pf7'] > 0 else "N/A"
             
-            st.markdown(f"### {prefix}{row['display_symbol']} - 整体7日概率: {prob7_fmt} | PF7: {pf7_str}")
+            is_placeholder = all(dm['date'] == "N/A" for dm in row['daily_metrics'])
             
-            for dm in row['daily_metrics']:
-                details = dm['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-                change = f"{dm['change']:+.2f}%" if isinstance(dm['change'], (int, float)) else dm['change']
-                line = f"{dm['date']} - 价格: ${dm['price']:.2f} ({change}) - 得分: {dm['score']}/5 - {detail_str}"
-                st.markdown(line)
+            expander_title = f"{prefix}{row['display_symbol']} — 7日概率: {prob7_fmt} | PF7: {pf7_str}"
+            with st.expander(expander_title):
+                if is_placeholder:
+                    st.info("暂无有效K线数据（可能ticker无效或日期范围无交易）")
+                else:
+                    for dm in row['daily_metrics']:
+                        details = dm['sig_details']
+                        detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                        change = f"{dm['change']:+.2f}%" if isinstance(dm['change'], (int, float)) else dm['change']
+                        price_str = f"${dm['price']:.2f}" if dm['price'] > 0 else "N/A"
+                        st.markdown(f"{dm['date']} | 价格: {price_str} ({change}) | 得分: {dm['score']}/5 | {detail_str}")
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
@@ -334,7 +343,6 @@ if st.session_state.high_prob and tickers_to_scan:
     all_metrics = [x for x in st.session_state.high_prob if x is not None]
     if all_metrics:
         df_download = pd.DataFrame(all_metrics).sort_values("pf7", ascending=False)
-        # 同样清洗
         df_download['prob7'] = pd.to_numeric(df_download['prob7'], errors='coerce').fillna(0.0)
         df_download['pf7']   = pd.to_numeric(df_download['pf7'],   errors='coerce').fillna(0.0)
         
@@ -342,15 +350,20 @@ if st.session_state.high_prob and tickers_to_scan:
         for _, row in df_download.iterrows():
             prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
             prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
-            pf7_str = f"{row['pf7']:.2f}"
+            pf7_str = f"{row['pf7']:.2f}" if row['pf7'] > 0 else "N/A"
             lines.append(f"{prefix}{row['symbol']} - 整体7日概率: {prob7_fmt} | PF7: {pf7_str}")
             
-            for dm in row['daily_metrics']:
-                details = dm['sig_details']
-                detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-                change = f"{dm['change']:+.2f}%" if isinstance(dm['change'], (int, float)) else dm['change']
-                line = f"  {dm['date']} - 价格: ${dm['price']:.2f} ({change}) - 得分: {dm['score']}/5 - {detail_str}"
-                lines.append(line)
+            is_placeholder = all(dm['date'] == "N/A" for dm in row['daily_metrics'])
+            if is_placeholder:
+                lines.append("  暂无有效数据")
+            else:
+                for dm in row['daily_metrics']:
+                    details = dm['sig_details']
+                    detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+                    change = f"{dm['change']:+.2f}%" if isinstance(dm['change'], (int, float)) else dm['change']
+                    price_str = f"${dm['price']:.2f}" if dm['price'] > 0 else "N/A"
+                    line = f"  {dm['date']} - 价格: {price_str} ({change}) - 得分: {dm['score']}/5 - {detail_str}"
+                    lines.append(line)
         
         txt_content = "\n".join(lines)
         
@@ -385,13 +398,14 @@ if st.session_state.scanning and current_completed < total:
             try:
                 metrics = compute_stock_metrics(sym)
                 if metrics is not None:
+                    # 替换任何旧行（包括占位）
                     st.session_state.high_prob = [m for m in st.session_state.high_prob if m["symbol"] != sym]
                     st.session_state.high_prob.append(metrics)
                 else:
                     st.session_state.failed_count += 1
                 st.session_state.scanned_symbols.add(sym)
             except Exception as e:
-                st.warning(f"{sym} 异常: {str(e)}")
+                st.warning(f"{sym} 计算异常: {str(e)}")
                 st.session_state.failed_count += 1
                 st.session_state.scanned_symbols.add(sym)
             
@@ -413,4 +427,4 @@ if st.session_state.scanning and current_completed < total:
 if current_completed >= total:
     st.success("已完成全部扫描！结果已全部更新")
 
-st.caption("2026年1月版 | 支持txt上传 | 强制全部显示 | 已修复数值崩溃问题 | 直接复制运行")
+st.caption("2026年1月版 | 支持txt上传 | 强制全部显示 | 已优化占位符和显示布局 | 直接复制运行")

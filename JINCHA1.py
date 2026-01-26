@@ -13,7 +13,7 @@ st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
 # --- 周期设定 ---
 END_DATE_STR = "2026-01-24"
 end_dt = datetime.strptime(END_DATE_STR, "%Y-%m-%d")
-start_dt = end_dt - timedelta(days=385) 
+start_dt = end_dt - timedelta(days=360) 
 START_DATE = start_dt.strftime("%Y-%m-%d")
 
 # ==================== 核心算法 ====================
@@ -179,3 +179,4 @@ if st.session_state.results:
         
         st.download_button(f"📥 下载 {selected} 逐日明细 (TXT)", detail_txt, file_name=f"{selected}_Detail.txt")
         st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))
+

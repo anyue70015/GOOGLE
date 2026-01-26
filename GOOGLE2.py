@@ -348,12 +348,16 @@ if st.session_state.high_prob and tickers_to_scan:
     if all_metrics:
         df_download = pd.DataFrame(all_metrics).sort_values("pf7", ascending=False)
         
+        # 清理数值列，避免 None / nan 导致后续格式化崩溃
+        df_download['prob7'] = pd.to_numeric(df_download['prob7'], errors='coerce').fillna(0.0)
+        df_download['pf7']   = pd.to_numeric(df_download['pf7'],   errors='coerce').fillna(0.0)
+        
         lines = []
         for _, row in df_download.iterrows():
             prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
             prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
-            pf7 = row['pf7'].round(2)
-            lines.append(f"{prefix}{row['symbol']} - 整体7日概率: {prob7_fmt} | PF7: {pf7}")
+            pf7_str   = f"{row['pf7']:.2f}"
+            lines.append(f"{prefix}{row['symbol']} - 整体7日概率: {prob7_fmt} | PF7: {pf7_str}")
             
             for dm in row['daily_metrics']:
                 details = dm['sig_details']

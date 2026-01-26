@@ -4,120 +4,178 @@ import numpy as np
 import pandas as pd
 import time
 import random
+from datetime import datetime, timedelta
 
-# ==================== 核心算法 (找回“每天都变”的动态逻辑) ====================
+# ==================== 页面配置 ====================
+st.set_page_config(page_title="短线扫描器-深度汇总版", layout="wide")
+st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
+
+# --- 周期设定 ---
+END_DATE_STR = "2026-01-24"
+end_dt = datetime.strptime(END_DATE_STR, "%Y-%m-%d")
+start_dt = end_dt - timedelta(days=385) 
+START_DATE = start_dt.strftime("%Y-%m-%d")
+
+# ==================== 核心算法 ====================
 def ema_np(x, span):
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
     ema[0] = x[0]
-    for i in range(1, len(x)): ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
+    for i in range(1, len(x)):
+        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
     return ema
 
 def rsi_np(close, period=14):
     delta = np.diff(close, prepend=close[0])
-    g = np.where(delta > 0, delta, 0.0)
-    l = np.where(delta < 0, -delta, 0.0)
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     alpha = 1 / period
-    ge, le = np.empty_like(g), np.empty_like(l)
-    ge[0], le[0] = g[0], l[0]
-    for i in range(1, len(g)):
-        ge[i] = alpha * g[i] + (1 - alpha) * ge[i-1]
-        le[i] = alpha * l[i] + (1 - alpha) * le[i-1]
-    return 100 - (100 / (1 + (ge / (le + 1e-9))))
+    g_ema, l_ema = np.empty_like(gain), np.empty_like(loss)
+    g_ema[0], l_ema[0] = gain[0], loss[0]
+    for i in range(1, len(gain)):
+        g_ema[i] = alpha * gain[i] + (1 - alpha) * g_ema[i-1]
+        l_ema[i] = alpha * loss[i] + (1 - alpha) * l_ema[i-1]
+    return 100 - (100 / (1 + (g_ema / (l_ema + 1e-9))))
+
+def atr_np(high, low, close, period=14):
+    prev_c = np.roll(close, 1); prev_c[0] = close[0]
+    tr = np.maximum(high-low, np.maximum(np.abs(high-prev_c), np.abs(low-prev_c)))
+    atr = np.empty_like(tr); atr[0] = tr[0]
+    alpha = 1 / period
+    for i in range(1, len(tr)):
+        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
+    return atr
+
+def rolling_mean_np(x, window):
+    return pd.Series(x).rolling(window=window, min_periods=1).mean().values
+
+def obv_np(close, volume):
+    return np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
 
 def backtest_with_stats(close, score, steps=7):
-    """这是灵魂：计算截至当前日期的历史期望值"""
-    if len(close) <= steps: return 0.0, 0.0
     idx = np.where(score[:-steps] >= 3)[0]
     if len(idx) == 0: return 0.0, 0.0
     rets = close[idx + steps] / close[idx] - 1
     win_rate = (rets > 0).mean()
-    pos_sum = rets[rets > 0].sum()
-    neg_sum = abs(rets[rets <= 0].sum())
-    pf = pos_sum / neg_sum if neg_sum > 0 else 9.9
+    pos_ret = rets[rets > 0].sum()
+    neg_ret = abs(rets[rets <= 0].sum())
+    pf = pos_ret / neg_ret if neg_ret > 0 else (9.9 if pos_ret > 0 else 0.0)
     return win_rate, pf
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def compute_stock_metrics(symbol):
+@st.cache_data(ttl=3600, show_spinner=False)
+def compute_stock_comprehensive(symbol):
     try:
-        # 强制拉取 1y 数据确保回测样本够大
-        df = yf.Ticker(symbol).history(period="1y", interval="1d", auto_adjust=True)
-        if df.empty or len(df) < 60: return None
-        
-        close = df['Close'].values.astype(float)
-        high = df['High'].values.astype(float)
-        low = df['Low'].values.astype(float)
-        vol = df['Volume'].values.astype(float)
+        df = yf.Ticker(symbol).history(start=START_DATE, end=END_DATE_STR, interval="1d")
+        if df.empty or len(df) < 50: return None
+        close, high, low, volume = df['Close'].values, df['High'].values, df['Low'].values, df['Volume'].values
         dates = df.index.strftime("%Y-%m-%d").values
-        
-        # 信号序列
-        macd = (ema_np(close, 12) - ema_np(close, 26)) - ema_np((ema_np(close, 12) - ema_np(close, 26)), 9)
-        rsi = rsi_np(close)
-        vol_ma = pd.Series(vol).rolling(20).mean().values
-        # 打分矩阵
-        s1 = (macd > 0).astype(int)
-        s2 = (vol > vol_ma * 1.1).astype(int)
-        s3 = (rsi >= 60).astype(int)
-        score_arr = s1 + s2 + s3 # 简化演示，你可以自行加回 ATR/OBV
-        
-        # --- 关键：动态回溯 40 日 ---
+
+        macd_hist = (ema_np(close, 12) - ema_np(close, 26)) - ema_np((ema_np(close, 12) - ema_np(close, 26)), 9)
+        score_arr = (macd_hist > 0).astype(int) + \
+                    (volume > rolling_mean_np(volume, 20) * 1.1).astype(int) + \
+                    (rsi_np(close) >= 60).astype(int) + \
+                    (atr_np(high, low, close) > rolling_mean_np(atr_np(high, low, close), 20) * 1.1).astype(int) + \
+                    (obv_np(close, volume) > rolling_mean_np(obv_np(close, volume), 20) * 1.05).astype(int)
+
+        # ── 整合提供的计算逻辑 ──
+        sig_macd = macd_hist[-1] > 0
+        sig_vol = volume[-1] > rolling_mean_np(volume, 20)[-1] * 1.1
+        sig_rsi = rsi_np(close)[-1] >= 60
+        sig_atr = atr_np(high, low, close)[-1] > rolling_mean_np(atr_np(high, low, close), 20)[-1] * 1.1
+        sig_obv = obv_np(close, volume)[-1] > rolling_mean_np(obv_np(close, volume), 20)[-1] * 1.05
+
+        score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
+
+        # 整体回测使用[:-1]
+        f_prob, f_pf = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+
+        detail_len = min(40, len(close))
         details = []
-        # 我们从倒数第 40 天开始，逐日重算历史 PF7
-        for i in range(len(close) - 40, len(close)):
-            # 这里的核心是只把 [0:i] 的数据喂给回测函数，模拟“当时”的情况
-            p7, f7 = backtest_with_stats(close[:i], score_arr[:i], 7)
+        for i in range(len(close) - detail_len, len(close)):
+            sub_prob, sub_pf = backtest_with_stats(close[:i], score_arr[:i], 7)
+            chg = (close[i]/close[i-1]-1)*100 if i > 0 else 0
             details.append({
-                "日期": dates[i],
-                "价格": round(close[i], 2),
+                "日期": dates[i], 
+                "价格": round(close[i], 2), 
+                "涨跌": f"{chg:+.2f}%",
                 "得分": int(score_arr[i]),
-                "胜率": f"{p7*100:.1f}%",
-                "PF7": round(f7, 3) # 增加精度看到每日变化
+                "胜率": f"{sub_prob*100:.1f}%", 
+                "PF7": round(sub_pf, 2)
             })
-            
-        final_p7, final_f7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+        
+        last_chg = (close[-1]/close[-2]-1)*100 if len(close) > 1 else 0
         
         return {
-            "symbol": symbol.upper(),
-            "pf7": final_f7,
-            "prob7": final_p7,
-            "score": int(score_arr[-1]),
-            "price": close[-1],
-            "details": details[::-1] # 倒序显示，今天在最上面
+            "symbol": symbol.upper(), 
+            "prob7": f_prob, 
+            "pf7": f_pf, 
+            "price": close[-1], 
+            "chg": f"{last_chg:+.2f}%",
+            "score": score, 
+            "details": details[::-1]
         }
     except: return None
 
-# ==================== UI 界面 (TX上传 + 完整下载) ====================
+# ==================== UI 展示 ====================
 if 'results' not in st.session_state: st.session_state.results = []
-
 with st.sidebar:
-    st.header("1. 上传中心")
-    file = st.file_uploader("上传 TXT 代码", type=["txt"])
-    if st.button("清空结果"):
-        st.session_state.results = []
-        st.rerun()
+    file = st.file_uploader("上传代码 TXT", type=["txt"])
+    if st.button("清空结果"): st.session_state.results = []
 
 if file:
     tickers = list(dict.fromkeys([t.strip().upper() for t in file.read().decode().split() if t.strip()]))
-    if st.button(f"执行科学扫描 ({len(tickers)} 只)"):
+    if st.button("开始分析"):
         for s in tickers:
-            res = compute_stock_metrics(s)
-            if res: st.session_state.results.append(res)
+            res = compute_stock_comprehensive(s)
+            if res and res not in st.session_state.results: 
+                st.session_state.results.append(res)
 
 if st.session_state.results:
-    df_main = pd.DataFrame(st.session_state.results).drop_duplicates('symbol').sort_values("pf7", ascending=False)
+    df_main = pd.DataFrame(st.session_state.results).sort_values("pf7", ascending=False)
+    st.subheader("🏆 年度排行榜")
+    st.dataframe(df_main[["symbol", "pf7", "prob7", "score", "price", "chg"]], use_container_width=True)
+
+    # --- 汇总下载 1: 年度排行 ---
+    summary_txt = f"{'代码':<10} {'PF7':<10} {'胜率':<10} {'得分':<10} {'价格':<10} {'涨幅':<10}\r\n"
+    summary_txt += "-"*65 + "\r\n"
+    for _, r in df_main.iterrows():
+        summary_txt += f"{r['symbol']:<10} {r['pf7']:<10.2f} {r['prob7']*100:<10.1f}% {r['score']:<10} {r['price']:<10.2f} {r['chg']:<10}\r\n"
     
-    # --- 下载优质股 TXT ---
-    premium_list = df_main[df_main['pf7'] >= 3.5]['symbol'].tolist()
-    if premium_list:
-        st.download_button("📥 点击下载优质股 (PF7 > 3.5)", "\n".join(premium_list), "Premium_Stocks.txt")
-    
-    st.subheader("📊 扫描结果汇总")
-    st.dataframe(df_main[["symbol", "pf7", "prob7", "score", "price"]], use_container_width=True)
+    # --- 汇总下载 2: PF7 > 3.5 优质票 40日明细打包 (新增功能) ---
+    premium_txt = "=== PF7 > 3.5 优质股票近40日明细汇总报告 ===\r\n\r\n"
+    premium_stocks = [r for r in st.session_state.results if r['pf7'] > 3.5]
+    premium_stocks = sorted(premium_stocks, key=lambda x: x['pf7'], reverse=True) # 按 PF7 降序排列
+
+    if premium_stocks:
+        for p_stock in premium_stocks:
+            premium_txt += f"【股票代码: {p_stock['symbol']} | 年度PF7: {p_stock['pf7']:.2f}】\r\n"
+            premium_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
+            premium_txt += "-"*65 + "\r\n"
+            for d in p_stock['details']:
+                premium_txt += f"{d['日期']:<12} {d['价格']:<10.2f} {d['涨跌']:<10} {d['得分']:<8} {d['胜率']:<10} {d['PF7']:<10.2f}\r\n"
+            premium_txt += "\r\n" + "="*65 + "\r\n\r\n"
+    else:
+        premium_txt += "本次扫描未发现 PF7 > 3.5 的股票。\r\n"
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button("📥 下载汇总排行 (TXT)", summary_txt, file_name="Summary_Report.txt")
+    with col2:
+        st.download_button("🔥 下载优质票(PF7>3.5)明细打包 (TXT)", premium_txt, file_name="Premium_Stocks_40D_Details.txt")
 
     st.divider()
     
-    # --- 40 日明细 (现在每一行都会变了) ---
-    selected = st.selectbox("选择股票查看 40 日动态回测明细", options=df_main["symbol"].tolist())
+    # --- 单个股票逐日明细展示 ---
+    selected = st.selectbox("选择股票查看 40 日明细 (同步排序)", options=df_main["symbol"].tolist())
     if selected:
         res_data = next(r for r in st.session_state.results if r['symbol'] == selected)
-        st.table(pd.DataFrame(res_data['details']).style.background_gradient(subset=["得分"], cmap="YlGn"))
+        df_detail = pd.DataFrame(res_data['details'])
+        
+        detail_txt = f"股票: {selected} 最近 40 日明细\r\n"
+        detail_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
+        detail_txt += "-"*65 + "\r\n"
+        for _, d in df_detail.iterrows():
+            detail_txt += f"{d['日期']:<12} {d['价格']:<10.2f} {d['涨跌']:<10} {d['得分']:<8} {d['胜率']:<10} {d['PF7']:<10.2f}\r\n"
+        
+        st.download_button(f"📥 下载 {selected} 逐日明细 (TXT)", detail_txt, file_name=f"{selected}_Detail.txt")
+        st.table(df_detail.style.background_gradient(subset=["得分"], cmap="YlGn"))

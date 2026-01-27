@@ -10,9 +10,10 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="短线扫描器-深度汇总版", layout="wide")
 st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
 
-# --- 周期设定（动态选择） ---
-END_DATE_STR = "2026-01-24"
-end_dt = datetime.strptime(END_DATE_STR, "%Y-%m-%d")
+# --- 动态结束日期：取昨天（避免今天数据不完整） ---
+today = datetime.now().date()
+end_dt = today - timedelta(days=1)
+END_DATE_STR = end_dt.strftime("%Y-%m-%d")
 
 # 侧边栏选择回测周期
 timeframe = st.sidebar.selectbox("回测周期", ["6个月", "1年", "2年"], index=1)  # 默认1年

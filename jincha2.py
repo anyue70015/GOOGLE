@@ -64,7 +64,7 @@ BACKTEST_CONFIG = {
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(1.5, 3))
+        time.sleep(random.uniform(0.15, 0.3))
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=10)
         if df.empty or len(df) < 50:
@@ -459,3 +459,4 @@ if st.button("🔄 重置所有进度（从头开始）"):
     st.rerun()
 
 st.caption("2026年1月完整最终版 | 完整罗素2000动态加载 | 所有列表完整无省略 | 极速稳定 | 直接复制使用")
+

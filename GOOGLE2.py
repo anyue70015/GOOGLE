@@ -10,9 +10,9 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="短线扫描器-深度汇总版", layout="wide")
 st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
 
-# --- 动态结束日期：取昨天（避免今天数据不完整） ---
+# --- 动态结束日期：取今天（追求最新信号） ---
 today = datetime.now().date()
-end_dt = today - timedelta(days=1)
+end_dt = today
 END_DATE_STR = end_dt.strftime("%Y-%m-%d")
 
 # 侧边栏选择回测周期

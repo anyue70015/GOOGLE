@@ -1,98 +1,95 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import time
 import ccxt
+import time
 
 # ==========================================
-# 1. 配置 (无需任何代理参数)
+# 1. 核心引擎 (OKX 直连)
 # ==========================================
-st.set_page_config(page_title="2026全网聚合扫描器", layout="wide")
+st.set_page_config(page_title="2026 监控神兵-多周期版", layout="wide")
 
-# ==========================================
-# 2. 核心逻辑：获取全网交易量
-# ==========================================
 @st.cache_resource
-def get_exchange():
-    # 使用 OKX 或是 币安的加速域名
-    # OKX 国内直连通常不需要代理
-    return ccxt.okx({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
-    })
+def get_ex():
+    return ccxt.okx({'enableRateLimit': True})
 
-def fetch_all_data():
-    ex = get_exchange()
+def get_change_and_volume(symbol, timeframe):
+    """抓取指定周期的涨幅和当前成交额"""
+    ex = get_ex()
     try:
-        # 核心：一次性抓取全场所有币种的实时行情 (Tickers)
-        # 这是“全网聚合”最省力的方法
-        tickers = ex.fetch_tickers()
-        data = []
-        for sym, t in tickers.items():
-            if '/USDT' in sym: # 只看 USDT 交易对
-                data.append({
-                    "交易对": sym,
-                    "现价": t['last'],
-                    "24H涨幅%": t['percentage'],
-                    "24H成交量": t['quoteVolume'], # USDT 计价的交易量
-                    "最高价": t['high'],
-                    "最低价": t['low']
-                })
-        return pd.DataFrame(data)
-    except Exception as e:
-        st.error(f"连接失败（建议检查网络）: {e}")
-        return pd.DataFrame()
+        # 获取最近 2 根 K 线计算当前周期涨幅
+        ohlcv = ex.fetch_ohlcv(symbol, timeframe, limit=2)
+        if len(ohlcv) < 2: return 0, 0
+        
+        open_p = ohlcv[-1][1]
+        close_p = ohlcv[-1][4]
+        vol_usd = ohlcv[-1][5] * close_p # 近似成交额
+        change = ((close_p - open_p) / open_p) * 100
+        return change, vol_usd
+    except:
+        return 0, 0
+
+def detect_big_orders(symbol, threshold_usd=50000):
+    """抓取最近成交，筛选大吃单"""
+    ex = get_ex()
+    try:
+        trades = ex.fetch_trades(symbol, limit=20)
+        # 筛选单笔金额超过阈值的买单
+        big_buys = [t for t in trades if t['side'] == 'buy' and (t['price'] * t['amount']) >= threshold_usd]
+        return "🔥" * len(big_buys) if big_buys else ""
+    except:
+        return ""
 
 # ==========================================
-# 3. 信号引擎 (向量化)
+# 2. UI 界面
 # ==========================================
-def scan_signals(df, vol_threshold):
-    if df.empty: return df
-    
-    # 将成交量转换为数值
-    df['24H成交量'] = pd.to_numeric(df['24H成交量'])
-    
-    # 模拟“异常放量”逻辑：
-    # 如果 24H 成交量远大于该市场平均水平，或者涨幅异常
-    avg_vol = df['24H成交量'].median()
-    df['放量比'] = df['24H成交量'] / avg_vol
-    
-    # 过滤：放量比 > 阈值 且 涨幅为正
-    df['信号'] = np.where((df['放量比'] > vol_threshold) & (df['24H涨幅%'] > 0), "🚀 异动", "")
-    
-    return df.sort_values("放量比", ascending=False)
+st.title("🛡️ 多周期异动扫描 + 大吃单监控")
 
-# ==========================================
-# 4. UI 界面
-# ==========================================
-st.title("🛡️ 2026 国内直连聚合扫描器")
-st.markdown("本工具通过 **OKX 国内节点** 获取全网行情，无需翻墙，支持全量 USDT 币种扫描。")
-
-vol_threshold = st.sidebar.slider("全网平均放量比阈值", 1.0, 10.0, 3.0)
-auto_refresh = st.sidebar.toggle("开启自动刷新", value=True)
+with st.sidebar:
+    st.header("监控设置")
+    raw_symbols = st.text_area("监控列表", "BTC/USDT,ETH/USDT,SOL/USDT,ORDI/USDT,SUI/USDT")
+    symbols = [s.strip().upper() for s in raw_symbols.replace('\n', ',').split(',') if s.strip()]
+    big_order_val = st.number_input("大吃单定义 (USDT)", value=50000)
+    refresh_rate = st.slider("刷新频率 (秒)", 5, 60, 10)
 
 placeholder = st.empty()
 
 while True:
-    raw_df = fetch_all_data()
-    if not raw_df.empty:
-        final_df = scan_signals(raw_df, vol_threshold)
+    results = []
+    for sym in symbols:
+        # 并行抓取各周期数据
+        ch1, v1 = get_change_and_volume(sym, '1m')
+        ch5, v5 = get_change_and_volume(sym, '5m')
+        ch15, v15 = get_change_and_volume(sym, '15m')
         
-        with placeholder.container():
-            st.metric("监控交易对总数", len(final_df))
-            
-            # 只展示异动的币种，或者排名前 50 的币种
-            display_df = final_df.head(50)
-            
-            def style_df(row):
-                return ['background-color: rgba(0, 255, 0, 0.1)'] * len(row) if row['信号'] else [''] * len(row)
-
-            st.dataframe(
-                display_df.style.apply(style_df, axis=1),
-                use_container_width=True,
-                height=800
-            )
+        # 探测大吃单
+        big_orders = detect_big_orders(sym, big_order_val)
+        
+        results.append({
+            "交易对": sym,
+            "1m 涨跌": f"{ch1:+.2f}%",
+            "5m 涨跌": f"{ch5:+.2f}%",
+            "15m 涨跌": f"{ch15:+.2f}%",
+            "大吃单警报": big_orders,
+            "活跃度": "⭐" if v1 > 100000 else "" # 如果1分钟成交过10万刀
+        })
     
-    if not auto_refresh:
-        break
-    time.sleep(10) # 10秒刷一次，不会被封 IP
+    df = pd.DataFrame(results)
+    
+    with placeholder.container():
+        st.write(f"📊 实时监控中... 最后更新: {time.strftime('%H:%M:%S')}")
+        
+        # 样式渲染：如果是涨的，给文字上色
+        def color_change(val):
+            if '+' in str(val) and float(val.strip('%')) > 0: color = '#00ff00' 
+            elif '-' in str(val): color = '#ff4b4b'
+            else: color = 'white'
+            return f'color: {color}'
+
+        st.dataframe(
+            df.style.applymap(color_change, subset=["1m 涨跌", "5m 涨跌", "15m 涨跌"]),
+            use_container_width=True,
+            height=600
+        )
+        
+    time.sleep(refresh_rate)

@@ -36,7 +36,7 @@ use_method3 = st.checkbox("方法3：OBV急升（资金净流入）", value=True
 
 # 根据周期调整参数
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[interval]
-vol_multiplier = base_vol_mult + (0.5 if interval == "1m" else 0)  # 1m 更严格阈值
+vol_multiplier = base_vol_mult + (0.5 if interval == "1m" else 0)  # 1m 更严格
 
 # 状态管理
 if 'alerted' not in st.session_state:
@@ -52,7 +52,8 @@ while True:
 
     for coin in coins:
         try:
-            df = yf.download(coin, period="2d", interval=interval, progress=False)
+            # 延长 period 解决数据不足
+            df = yf.download(coin, period="5d" if interval in ["1m", "5m"] else "2d", interval=interval, progress=False)
             if df.empty or len(df) < N_for_avg + 5:
                 data_rows.append([coin, "数据不足/空", "", "", "", "", ""])
                 continue
@@ -68,14 +69,15 @@ while True:
 
             prev_close = float(df['Close'].iloc[-2])
 
-            # 成交量为0时跳过计算，避免除0
+            # 成交量为0时跳过
             if current_vol <= 0:
-                data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "-", "-", ""])
+                data_rows.append([coin, f"{current_close:.2f}", f"{(current_close - prev_close) / prev_close * 100:+.2f}%" if prev_close != 0 else "N/A", "0", "0.00x", "", ""])
                 continue
 
             avg_vol = float(df['Volume'].iloc[:-1].mean())
-            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 1.0
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
 
+            # 如果 vol_ratio < 1.0，强制不触发方法2/3
             price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
             # 方法1
@@ -85,16 +87,16 @@ while True:
                 vol_spike = vol_ratio > vol_multiplier
                 signal1 = is_bull and vol_spike
 
-            # 方法2
+            # 方法2：加 vol_ratio > 1.0 过滤
             signal2 = False
-            if use_method2:
+            if use_method2 and vol_ratio > 1.0:
                 strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
                 vol_spike = vol_ratio > vol_multiplier
                 signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
 
-            # 方法3
+            # 方法3：加 vol_ratio > 1.0 和长度检查
             signal3 = False
-            if use_method3 and len(df) >= 21:
+            if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
                 obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
                 obv_ma = float(obv.rolling(20).mean().iloc[-1])
                 current_obv = float(obv.iloc[-1])
@@ -126,7 +128,7 @@ while True:
                 new_alerts.append(alert_msg)
                 st.session_state.alerted.add(key)
 
-                # JS 声音 + 浏览器提示
+                # JS 声音
                 st.components.v1.html(
                     """
                     <audio autoplay>
@@ -136,7 +138,7 @@ while True:
                         var audio = document.querySelector('audio');
                         audio.play().catch(function(error) {
                             console.log("Autoplay blocked: " + error);
-                            alert("浏览器阻止自动声音，请点击页面允许音频播放");
+                            alert("浏览器阻止自动声音，请点击允许音频播放");
                         });
                     </script>
                     """,

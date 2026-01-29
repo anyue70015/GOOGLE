@@ -69,7 +69,7 @@ st.title("🛡️ 2026 全球多交易所聚合监控")
 with st.sidebar:
     st.header("⚙️ 监控配置")
     selected_exs = st.multiselect("交易所", options=list(SUPPORTED_EXCHANGES.keys()), default=['OKX', 'Gate.io', 'HTX'])
-    input_syms = st.text_area("币种", "BTC,ETH,SOL,ORDI")
+    input_syms = st.text_area("币种", "BTC,ETH,SOL,AAVE,DOGE,TAO,SUI,RENDER,UNI,HYPE,XRP")
     symbols = [s.strip().upper() + "/USDT" for s in input_syms.replace('\n', ',').split(',') if s.strip()]
     big_val = st.number_input("大单定义(USDT)", value=20000)
     refresh_rate = st.slider("刷新率(秒)", 5, 60, 10)
@@ -121,3 +121,4 @@ while True:
             )
     
     time.sleep(refresh_rate)
+

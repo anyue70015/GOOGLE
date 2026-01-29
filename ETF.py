@@ -13,7 +13,6 @@ st.title("我的股票 短线扫描工具")
 # ── 持久化进度文件 ──
 progress_file = "scan_progress_my_stocks.json"
 
-# 只加载一次进度
 if 'progress_loaded' not in st.session_state:
     st.session_state.progress_loaded = True
     if os.path.exists(progress_file):
@@ -72,7 +71,7 @@ if uploaded_file is not None:
         content = uploaded_file.read().decode("utf-8")
         raw = content.replace("\n", " ").replace(",", " ").strip()
         tickers_to_scan = [t.strip().upper() for t in raw.split() if t.strip()]
-        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))  # 去重
+        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))
         st.success(f"成功读取 {len(tickers_to_scan)} 只股票")
         st.write("股票列表预览：", ", ".join(tickers_to_scan[:15]) + " ..." if len(tickers_to_scan)>15 else ", ".join(tickers_to_scan))
     except:
@@ -85,7 +84,7 @@ else:
 if not tickers_to_scan:
     st.stop()
 
-st.write("点击「开始/继续扫描」后会自动持续运行。所有股票都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。")
+st.write("点击「开始/继续扫描」后会自动持续运行。所有股票都会强制显示。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -102,7 +101,7 @@ BACKTEST_CONFIG = {
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(1.2, 2.8))  # 防限流
+        time.sleep(random.uniform(1.2, 2.8))
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
         if df.empty or len(df) < 50:
@@ -119,7 +118,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     except Exception:
         return None, None, None, None
 
-# ==================== 指标函数 ====================
+# ==================== 指标函数（不变） ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -237,28 +236,30 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 
     prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
 
-    # ── 实时价格 + 变化率 ──
-    price = close[-1]  # 默认
-    change = "NO"
+    # ── 价格与涨幅（始终显示合理值） ──
+    price = close[-1] if len(close) > 0 else "N/A"
+    change = "N/A"
+    
     try:
         ticker = yf.Ticker(yahoo_symbol)
-        df_today = ticker.history(period="1d", interval="1m", prepost=True, timeout=15)
-        if not df_today.empty:
-            latest = df_today.iloc[-1]
-            current_price = latest['Close']
+        prev_close = ticker.info.get('previousClose')
+        
+        if prev_close is None and len(close) >= 2:
+            prev_close = close[-2]
+        
+        if prev_close and prev_close != 0:
+            # 尝试获取实时/当天最新价（含盘前盘后）
+            df_today = ticker.history(period="1d", interval="1m", prepost=True, timeout=15)
+            if not df_today.empty:
+                current_price = df_today['Close'].iloc[-1]
+            else:
+                current_price = close[-1]  # 无当天数据，用历史最后收盘
+            
             price = current_price
-            
-            prev_close = ticker.info.get('previousClose')
-            if prev_close and prev_close != 0:
-                change_pct = (current_price / prev_close - 1) * 100
-                change = f"{change_pct:+.2f}%"
-            
-            # 判断是否有明显扩展变动
-            regular_price = ticker.info.get('regularMarketPrice', current_price)
-            if abs(current_price - regular_price) <= 0.0005 * current_price:  # 阈值更小
-                change = "NO"
+            change_pct = (current_price / prev_close - 1) * 100
+            change = f"{change_pct:+.2f}%"
     except Exception:
-        change = "NO"
+        pass  # 失败时保持 N/A
 
     recent_rising = False
     if len(score_arr) >= 3:
@@ -282,7 +283,6 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-# session_state 初始化
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -294,7 +294,7 @@ if 'fully_scanned' not in st.session_state:
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 
-# 强制显示所有股票
+# 强制显示所有
 forced_symbols = set([s.upper() for s in tickers_to_scan])
 computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
 missing = forced_symbols - computed_symbols
@@ -376,16 +376,15 @@ if st.session_state.high_prob:
                 score_str = f"得分: {row['score']}/5 - {detail_str}"
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             
-            # 安全处理 price 显示
-            price_str = f"${row['price']:.2f}" if isinstance(row['price'], (int, float)) else f"{row['price']}"
-            change_display = f"({row['change']})" if row['change'] not in ["NO", "N/A"] else "(NO 夜盘)"
+            price_str = f"${row['price']:.2f}" if isinstance(row['price'], (int, float)) else row['price']
+            change_display = f"({row['change']})" if row['change'] != "N/A" else "(N/A)"
             line = f"{prefix}{row['display_symbol']} - 价格: {price_str} {change_display} - {score_str} - {prob_pf_str}"
             
             st.markdown(line)
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-# ==================== 下载结果 ====================
+# 下载结果
 if st.session_state.high_prob and tickers_to_scan:
     df_download = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
     if not df_download.empty:
@@ -397,8 +396,8 @@ if st.session_state.high_prob and tickers_to_scan:
             detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
             prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
             prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
-            change = row['change'] if row['change'] not in ["NO", "N/A"] else "NO"
             price_str = f"{row['price']:.2f}" if isinstance(row['price'], (int, float)) else row['price']
+            change = row['change'] if row['change'] != "N/A" else "N/A"
             line = f"{prefix}{row['symbol']} - 价格: ${price_str} ({change}) - 得分: {row['score']}/5 - {detail_str} - 7日概率: {prob7_fmt} | PF7: {row['pf7']:.2f}"
             lines.append(line)
         
@@ -410,7 +409,7 @@ if st.session_state.high_prob and tickers_to_scan:
             mime="text/plain"
         )
 
-# ==================== 扫描逻辑 ====================
+# 扫描逻辑
 if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
     st.session_state.scanning = True
 
@@ -462,4 +461,4 @@ if st.session_state.scanning and current_completed < total:
 if current_completed >= total:
     st.success("已完成全部扫描！结果已全部更新")
 
-st.caption("2026年1月完整版 | 修复价格格式错误 | 实时价格+前regular close变化率 | 无夜盘显示NO")
+st.caption("2026年1月完整版 | 始终显示价格+涨幅（无夜盘用收盘价+日涨幅） | 修复格式错误")

@@ -9,9 +9,9 @@ import time
 from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 # ==========================================
-# 1. 页面配置
+# 1. 页面基础配置
 # ==========================================
-st.set_page_config(page_title="2026量化神兵-极速版", layout="wide")
+st.set_page_config(page_title="2026量化神兵-终极稳定版", layout="wide")
 
 if 'data_store' not in st.session_state:
     st.session_state.data_store = {}
@@ -19,16 +19,16 @@ if 'ws_active' not in st.session_state:
     st.session_state.ws_active = False
 
 # ==========================================
-# 2. 侧边栏：配置中心 (包含端口选择)
+# 2. 侧边栏：核心配置
 # ==========================================
 with st.sidebar:
-    st.header("⚙️ 配置中心")
+    st.header("⚙️ 监控配置")
     
-    # 代理设置
-    proxy_port = st.text_input("Clash 端口", value="7890")
+    # 允许自定义 Clash 端口
+    proxy_port = st.text_input("Clash HTTP端口", value="7890")
     clash_proxy = f"http://127.0.0.1:{proxy_port}"
     
-    # 环境检测：设置系统环境变量，确保 CCXT 内部请求识别代理
+    # 注入环境变量（双保险）
     os.environ['http_proxy'] = clash_proxy
     os.environ['https_proxy'] = clash_proxy
     
@@ -38,11 +38,11 @@ with st.sidebar:
     vol_mul = st.slider("放量阈值 (x)", 1.0, 5.0, 2.2)
     refresh_rate = st.slider("UI 刷新频率 (秒)", 2, 30, 5)
     
-    raw_symbols = st.text_area("监控列表 (空格/逗号/换行隔开)", 
+    raw_symbols = st.text_area("监控列表 (支持空格/逗号/换行)", 
                               "BTC/USDT,ETH/USDT,SOL/USDT,ORDI/USDT,SUI/USDT,TIA/USDT")
     symbols = [s.strip().upper() for s in raw_symbols.replace('\n', ',').replace(' ', ',').split(',') if s.strip()]
     
-    if st.button("🧹 清空缓存并重启"):
+    if st.button("🧹 重置并清空缓存"):
         st.session_state.data_store = {}
         st.session_state.ws_active = False
         st.rerun()
@@ -57,10 +57,10 @@ def compute_signals_vectorized(symbol_list, vol_multiplier):
     processed_data = []
     for symbol in symbol_list:
         df = st.session_state.data_store.get(symbol)
-        # 必须至少有 22 根 K 线才能计算 20 周期均量
-        if df is None or len(df) < 22:
+        if df is None or len(df) < 22: # 确保至少有 22 根 K 线计算均量
             continue
         
+        # 提取 NumPy 数组加速计算
         arr = df.to_numpy(dtype=np.float64)
         close_prices = arr[:, 4]
         open_prices = arr[:, 1]
@@ -69,21 +69,21 @@ def compute_signals_vectorized(symbol_list, vol_multiplier):
         curr_c, prev_c = close_prices[-1], close_prices[-2]
         curr_o, curr_v = open_prices[-1], volumes[-1]
         
-        # 向量化计算均量 (过去 20 根)
+        # 向量化计算过去 20 根 K 线的平均成交量
         avg_v = np.mean(volumes[-21:-1])
         vol_ratio = curr_v / avg_v if avg_v > 0 else 0
         change_pct = ((curr_c - prev_c) / prev_c) * 100
 
-        # 信号定义
-        sig1 = (curr_c > curr_o) and (vol_ratio > vol_multiplier) # 阳线放量
-        sig2 = (vol_ratio > 1.2) and (change_pct > 0.6)          # 动能突发
+        # 信号判定逻辑
+        sig1 = (curr_c > curr_o) and (vol_ratio > vol_multiplier) # 阳线 + 爆量
+        sig2 = (vol_ratio > 1.3) and (change_pct > 0.7)          # 动能突发
         
         active_sigs = [str(i) for i, s in enumerate([sig1, sig2], 1) if s]
         
         processed_data.append({
             "交易对": symbol,
             "现价": f"{curr_c:.4f}",
-            "单根涨跌": f"{change_pct:+.2f}%",
+            "涨跌幅": f"{change_pct:+.2f}%",
             "放量比": f"{vol_ratio:.2f}x",
             "信号": ",".join(active_sigs),
             "警报": "⚠️" if active_sigs else "",
@@ -96,41 +96,53 @@ def compute_signals_vectorized(symbol_list, vol_multiplier):
     return res_df.sort_values("sort_key", ascending=False).drop(columns=["sort_key"])
 
 # ==========================================
-# 4. 后台 WS + REST 混合抓取线程
+# 4. 混合数据抓取线程 (REST + WS)
 # ==========================================
 async def market_worker(symbols, timeframe, proxy_url):
+    # 强力代理注入配置
     exchange = ccxt_pro.binance({
         'enableRateLimit': True,
-        'proxies': {'http': proxy_url, 'https': proxy_url},
+        'proxy': proxy_url,
+        'http_proxy': proxy_url,
+        'https_proxy': proxy_url,
         'options': {'defaultType': 'spot'}
     })
 
     async def single_symbol_handler(symbol):
-        # --- 步骤 A: REST 快速冷启动 ---
-        try:
-            # 瞬间抓取 60 根历史 K 线，让 UI 不用等待
-            history = await exchange.fetch_ohlcv(symbol, timeframe, limit=60)
-            if history:
-                st.session_state.data_store[symbol] = pd.DataFrame(
-                    history, columns=['t', 'o', 'h', 'l', 'c', 'v']
-                )
-        except Exception as e:
-            print(f"REST 抓取异常 {symbol}: {e}")
+        # --- A: 强制冷启动 (解决卡死关键) ---
+        retry_count = 0
+        while retry_count < 3:
+            try:
+                # 瞬间抓取历史数据填充缓存
+                history = await exchange.fetch_ohlcv(symbol, timeframe, limit=60)
+                if history:
+                    st.session_state.data_store[symbol] = pd.DataFrame(
+                        history, columns=['t', 'o', 'h', 'l', 'c', 'v']
+                    )
+                    break
+            except Exception as e:
+                retry_count += 1
+                print(f"[{symbol}] 历史抓取重试 {retry_count}: {e}")
+                await asyncio.sleep(2)
 
-        # --- 步骤 B: WebSocket 持续接管 ---
+        # --- B: WebSocket 实时接管 ---
         while True:
             try:
-                # watch_ohlcv 会在有新成交时自动更新
                 ohlcv = await exchange.watch_ohlcv(symbol, timeframe, limit=100)
-                df = pd.DataFrame(ohlcv, columns=['t', 'o', 'h', 'l', 'c', 'v'])
-                st.session_state.data_store[symbol] = df
+                if ohlcv:
+                    st.session_state.data_store[symbol] = pd.DataFrame(
+                        ohlcv, columns=['t', 'o', 'h', 'l', 'c', 'v']
+                    )
             except Exception as e:
-                # 遇到报错（如网络波动）静默等待 10 秒重连
+                # 遇到连接波动，静默重连
                 await asyncio.sleep(10)
 
-    # 并行处理所有币种
-    tasks = [single_symbol_handler(s) for s in symbols]
-    await asyncio.gather(*tasks)
+    # 并发执行
+    try:
+        tasks = [single_symbol_handler(s) for s in symbols]
+        await asyncio.gather(*tasks)
+    finally:
+        await exchange.close()
 
 def start_background_loop(symbols, timeframe, proxy_url):
     loop = asyncio.new_event_loop()
@@ -141,39 +153,49 @@ def start_background_loop(symbols, timeframe, proxy_url):
     t.start()
 
 # ==========================================
-# 5. 主界面逻辑
+# 5. 主界面渲染
 # ==========================================
-st.title("🚀 2026 极速量化扫描器 (混合动力版)")
+st.title("🚀 2026 混合动力扫描器")
 
-if st.button("🔥 开启实时监控", use_container_width=True):
+if st.button("🔥 启动实时监控", use_container_width=True):
     if not st.session_state.ws_active:
         start_background_loop(symbols, timeframe, clash_proxy)
         st.session_state.ws_active = True
-        st.toast(f"已连接 Clash 端口 {proxy_port}，正在秒速补齐数据...")
+        st.toast(f"正在通过端口 {proxy_port} 建立连接...")
 
+# 状态面板
 placeholder = st.empty()
 
 if st.session_state.ws_active:
-    # 模拟 UI 实时刷新循环
+    # 检查连接是否真的获取到了数据
     while True:
         df_display = compute_signals_vectorized(symbols, vol_mul)
         
         with placeholder.container():
-            st.write(f"📊 监控中: {len(st.session_state.data_store)}/{len(symbols)} | 周期: {timeframe} | 刷新: {time.strftime('%H:%M:%S')}")
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"📊 监控规模: {len(st.session_state.data_store)}/{len(symbols)} 币种")
+            with col2:
+                st.write(f"⏱️ 刷新: {time.strftime('%H:%M:%S')}")
             
             if not df_display.empty:
-                # 信号高亮
-                def highlight_alert(row):
-                    return ['background-color: rgba(255, 0, 0, 0.2); color: white;' if row['警报'] == '⚠️' else '' for _ in row]
+                # 信号样式美化
+                def highlight_row(row):
+                    if row['警报'] == '⚠️':
+                        return ['background-color: rgba(255, 75, 75, 0.15); color: #FF4B4B; font-weight: bold'] * len(row)
+                    return [''] * len(row)
                 
                 st.dataframe(
-                    df_display.style.apply(highlight_alert, axis=1),
+                    df_display.style.apply(highlight_row, axis=1),
                     use_container_width=True, 
-                    height=700
+                    height=750
                 )
             else:
-                st.info("数据抓取中，请稍候 1-2 秒...")
+                st.info("💡 正在尝试穿透代理并同步历史 K 线，请观察 5-10 秒...")
+                # 调试提示：如果超过 20 秒还是这样，通常是代理端口不对或节点不支持
+                if len(st.session_state.data_store) == 0:
+                    st.warning("⚠️ 检测到连接延迟。请确保 Clash 开启了 **TUN 模式** 或端口 **7890** 已放行 HTTP 流量。")
         
         time.sleep(refresh_rate)
 else:
-    st.warning("👈 请先在左侧侧边栏确认交易对和端口，然后点击『开启实时监控』")
+    st.info("👈 请在左侧配置交易对和端口，然后点击启动按钮。")

@@ -15,7 +15,7 @@ st.markdown("如果币安超时，请在侧边栏切换不同的‘直连节点�
 st.sidebar.title("🌐 节点设置")
 # 备选节点：api3、api1 或者是专门的 vision 节点
 binance_node = st.sidebar.selectbox("币安亚太直连节点", 
-    ["api3.binance.com", "api1.binance.com", "api.binance.vision", "api2.binance.com"], 
+    ["api3.binance.com", "api1.binance.com", "api.binance.vision", "api.bmwweb.academy"], 
     index=0)
 
 # --- 币种列表处理 ---

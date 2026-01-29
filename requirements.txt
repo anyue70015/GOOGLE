@@ -9,3 +9,4 @@ akshare
 baostock
 matplotlib
 nest-asyncio
+requests

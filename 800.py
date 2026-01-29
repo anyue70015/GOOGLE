@@ -53,7 +53,7 @@ exchanges = {
     'okx': ccxt_async.okx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'gate': ccxt_async.gate({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'bitget': ccxt_async.bitget({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'binance': ccxt_async.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'} 'proxies': {'http': 'http://127.0.0.1:10809', 'https': 'http://127.0.0.1:10809'}),
+    'binance': ccxt_async.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}, 'proxies': {'http': 'http://127.0.0.1:10809', 'https': 'http://127.0.0.1:10809'}}),
     'huobi': ccxt_async.htx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'bybit': ccxt_async.bybit({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
 }
@@ -207,4 +207,3 @@ while True:
     loop.close()
     time.sleep(refresh_sec)
     st.rerun()
-

@@ -108,7 +108,7 @@ while True:
         fetch_status = f"成功: {', '.join(successful_ex)} | 失败: {', '.join(failed_ex) if failed_ex else '无'}"
 
         if not successful_ex or agg_df is None or len(agg_df) < N_for_avg + 5:
-            data_rows.append([symbol, "历史不足/空", "", "", "", "", fetch_status])
+            data_rows.append([symbol, "历史不足/空", "", "", "", "", "", fetch_status])
             continue
 
         current_close = float(agg_df['close'].iloc[-1])
@@ -118,7 +118,7 @@ while True:
         current_vol = float(agg_df['volume'].iloc[-1])
         prev_close = float(agg_df['close'].iloc[-2])
         if current_vol <= 0:
-            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", fetch_status])
+            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", "", fetch_status])
             continue
 
         avg_vol = float(agg_df['volume'].iloc[:-1].mean())
@@ -148,6 +148,7 @@ while True:
             f"{int(current_vol):,}",
             f"{vol_ratio:.2f}x",
             signals_display,
+            "⚠️" if has_signal else "",
             fetch_status
         ]
         data_rows.append(row)
@@ -174,14 +175,14 @@ while True:
                 height=0
             )
 
-    columns = ["交易对", "当前价", "涨幅", "聚合成交量", "放量倍数", "触发方法", "成功/失败交易所"]
+    columns = ["交易对", "当前价", "涨幅", "聚合成交量", "放量倍数", "触发方法", "信号", "成功/失败交易所"]
     df_display = pd.DataFrame(data_rows, columns=columns)
-    # Sort by vol_ratio descending for better visibility
-    df_display['放量倍数数'] = df_display['放量倍数'].str.rstrip('x').astype(float)  # Temp col for sorting
+    # Sort by vol_ratio descending for better visibility (handle non-numeric safely)
+    df_display['放量倍数数'] = pd.to_numeric(df_display['放量倍数'].str.rstrip('x'), errors='coerce').fillna(0)
     df_display = df_display.sort_values(by='放量倍数数', ascending=False).drop(columns='放量倍数数')
 
     def highlight(row):
-        return ['background-color: #ffcccc' if '1' in row["触发方法"] or '2' in row["触发方法"] or '3' in row["触发方法"] else ''] * len(row)
+        return ['background-color: #ffcccc' if row["信号"] == "⚠️" else ''] * len(row)
 
     styled = df_display.style.apply(highlight, axis=1)
 

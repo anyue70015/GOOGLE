@@ -12,9 +12,9 @@ uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC-U
 if uploaded:
     content = uploaded.read().decode("utf-8")
     coins = [line.strip().upper() for line in content.splitlines() if line.strip()]
+    coins = list(dict.fromkeys(coins))
     # 自动补 -USD
     coins = [c if c.endswith('-USD') else f"{c}-USD" for c in coins]
-    coins = list(dict.fromkeys(coins))
     st.success(f"已加载 {len(coins)} 个币种")
     st.write("监控列表：", ", ".join(coins[:10]) + " ..." if len(coins) > 10 else ", ".join(coins))
 else:
@@ -24,11 +24,11 @@ else:
 # 参数设置
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    interval = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
+    interval = st.selectbox("K线周期（推荐15m/1h）", ["1m", "5m", "15m", "1h"], index=2)
 with col2:
     refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60)
 with col3:
-    base_vol_mult = st.slider("基础放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
+    vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
 with col4:
     min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
 
@@ -38,7 +38,7 @@ use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
 # 周期参数
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[interval]
-vol_multiplier = base_vol_mult + (0.5 if interval == "1m" else 0)
+period_map = {"1m": "7d", "5m": "7d", "15m": "1mo", "1h": "1mo"}
 
 # 状态
 if 'alerted' not in st.session_state:
@@ -53,11 +53,10 @@ while True:
 
     for coin in coins:
         try:
-            # 延长 period 解决数据不足
-            period = "7d" if interval in ["1m", "5m"] else "1mo"
+            period = period_map[interval]
             df = yf.download(coin, period=period, interval=interval, progress=False)
             if df.empty or len(df) < N_for_avg + 5:
-                data_rows.append([coin, "历史不足/空", "", "", "", "", f"len={len(df)}"])
+                data_rows.append([coin, "历史不足/空", "", "", "", "", f"根数={len(df)}"])
                 continue
 
             df = df.tail(N_for_avg + 10)
@@ -71,7 +70,7 @@ while True:
             prev_close = float(df['Close'].iloc[-2])
 
             if current_vol <= 0:
-                data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
+                data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", f"根数={len(df)}"])
                 continue
 
             avg_vol = float(df['Volume'].iloc[:-1].mean())
@@ -79,21 +78,8 @@ while True:
 
             price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
-            # 方法1
-            signal1 = False
-            if use_method1:
-                is_bull = current_close > current_open
-                vol_spike = vol_ratio > vol_multiplier
-                signal1 = is_bull and vol_spike and vol_ratio > 1.0
-
-            # 方法2：强制 vol_ratio > 1.0
-            signal2 = False
-            if use_method2 and vol_ratio > 1.0:
-                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
-                vol_spike = vol_ratio > vol_multiplier
-                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
-
-            # 方法3：强制 vol_ratio > 1.0 + 长度
+            signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier) and (vol_ratio > 1.0)
+            signal2 = use_method2 and (vol_ratio > 1.0) and (((price_change > min_change_pct) and (vol_ratio > vol_multiplier)) or ((current_high - current_close) / (current_high - current_low + 1e-8) < 0.3))
             signal3 = False
             if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
                 obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
@@ -120,7 +106,6 @@ while True:
             ]
             data_rows.append(row)
 
-            # 报警
             key = f"{coin}_{interval}"
             if has_signal and key not in st.session_state.alerted:
                 alert_msg = f"【{coin} {interval}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
@@ -136,7 +121,7 @@ while True:
                         var audio = document.querySelector('audio');
                         audio.play().catch(function(error) {
                             console.log("Autoplay blocked: " + error);
-                            alert("请点击页面允许自动声音播放");
+                            alert("请点击页面允许声音");
                         });
                     </script>
                     """,

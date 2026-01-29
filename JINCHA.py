@@ -1,31 +1,34 @@
 import streamlit as st
-import yfinance as yf
+import ccxt
 import pandas as pd
 import numpy as np
 import time
 
-st.set_page_config(page_title="加密货币放量/吃单扫描器", layout="wide")
-st.title("加密货币实时放量/吃单扫描器")
+st.set_page_config(page_title="加密货币现货放量/吃单扫描器", layout="wide")
+st.title("加密货币现货实时放量/吃单扫描器（公共端点）")
 
-# 上传币种列表
-uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC-USD)", type="txt")
+# ==============================================
+# 1. 上传币种列表
+# ==============================================
+uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT)", type="txt")
 if uploaded:
     content = uploaded.read().decode("utf-8")
-    coins = [line.strip().upper() for line in content.splitlines() if line.strip()]
-    coins = list(dict.fromkeys(coins))
-    coins = [c if c.endswith('-USD') else f"{c}-USD" for c in coins]
-    st.success(f"已加载 {len(coins)} 个币种")
-    st.write("监控列表：", ", ".join(coins[:10]) + " ..." if len(coins) > 10 else ", ".join(coins))
+    symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
+    symbols = list(dict.fromkeys(symbols))
+    st.success(f"已加载 {len(symbols)} 个交易对")
+    st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
 else:
-    st.info("请先上传包含币种的txt文件")
+    st.info("请先上传包含交易对的txt文件")
     st.stop()
 
-# 参数设置
+# ==============================================
+# 2. 参数设置
+# ==============================================
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    interval = st.selectbox("K线周期（推荐15m/1h）", ["1m", "5m", "15m", "1h"], index=2)
+    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60)
+    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+，太短容易限频")
 with col3:
     vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
 with col4:
@@ -35,12 +38,27 @@ use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
 use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
 use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
-N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[interval]
-period_map = {"1m": "7d", "5m": "7d", "15m": "1mo", "1h": "1mo"}
+# 根据周期设置参数
+N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
+vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 
+# 状态管理（避免重复报警）
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
+# ==============================================
+# 3. 创建 ccxt 交易所实例（公共端点，无需 key）
+# ==============================================
+exchange = ccxt.binance({
+    'enableRateLimit': True,  # 防限频，非常重要
+    'options': {
+        'defaultType': 'spot',  # 现货
+    }
+})
+
+# ==============================================
+# 4. 主循环 - 扫描
+# ==============================================
 placeholder = st.empty()
 alert_container = st.empty()
 
@@ -48,92 +66,109 @@ while True:
     data_rows = []
     new_alerts = []
 
-    for coin in coins:
-        df = None
-        for attempt in range(2):  # 重试一次
-            try:
-                period = period_map[interval]
-                df = yf.download(coin, period=period, interval=interval, progress=False)
-                if not df.empty and len(df) >= N_for_avg + 5:
-                    break
-                time.sleep(1)  # 重试前等1秒
-            except:
-                time.sleep(1)
-
-        if df is None or df.empty or len(df) < N_for_avg + 5:
-            data_rows.append([coin, "历史不足/空", "", "", "", "", f"根数={len(df) if df is not None else 'None'}"])
-            continue
-
-        df = df.tail(N_for_avg + 10)
-
-        current_close = float(df['Close'].iloc[-1])
-        current_open = float(df['Open'].iloc[-1])
-        current_high = float(df['High'].iloc[-1])
-        current_low = float(df['Low'].iloc[-1])
-        current_vol = float(df['Volume'].iloc[-1])
-
-        prev_close = float(df['Close'].iloc[-2])
-
-        if current_vol <= 0:
-            data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", f"根数={len(df)}"])
-            continue
-
-        avg_vol = float(df['Volume'].iloc[:-1].mean())
-        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
-
-        price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
-
-        signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier) and (vol_ratio > 1.0)
-        signal2 = use_method2 and (vol_ratio > 1.0) and (((price_change > min_change_pct) and (vol_ratio > vol_multiplier)) or ((current_high - current_close) / (current_high - current_low + 1e-8) < 0.3))
-        signal3 = False
-        if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
-            obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-            obv_ma = float(obv.rolling(20).mean().iloc[-1])
-            current_obv = float(obv.iloc[-1])
-            signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
-
-        has_signal = signal1 or signal2 or signal3
-
-        signals_str = []
-        if signal1: signals_str.append("1")
-        if signal2: signals_str.append("2")
-        if signal3: signals_str.append("3")
-        signals_display = ", ".join(signals_str) if signals_str else ""
-
-        row = [
-            coin,
-            f"{current_close:.2f}",
-            f"{price_change:+.2f}%",
-            f"{int(current_vol):,}",
-            f"{vol_ratio:.2f}x",
-            signals_display,
-            "⚠️" if has_signal else ""
-        ]
-        data_rows.append(row)
-
-        key = f"{coin}_{interval}"
-        if has_signal and key not in st.session_state.alerted:
-            alert_msg = f"【{coin} {interval}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
-            new_alerts.append(alert_msg)
-            st.session_state.alerted.add(key)
-
-            st.components.v1.html(
-                """
-                <audio autoplay>
-                    <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
-                </audio>
-                <script>
-                    var audio = document.querySelector('audio');
-                    audio.play().catch(function(error) {
-                        console.log("Autoplay blocked: " + error);
-                        alert("请点击页面允许声音");
-                    });
-                </script>
-                """,
-                height=0
+    for symbol in symbols:
+        try:
+            # 获取 OHLCV
+            ohlcv = exchange.fetch_ohlcv(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=N_for_avg + 20  # 多取一点防边界
             )
 
-    columns = ["币种", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
+            if not ohlcv or len(ohlcv) < N_for_avg + 5:
+                data_rows.append([symbol, "历史不足/空", "", "", "", "", f"根数={len(ohlcv)}"])
+                continue
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = df.tail(N_for_avg + 10)
+
+            current_close = float(df['close'].iloc[-1])
+            current_open = float(df['open'].iloc[-1])
+            current_high = float(df['high'].iloc[-1])
+            current_low = float(df['low'].iloc[-1])
+            current_vol = float(df['volume'].iloc[-1])
+
+            prev_close = float(df['close'].iloc[-2])
+
+            if current_vol <= 0:
+                data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
+                continue
+
+            avg_vol = float(df['volume'].iloc[:-1].mean())
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
+
+            price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
+
+            # 方法1：阳线 + 异常放量
+            signal1 = False
+            if use_method1:
+                is_bull = current_close > current_open
+                vol_spike = vol_ratio > vol_multiplier_adjusted
+                signal1 = is_bull and vol_spike and vol_ratio > 1.0
+
+            # 方法2：放量上涨 + 尾盘强势（强制需放量）
+            signal2 = False
+            if use_method2 and vol_ratio > 1.0:
+                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
+                vol_spike = vol_ratio > vol_multiplier_adjusted
+                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
+
+            # 方法3：OBV急升（需放量 + 数据足够）
+            signal3 = False
+            if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
+                obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+                obv_ma = float(obv.rolling(20).mean().iloc[-1])
+                current_obv = float(obv.iloc[-1])
+                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
+
+            has_signal = signal1 or signal2 or signal3
+
+            signals_str = []
+            if signal1: signals_str.append("1")
+            if signal2: signals_str.append("2")
+            if signal3: signals_str.append("3")
+            signals_display = ", ".join(signals_str) if signals_str else ""
+
+            row = [
+                symbol,
+                f"{current_close:.2f}",
+                f"{price_change:+.2f}%",
+                f"{int(current_vol):,}",
+                f"{vol_ratio:.2f}x",
+                signals_display,
+                "⚠️" if has_signal else ""
+            ]
+            data_rows.append(row)
+
+            # 报警：只首次触发
+            key = f"{symbol}_{timeframe}"
+            if has_signal and key not in st.session_state.alerted:
+                alert_msg = f"【{symbol} {timeframe}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
+                new_alerts.append(alert_msg)
+                st.session_state.alerted.add(key)
+
+                # 浏览器自动播放声音
+                st.components.v1.html(
+                    """
+                    <audio autoplay>
+                        <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
+                    </audio>
+                    <script>
+                        var audio = document.querySelector('audio');
+                        audio.play().catch(function(error) {
+                            console.log("Autoplay blocked: " + error);
+                            alert("浏览器阻止自动播放声音，请点击页面任意位置允许音频");
+                        });
+                    </script>
+                    """,
+                    height=0
+                )
+
+        except Exception as e:
+            data_rows.append([symbol, "错误", str(e)[:40], "", "", "", ""])
+
+    # 显示表格
+    columns = ["交易对", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
     df_display = pd.DataFrame(data_rows, columns=columns)
 
     def highlight(row):
@@ -142,7 +177,7 @@ while True:
     styled = df_display.style.apply(highlight, axis=1)
 
     with placeholder.container():
-        st.subheader(f"当前监控（周期：{interval}，刷新间隔：{refresh_sec}秒）")
+        st.subheader(f"当前监控（周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
         st.dataframe(styled, use_container_width=True, height=600)
 
         if new_alerts:

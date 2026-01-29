@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 st.set_page_config(page_title="多交易所聚合放量扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（OKX+Gate+Bitget+Binance镜像+Huobi聚合）")
+st.title("加密货币现货实时放量/吃单扫描器（OKX+Gate+Bitget+Binance镜像+Huobi+Bybit聚合）")
 
 # 上传币种列表
 uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
@@ -43,7 +43,7 @@ vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
-# 创建五个交易所实例
+# 创建六个交易所实例
 exchanges = {
     'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'gate': ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
@@ -58,7 +58,8 @@ exchanges = {
             }
         }
     }),
-    'huobi': ccxt.htx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})  # Huobi 现称 HTX
+    'huobi': ccxt.htx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
+    'bybit': ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})  # 新加 Bybit
 }
 
 placeholder = st.empty()
@@ -70,8 +71,8 @@ while True:
 
     for symbol in symbols:
         agg_df = None
-        successful_ex = []  # 成功交易所列表
-        failed_ex = []      # 失败交易所列表
+        successful_ex = []  # 成功交易所
+        failed_ex = []      # 失败交易所
 
         for ex_name, ex in exchanges.items():
             try:
@@ -81,15 +82,15 @@ while True:
                     continue
 
                 df_ex = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                successful_ex.append(ex_name)  # 成功记录
+                successful_ex.append(ex_name)
 
                 if agg_df is None:
                     agg_df = df_ex
                 else:
-                    agg_df['volume'] += df_ex['volume']  # 累加 volume
+                    agg_df['volume'] += df_ex['volume']
 
             except Exception:
-                failed_ex.append(ex_name)  # 失败记录
+                failed_ex.append(ex_name)
 
         if not successful_ex or agg_df is None or len(agg_df) < N_for_avg + 5:
             data_rows.append([symbol, "历史不足/空", "", "", "", "", f"成功: 无 | 失败: {', '.join(failed_ex)}"])
@@ -103,10 +104,10 @@ while True:
 
         prev_close = float(agg_df['close'].iloc[-2])
 
-        status = f"成功: {', '.join(successful_ex)} | 失败: {', '.join(failed_ex) if failed_ex else '无'}"
+        fetch_status = f"成功: {', '.join(successful_ex)} | 失败: {', '.join(failed_ex) if failed_ex else '无'}"
 
         if current_vol <= 0:
-            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", status])
+            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", fetch_status])
             continue
 
         avg_vol = float(agg_df['volume'].iloc[:-1].mean())
@@ -138,7 +139,8 @@ while True:
             f"{int(current_vol):,}",
             f"{vol_ratio:.2f}x",
             signals_display,
-            "⚠️" if has_signal else ""
+            "⚠️" if has_signal else "",
+            fetch_status
         ]
         data_rows.append(row)
 
@@ -164,7 +166,7 @@ while True:
                 height=0
             )
 
-    columns = ["交易对", "当前价", "涨幅", "聚合成交量", "放量倍数", "触发方法", "信号"]
+    columns = ["交易对", "当前价", "涨幅", "聚合成交量", "放量倍数", "触发方法", "信号", "成功/失败交易所"]
     df_display = pd.DataFrame(data_rows, columns=columns)
 
     def highlight(row):
@@ -173,7 +175,7 @@ while True:
     styled = df_display.style.apply(highlight, axis=1)
 
     with placeholder.container():
-        st.subheader(f"当前监控（OKX+Gate+Bitget+Binance镜像聚合，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
+        st.subheader(f"当前监控（OKX+Gate+Bitget+Binance镜像+Huobi+Bybit聚合，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
         st.dataframe(styled, use_container_width=True, height=600)
 
         if new_alerts:

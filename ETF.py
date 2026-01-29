@@ -1,464 +1,180 @@
 import streamlit as st
-import yfinance as yf
+import requests
+import pandas as pd
 import numpy as np
 import time
-import pandas as pd
-import random
-import os
-import json
+from datetime import datetime
 
-st.set_page_config(page_title="我的股票 短线扫描工具", layout="wide")
-st.title("我的股票 短线扫描工具")
+st.set_page_config(page_title="加密货币全网聚合放量扫描器", layout="wide")
+st.title("加密货币实时放量/吃单扫描器（CryptoCompare 全网聚合）")
 
-# ── 持久化进度文件 ──
-progress_file = "scan_progress_my_stocks.json"
-
-if 'progress_loaded' not in st.session_state:
-    st.session_state.progress_loaded = True
-    if os.path.exists(progress_file):
-        try:
-            with open(progress_file, "r") as f:
-                data = json.load(f)
-            st.session_state.high_prob = data.get("high_prob", [])
-            st.session_state.scanned_symbols = set(data.get("scanned_symbols", []))
-            st.session_state.failed_count = data.get("failed_count", 0)
-            st.session_state.fully_scanned = data.get("fully_scanned", False)
-            st.success("检测到历史进度，已自动加载（可继续扫描）")
-        except Exception as e:
-            st.warning(f"加载进度失败: {e}，将从头开始")
-
-def save_progress():
-    data = {
-        "high_prob": st.session_state.high_prob,
-        "scanned_symbols": list(st.session_state.scanned_symbols),
-        "failed_count": st.session_state.failed_count,
-        "fully_scanned": st.session_state.fully_scanned
-    }
-    try:
-        with open(progress_file, "w") as f:
-            json.dump(data, f)
-    except:
-        pass
-
-# ── 清缓存 + 重置按钮 ──
-if st.button("🔄 强制刷新所有数据（清缓存 + 重新扫描）"):
-    st.cache_data.clear()
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False
-    st.session_state.scanning = False
-    if os.path.exists(progress_file):
-        os.remove(progress_file)
-    st.rerun()
-
-if st.button("🔄 重置所有进度（从头开始）"):
-    st.session_state.high_prob = []
-    st.session_state.scanned_symbols = set()
-    st.session_state.failed_count = 0
-    st.session_state.fully_scanned = False
-    st.session_state.scanning = False
-    if os.path.exists(progress_file):
-        os.remove(progress_file)
-    st.rerun()
-
-st.write("上传包含股票代码的txt文件（代码之间用空格或换行分隔）")
-
-uploaded_file = st.file_uploader("选择股票列表文件 (.txt)", type=["txt"])
-
-if uploaded_file is not None:
-    try:
-        content = uploaded_file.read().decode("utf-8")
-        raw = content.replace("\n", " ").replace(",", " ").strip()
-        tickers_to_scan = [t.strip().upper() for t in raw.split() if t.strip()]
-        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))
-        st.success(f"成功读取 {len(tickers_to_scan)} 只股票")
-        st.write("股票列表预览：", ", ".join(tickers_to_scan[:15]) + " ..." if len(tickers_to_scan)>15 else ", ".join(tickers_to_scan))
-    except:
-        st.error("文件读取失败，请确保是纯文本txt格式")
-        tickers_to_scan = []
+# ==============================================
+# 上传币种列表（CryptoCompare 格式：BTC、ETH 等大写符号）
+# ==============================================
+st.info("CryptoCompare 使用交易对符号（如 BTC、ETH、SOL）。请在 TXT 中填写符号（大写），如 BTC")
+uploaded = st.file_uploader("上传币种列表 (.txt，每行一个符号，如 BTC)", type="txt")
+if uploaded:
+    content = uploaded.read().decode("utf-8")
+    fsyms = [line.strip().upper() for line in content.splitlines() if line.strip()]
+    fsyms = list(dict.fromkeys(fsyms))
+    st.success(f"已加载 {len(fsyms)} 个币种")
+    st.write("监控列表：", ", ".join(fsyms[:10]) + " ..." if len(fsyms) > 10 else ", ".join(fsyms))
 else:
-    st.info("请先上传股票列表txt文件")
-    tickers_to_scan = []
-
-if not tickers_to_scan:
+    st.info("请先上传包含符号的txt文件")
     st.stop()
 
-st.write("点击「开始/继续扫描」后会自动持续运行。所有股票都会强制显示。")
+# ==============================================
+# 参数设置
+# ==============================================
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
+with col2:
+    refresh_sec = st.slider("刷新间隔（秒）", 60, 300, 120, help="CryptoCompare 限速，建议120s+")
+with col3:
+    vol_multiplier = st.slider("全网放量倍数阈值", 1.5, 5.0, 2.8, 0.01)
+with col4:
+    min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
 
-# ==================== 核心常量 ====================
-BACKTEST_CONFIG = {
-    "3个月": {"range": "3mo", "interval": "1d"},
-    "6个月": {"range": "6mo", "interval": "1d"},
-    "1年":  {"range": "1y",  "interval": "1d"},
-    "2年":  {"range": "2y",  "interval": "1d"},
-    "3年":  {"range": "3y",  "interval": "1d"},
-    "5年":  {"range": "5y",  "interval": "1d"},
-    "10年": {"range": "10y", "interval": "1d"},
-}
+use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
+use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
+use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
-# ==================== 数据拉取 ====================
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
-    try:
-        time.sleep(random.uniform(1.2, 2.8))
-        ticker = yf.Ticker(yahoo_symbol)
-        df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
-        if df.empty or len(df) < 50:
-            return None, None, None, None
-        close = df['Close'].values.astype(float)
-        high = df['High'].values.astype(float)
-        low = df['Low'].values.astype(float)
-        volume = df['Volume'].values.astype(float)
-        mask = ~np.isnan(close)
-        close, high, low, volume = close[mask], high[mask], low[mask], volume[mask]
-        if len(close) < 50:
-            return None, None, None, None
-        return close, high, low, volume
-    except Exception:
-        return None, None, None, None
+# 周期参数（CryptoCompare 支持 1m 到 1d）
+N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
 
-# ==================== 指标函数（不变） ====================
-def ema_np(x: np.ndarray, span: int) -> np.ndarray:
-    alpha = 2 / (span + 1)
-    ema = np.empty_like(x)
-    ema[0] = x[0]
-    for i in range(1, len(x)):
-        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
-    return ema
+# 状态管理
+if 'alerted' not in st.session_state:
+    st.session_state.alerted = set()
 
-def macd_hist_np(close: np.ndarray) -> np.ndarray:
-    ema12 = ema_np(close, 12)
-    ema26 = ema_np(close, 26)
-    macd_line = ema12 - ema26
-    signal = ema_np(macd_line, 9)
-    return macd_line - signal
+placeholder = st.empty()
+alert_container = st.empty()
 
-def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    alpha = 1 / period
-    gain_ema = np.empty_like(gain)
-    loss_ema = np.empty_like(loss)
-    gain_ema[0] = gain[0]
-    loss_ema[0] = loss[0]
-    for i in range(1, len(gain)):
-        gain_ema[i] = alpha * gain[i] + (1 - alpha) * gain_ema[i-1]
-        loss_ema[i] = alpha * loss[i] + (1 - alpha) * loss_ema[i-1]
-    rs = gain_ema / (loss_ema + 1e-9)
-    return 100 - (100 / (1 + rs))
+while True:
+    data_rows = []
+    new_alerts = []
 
-def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
-    atr = np.empty_like(tr)
-    atr[0] = tr[0]
-    alpha = 1 / period
-    for i in range(1, len(tr)):
-        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
-    return atr
+    for fsym in fsyms:
+        try:
+            # CryptoCompare histominute/histohour 接口
+            limit = N_for_avg + 20
+            url = f"https://min-api.cryptocompare.com/data/v2/histo{'minute' if timeframe in ['1m','5m','15m'] else 'hour'}?fsym={fsym}&tsym=USDT&limit={limit}"
+            response = requests.get(url)
+            response.raise_for_status()
+            data = response.json()
 
-def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
-    if len(x) < window:
-        return np.full_like(x, np.nanmean(x) if not np.isnan(x).all() else 0)
-    cumsum = np.cumsum(np.insert(x, 0, 0.0))
-    ma = (cumsum[window:] - cumsum[:-window]) / window
-    return np.concatenate([np.full(window-1, ma[0]), ma])
+            if data.get('Response') != 'Success' or 'Data' not in data:
+                data_rows.append([fsym, "API错误", "", "", "", "", ""])
+                continue
 
-def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
-    direction = np.sign(np.diff(close, prepend=close[0]))
-    return np.cumsum(direction * volume)
+            df = pd.DataFrame(data['Data']['Data'])
+            if len(df) < N_for_avg + 5:
+                data_rows.append([fsym, "历史不足", "", "", "", "", f"根数={len(df)}"])
+                continue
 
-def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
-    if len(close) <= steps + 1:
-        return 0.5, 0.0
-    idx = np.where(score[:-steps] >= 3)[0]
-    if len(idx) == 0:
-        return 0.5, 0.0
-    rets = close[idx + steps] / close[idx] - 1
-    win_rate = (rets > 0).mean()
-    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
-    return win_rate, pf
+            df = df[['time', 'open', 'high', 'low', 'close', 'volumefrom']]
+            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+            df = df.tail(N_for_avg + 10)
 
-# ==================== 核心计算 ====================
-@st.cache_data(show_spinner=False)
-def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
-    yahoo_symbol = symbol.upper()
-    
-    close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
-    
-    if close is None:
-        return {
-            "symbol": symbol.upper(),
-            "display_symbol": symbol.upper() + " (无历史数据)",
-            "price": "N/A",
-            "change": "N/A",
-            "score": 0,
-            "prob7": 0.0,
-            "pf7": 0.0,
-            "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
-            "is_crypto": False,
-            "recent_rising放量ATR": False
-        }
+            current_close = float(df['close'].iloc[-1])
+            current_open = float(df['open'].iloc[-1])
+            current_high = float(df['high'].iloc[-1])
+            current_low = float(df['low'].iloc[-1])
+            current_vol = float(df['volume'].iloc[-1])
 
-    macd_hist = macd_hist_np(close)
-    rsi = rsi_np(close)
-    atr = atr_np(high, low, close)
-    obv = obv_np(close, volume)
-    vol_ma20 = rolling_mean_np(volume, 20)
-    atr_ma20 = rolling_mean_np(atr, 20)
-    obv_ma20 = rolling_mean_np(obv, 20)
+            prev_close = float(df['close'].iloc[-2])
 
-    sig_macd = macd_hist[-1] > 0
-    sig_vol = volume[-1] > vol_ma20[-1] * 1.1
-    sig_rsi = rsi[-1] >= 60
-    sig_atr = atr[-1] > atr_ma20[-1] * 1.1
-    sig_obv = obv[-1] > obv_ma20[-1] * 1.05
+            if current_vol <= 0:
+                data_rows.append([fsym, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
+                continue
 
-    score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
+            avg_vol = float(df['volume'].iloc[:-1].mean())
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
 
-    sig_details = {
-        "MACD>0": sig_macd,
-        "放量": sig_vol,
-        "RSI≥60": sig_rsi,
-        "ATR放大": sig_atr,
-        "OBV上升": sig_obv
-    }
+            price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
-    sig_macd_hist = (macd_hist > 0).astype(int)
-    sig_vol_hist = (volume > vol_ma20 * 1.1).astype(int)
-    sig_rsi_hist = (rsi >= 60).astype(int)
-    sig_atr_hist = (atr > atr_ma20 * 1.1).astype(int)
-    sig_obv_hist = (obv > obv_ma20 * 1.05).astype(int)
-    score_arr = sig_macd_hist + sig_vol_hist + sig_rsi_hist + sig_atr_hist + sig_obv_hist
+            # 方法1
+            signal1 = False
+            if use_method1:
+                is_bull = current_close > current_open
+                vol_spike = vol_ratio > vol_multiplier
+                signal1 = is_bull and vol_spike and vol_ratio > 1.0
 
-    prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
+            # 方法2
+            signal2 = False
+            if use_method2 and vol_ratio > 1.0:
+                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
+                vol_spike = vol_ratio > vol_multiplier
+                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
 
-    # ── 价格与涨幅（始终显示合理值） ──
-    price = close[-1] if len(close) > 0 else "N/A"
-    change = "N/A"
-    
-    try:
-        ticker = yf.Ticker(yahoo_symbol)
-        prev_close = ticker.info.get('previousClose')
-        
-        if prev_close is None and len(close) >= 2:
-            prev_close = close[-2]
-        
-        if prev_close and prev_close != 0:
-            # 尝试获取实时/当天最新价（含盘前盘后）
-            df_today = ticker.history(period="1d", interval="1m", prepost=True, timeout=15)
-            if not df_today.empty:
-                current_price = df_today['Close'].iloc[-1]
-            else:
-                current_price = close[-1]  # 无当天数据，用历史最后收盘
-            
-            price = current_price
-            change_pct = (current_price / prev_close - 1) * 100
-            change = f"{change_pct:+.2f}%"
-    except Exception:
-        pass  # 失败时保持 N/A
+            # 方法3
+            signal3 = False
+            if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
+                obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+                obv_ma = float(obv.rolling(20).mean().iloc[-1])
+                current_obv = float(obv.iloc[-1])
+                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
 
-    recent_rising = False
-    if len(score_arr) >= 3:
-        s3, s2, s1 = score_arr[-3], score_arr[-2], score_arr[-1]
-        if s1 > s2 > s3 and sig_vol and sig_atr:
-            recent_rising = True
+            has_signal = signal1 or signal2 or signal3
 
-    return {
-        "symbol": symbol.upper(),
-        "display_symbol": symbol.upper(),
-        "price": price,
-        "change": change,
-        "score": score,
-        "prob7": prob7,
-        "pf7": pf7,
-        "sig_details": sig_details,
-        "is_crypto": False,
-        "recent_rising放量ATR": recent_rising
-    }
+            signals_str = []
+            if signal1: signals_str.append("1")
+            if signal2: signals_str.append("2")
+            if signal3: signals_str.append("3")
+            signals_display = ", ".join(signals_str) if signals_str else ""
 
-mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
-sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
+            row = [
+                fsym,
+                f"{current_close:.2f}",
+                f"{price_change:+.2f}%",
+                f"{int(current_vol):,}",
+                f"{vol_ratio:.2f}x",
+                signals_display,
+                "⚠️" if has_signal else ""
+            ]
+            data_rows.append(row)
 
-if 'high_prob' not in st.session_state:
-    st.session_state.high_prob = []
-if 'scanned_symbols' not in st.session_state:
-    st.session_state.scanned_symbols = set()
-if 'failed_count' not in st.session_state:
-    st.session_state.failed_count = 0
-if 'fully_scanned' not in st.session_state:
-    st.session_state.fully_scanned = False
-if 'scanning' not in st.session_state:
-    st.session_state.scanning = False
+            key = f"{fsym}_{timeframe}"
+            if has_signal and key not in st.session_state.alerted:
+                alert_msg = f"【{fsym} {timeframe}】全网吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
+                new_alerts.append(alert_msg)
+                st.session_state.alerted.add(key)
 
-# 强制显示所有
-forced_symbols = set([s.upper() for s in tickers_to_scan])
-computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
-missing = forced_symbols - computed_symbols
+                st.components.v1.html(
+                    """
+                    <audio autoplay>
+                        <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
+                    </audio>
+                    <script>
+                        var audio = document.querySelector('audio');
+                        audio.play().catch(function(error) {
+                            console.log("Autoplay blocked: " + error);
+                            alert("浏览器阻止自动播放声音，请点击页面允许音频");
+                        });
+                    </script>
+                    """,
+                    height=0
+                )
 
-for sym in missing:
-    st.session_state.high_prob.append({
-        "symbol": sym,
-        "display_symbol": sym + " (待计算或数据不可用)",
-        "price": "N/A",
-        "change": "N/A",
-        "score": 0,
-        "prob7": 0.0,
-        "pf7": 0.0,
-        "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
-        "is_crypto": False,
-        "recent_rising放量ATR": False
-    })
+        except Exception as e:
+            data_rows.append([fsym, "错误", str(e)[:50], "", "", "", ""])
 
-total = len(tickers_to_scan)
+    columns = ["币种", "当前价 (USDT)", "涨幅", "全网成交量", "放量倍数", "触发方法", "信号"]
+    df_display = pd.DataFrame(data_rows, columns=columns)
 
-if st.session_state.get("prev_mode") != mode:
-    st.session_state.high_prob = []
-    st.session_state.fully_scanned = False
-    st.info("🔄 回测周期已变更，已清除旧结果（需重新计算）")
+    def highlight(row):
+        return ['background-color: #ffcccc' if row["信号"] == "⚠️" else ''] * len(row)
 
-st.session_state.prev_mode = mode
+    styled = df_display.style.apply(highlight, axis=1)
 
-progress_bar = st.progress(0)
-status_text = st.empty()
+    with placeholder.container():
+        st.subheader(f"当前监控（CryptoCompare 全网聚合，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
+        st.dataframe(styled, use_container_width=True, height=600)
 
-current_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
-progress_val = min(1.0, max(0.0, current_completed / total)) if total > 0 else 0.0
-progress_bar.progress(progress_val)
+        if new_alerts:
+            for msg in new_alerts:
+                st.error(msg)
 
-# ==================== 显示结果 ====================
-if st.session_state.high_prob:
-    df_all = pd.DataFrame([x for x in st.session_state.high_prob if x is not None and x["symbol"] in set(tickers_to_scan)])
-    
-    if not df_all.empty:
-        def format_and_sort(df):
-            df = df.copy()
-            
-            def format_price(x):
-                if isinstance(x, (int, float)):
-                    return round(x, 2)
-                return x
-            
-            df['price'] = df['price'].apply(format_price)
-            df['change'] = df['change'].astype(str)
-            df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
-            df['pf7'] = df['pf7'].round(2)
-            
-            if sort_by == "PF7 (盈利因子)":
-                df = df.sort_values("pf7", ascending=False)
-            else:
-                df = df.sort_values("prob7", ascending=False)
-            return df
-        
-        df_display = format_and_sort(df_all)
-        
-        st.subheader(f"全部结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
-        
-        for _, row in df_display.iterrows():
-            details = row['sig_details']
-            detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-            
-            prefix = ""
-            if row.get("recent_rising放量ATR", False):
-                prefix = "↑↑↑放量ATR连升 "
-            
-            if row['pf7'] == 0.0 and row['prob7'] == 0.0:
-                prefix = "**待计算/无数据** " + prefix
-                score_str = "得分: 0/5 - 无信号"
-                prob_pf_str = "**7日概率: 0.0% | PF7: 0.0**"
-            elif row['pf7'] > 4.0 and row['prob7'] > 0.70:
-                score_str = f"**超级优质** 得分: {row['score']}/5 - {detail_str}"
-                prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
-            else:
-                score_str = f"得分: {row['score']}/5 - {detail_str}"
-                prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
-            
-            price_str = f"${row['price']:.2f}" if isinstance(row['price'], (int, float)) else row['price']
-            change_display = f"({row['change']})" if row['change'] != "N/A" else "(N/A)"
-            line = f"{prefix}{row['display_symbol']} - 价格: {price_str} {change_display} - {score_str} - {prob_pf_str}"
-            
-            st.markdown(line)
-
-st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
-
-# 下载结果
-if st.session_state.high_prob and tickers_to_scan:
-    df_download = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
-    if not df_download.empty:
-        df_download = df_download.sort_values("pf7", ascending=False)
-        
-        lines = []
-        for _, row in df_download.iterrows():
-            details = row['sig_details']
-            detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-            prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
-            prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
-            price_str = f"{row['price']:.2f}" if isinstance(row['price'], (int, float)) else row['price']
-            change = row['change'] if row['change'] != "N/A" else "N/A"
-            line = f"{prefix}{row['symbol']} - 价格: ${price_str} ({change}) - 得分: {row['score']}/5 - {detail_str} - 7日概率: {prob7_fmt} | PF7: {row['pf7']:.2f}"
-            lines.append(line)
-        
-        txt_content = "\r\n".join(lines)
-        st.download_button(
-            label="📥 下载结果 (按PF7排序 txt)",
-            data=txt_content,
-            file_name="scan_result_my_stocks.txt",
-            mime="text/plain"
-        )
-
-# 扫描逻辑
-if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
-    st.session_state.scanning = True
-
-if st.session_state.scanning and current_completed < total:
-    with st.spinner("扫描进行中（每批次刷新一次页面）..."):
-        batch_size = 8
-        processed_in_this_run = 0
-        
-        remaining_tickers = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
-        
-        for sym in remaining_tickers:
-            if processed_in_this_run >= batch_size:
-                break
-            
-            anticipated_completed = current_completed + processed_in_this_run + 1
-            progress_val = min(1.0, max(0.0, anticipated_completed / total)) if total > 0 else 0.0
-            
-            status_text.text(f"正在计算 {sym} ({anticipated_completed}/{total})")
-            progress_bar.progress(progress_val)
-            
-            try:
-                metrics = compute_stock_metrics(sym, mode)
-                if metrics is not None:
-                    st.session_state.high_prob = [m for m in st.session_state.high_prob if m["symbol"] != sym]
-                    st.session_state.high_prob.append(metrics)
-                else:
-                    st.session_state.failed_count += 1
-                st.session_state.scanned_symbols.add(sym)
-            except Exception as e:
-                st.warning(f"{sym} 异常: {str(e)}")
-                st.session_state.failed_count += 1
-                st.session_state.scanned_symbols.add(sym)
-            
-            processed_in_this_run += 1
-        
-        save_progress()
-        
-        new_completed = len(st.session_state.scanned_symbols.intersection(set(tickers_to_scan)))
-        accurate_progress = min(1.0, max(0.0, new_completed / total)) if total > 0 else 0.0
-        progress_bar.progress(accurate_progress)
-        
-        if new_completed >= total:
-            st.session_state.fully_scanned = True
-            st.session_state.scanning = False
-            st.success("扫描完成！")
-        
-        st.rerun()
-
-if current_completed >= total:
-    st.success("已完成全部扫描！结果已全部更新")
-
-st.caption("2026年1月完整版 | 始终显示价格+涨幅（无夜盘用收盘价+日涨幅） | 修复格式错误")
+    time.sleep(refresh_sec)
+    st.rerun()

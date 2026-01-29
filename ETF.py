@@ -5,16 +5,17 @@ import numpy as np
 import time
 
 st.set_page_config(page_title="多交易所聚合放量扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（OKX + Gate + Bitget 聚合）")
+st.title("加密货币现货实时放量/吃单扫描器（OKX + Gate + Bitget + Binance镜像聚合）")
 
 # 上传币种列表
-uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT)", type="txt")
+uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
 if uploaded:
     content = uploaded.read().decode("utf-8")
     symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
     symbols = list(dict.fromkeys(symbols))
     symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
     symbols = [s.replace('-', '/') for s in symbols]
+    symbols = [s if not s.endswith('/USDT/USDT') else s.replace('/USDT/USDT', '/USDT') for s in symbols]
     st.success(f"已加载 {len(symbols)} 个交易对")
     st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
 else:
@@ -42,11 +43,21 @@ vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
-# 创建三个交易所实例（公共端点）
+# 创建四个交易所实例
 exchanges = {
     'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'gate': ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'bitget': ccxt.bitget({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+    'bitget': ccxt.bitget({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
+    'binance': ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'},
+        'urls': {
+            'api': {
+                'public': 'https://www.bmwweb.academy/api/v3',
+                'private': 'https://www.bmwweb.academy/api/v3',
+            }
+        }
+    })
 }
 
 placeholder = st.empty()
@@ -59,7 +70,6 @@ while True:
     for symbol in symbols:
         agg_df = None
         agg_volumes = []
-        prices = []
         has_data = False
 
         for ex_name, ex in exchanges.items():
@@ -70,7 +80,6 @@ while True:
 
                 df_ex = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 agg_volumes.append(df_ex['volume'].iloc[-1])
-                prices.append(df_ex['close'].iloc[-1])
                 has_data = True
 
                 if agg_df is None:
@@ -79,7 +88,7 @@ while True:
                     agg_df['volume'] += df_ex['volume']  # 累加 volume
 
             except Exception:
-                pass  # 某个交易所失败，继续下一个
+                pass  # 单个交易所失败，继续下一个
 
         if not has_data or agg_df is None or len(agg_df) < N_for_avg + 5:
             data_rows.append([symbol, "历史不足/空", "", "", "", "", ""])
@@ -89,7 +98,7 @@ while True:
         current_open = float(agg_df['open'].iloc[-1])
         current_high = float(agg_df['high'].iloc[-1])
         current_low = float(agg_df['low'].iloc[-1])
-        current_vol = float(agg_df['volume'].iloc[-1])  # 聚合总 volume
+        current_vol = float(agg_df['volume'].iloc[-1])
 
         prev_close = float(agg_df['close'].iloc[-2])
 
@@ -161,7 +170,7 @@ while True:
     styled = df_display.style.apply(highlight, axis=1)
 
     with placeholder.container():
-        st.subheader(f"当前监控（OKX+Gate+Bitget 聚合，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
+        st.subheader(f"当前监控（OKX+Gate+Bitget+Binance镜像聚合，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
         st.dataframe(styled, use_container_width=True, height=600)
 
         if new_alerts:

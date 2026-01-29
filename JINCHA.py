@@ -67,38 +67,46 @@ while True:
                 continue
 
             df = df.tail(N_for_avg + 10)  # 多取几根防边界
-            current = df.iloc[-1]
-            prev = df.iloc[-2]
 
-            avg_vol = df['Volume'].iloc[:-1].mean()
-            current_vol = current['Volume']
-            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0
+            # 强制转换为标量，避免 Series 歧义问题
+            current_close = float(df['Close'].iloc[-1])
+            current_open = float(df['Open'].iloc[-1])
+            current_high = float(df['High'].iloc[-1])
+            current_low = float(df['Low'].iloc[-1])
+            current_vol = float(df['Volume'].iloc[-1])
 
-            price_change = (current['Close'] - prev['Close']) / prev['Close'] * 100 if prev['Close'] != 0 else 0
+            prev_close = float(df['Close'].iloc[-2])
+
+            avg_vol = float(df['Volume'].iloc[:-1].mean())
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
+
+            price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
             # 方法1：阳线 + 异常放量
             signal1 = False
             if use_method1:
-                is_bull = current['Close'] > current['Open']
+                is_bull = current_close > current_open
                 vol_spike = vol_ratio > vol_multiplier
                 signal1 = is_bull and vol_spike
 
             # 方法2：放量上涨 + 尾盘强势
             signal2 = False
             if use_method2:
-                strong_close = (current['High'] - current['Close']) / (current['High'] - current['Low'] + 1e-8) < 0.3
+                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
                 vol_spike = vol_ratio > vol_multiplier
-                signal2 = (price_change > min_change_pct and vol_spike) or strong_close
+                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
 
             # 方法3：OBV急升
             signal3 = False
-            if use_method3:
+            if use_method3 and len(df) >= 21:  # 至少21根才能算20期MA
                 obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-                obv_ma = obv.rolling(20).mean().iloc[-1]
-                current_obv = obv.iloc[-1]
+                obv_ma = float(obv.rolling(20).mean().iloc[-1])
+                current_obv = float(obv.iloc[-1])
                 signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
+            elif use_method3:
+                signal3 = False  # 数据不足，不触发
 
-            has_signal = any([signal1, signal2, signal3])
+            has_signal = signal1 or signal2 or signal3
 
             signals_str = []
             if signal1: signals_str.append("方法1")
@@ -108,7 +116,7 @@ while True:
 
             row = [
                 coin,
-                f"{current['Close']:.2f}",
+                f"{current_close:.2f}",
                 f"{price_change:+.2f}%",
                 f"{current_vol:,.0f}",
                 f"{vol_ratio:.2f}x",
@@ -124,16 +132,18 @@ while True:
                 new_alerts.append(alert_msg)
                 st.session_state.alerted.add(key)
 
-                # 用 JS 播放声音（浏览器自动播放，需用户允许）
+                # JS 播放声音（浏览器自动播放，需要用户允许声音权限）
                 st.components.v1.html(
                     """
-                    <audio autoplay>
+                    <audio id="alertSound" autoplay>
                         <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
                     </audio>
                     <script>
-                        var audio = document.querySelector('audio');
+                        var audio = document.getElementById('alertSound');
                         audio.play().catch(function(error) {
                             console.log("Autoplay prevented: " + error);
+                            // 可选：提示用户手动点击页面允许声音
+                            alert("浏览器阻止了自动播放声音，请点击页面任意位置允许音频");
                         });
                     </script>
                     """,
@@ -141,7 +151,7 @@ while True:
                 )
 
         except Exception as e:
-            data_rows.append([coin, "错误", str(e)[:30], "", "", "", ""])
+            data_rows.append([coin, "错误", str(e)[:50], "", "", "", ""])
 
     # 显示表格（信号行背景变红）
     columns = ["币种", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
@@ -158,7 +168,7 @@ while True:
         st.subheader(f"当前监控（周期：{interval}，刷新间隔：{refresh_sec}秒）")
         st.dataframe(styled_df, use_container_width=True, height=600)
 
-        # 显示本次新报警（只显示新出现的）
+        # 显示本次新报警
         if new_alerts:
             with alert_container.container():
                 for msg in new_alerts:

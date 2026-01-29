@@ -12,6 +12,8 @@ uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC-U
 if uploaded:
     content = uploaded.read().decode("utf-8")
     coins = [line.strip().upper() for line in content.splitlines() if line.strip()]
+    # 自动补 -USD
+    coins = [c if c.endswith('-USD') else f"{c}-USD" for c in coins]
     coins = list(dict.fromkeys(coins))
     st.success(f"已加载 {len(coins)} 个币种")
     st.write("监控列表：", ", ".join(coins[:10]) + " ..." if len(coins) > 10 else ", ".join(coins))
@@ -24,25 +26,24 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     interval = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="1m周期建议60s+")
+    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60)
 with col3:
     base_vol_mult = st.slider("基础放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
 with col4:
     min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
 
 use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
-use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势", value=True)
-use_method3 = st.checkbox("方法3：OBV急升（资金净流入）", value=True)
+use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
+use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
-# 根据周期调整参数
+# 周期参数
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[interval]
-vol_multiplier = base_vol_mult + (0.5 if interval == "1m" else 0)  # 1m 更严格
+vol_multiplier = base_vol_mult + (0.5 if interval == "1m" else 0)
 
-# 状态管理
+# 状态
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
-# 主循环
 placeholder = st.empty()
 alert_container = st.empty()
 
@@ -53,14 +54,14 @@ while True:
     for coin in coins:
         try:
             # 延长 period 解决数据不足
-            df = yf.download(coin, period="5d" if interval in ["1m", "5m"] else "2d", interval=interval, progress=False)
+            period = "7d" if interval in ["1m", "5m"] else "1mo"
+            df = yf.download(coin, period=period, interval=interval, progress=False)
             if df.empty or len(df) < N_for_avg + 5:
-                data_rows.append([coin, "数据不足/空", "", "", "", "", ""])
+                data_rows.append([coin, "历史不足/空", "", "", "", "", f"len={len(df)}"])
                 continue
 
             df = df.tail(N_for_avg + 10)
 
-            # 强制标量
             current_close = float(df['Close'].iloc[-1])
             current_open = float(df['Open'].iloc[-1])
             current_high = float(df['High'].iloc[-1])
@@ -69,15 +70,13 @@ while True:
 
             prev_close = float(df['Close'].iloc[-2])
 
-            # 成交量为0时跳过
             if current_vol <= 0:
-                data_rows.append([coin, f"{current_close:.2f}", f"{(current_close - prev_close) / prev_close * 100:+.2f}%" if prev_close != 0 else "N/A", "0", "0.00x", "", ""])
+                data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
                 continue
 
             avg_vol = float(df['Volume'].iloc[:-1].mean())
             vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
 
-            # 如果 vol_ratio < 1.0，强制不触发方法2/3
             price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
             # 方法1
@@ -85,16 +84,16 @@ while True:
             if use_method1:
                 is_bull = current_close > current_open
                 vol_spike = vol_ratio > vol_multiplier
-                signal1 = is_bull and vol_spike
+                signal1 = is_bull and vol_spike and vol_ratio > 1.0
 
-            # 方法2：加 vol_ratio > 1.0 过滤
+            # 方法2：强制 vol_ratio > 1.0
             signal2 = False
             if use_method2 and vol_ratio > 1.0:
                 strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
                 vol_spike = vol_ratio > vol_multiplier
                 signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
 
-            # 方法3：加 vol_ratio > 1.0 和长度检查
+            # 方法3：强制 vol_ratio > 1.0 + 长度
             signal3 = False
             if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
                 obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
@@ -128,7 +127,6 @@ while True:
                 new_alerts.append(alert_msg)
                 st.session_state.alerted.add(key)
 
-                # JS 声音
                 st.components.v1.html(
                     """
                     <audio autoplay>
@@ -138,7 +136,7 @@ while True:
                         var audio = document.querySelector('audio');
                         audio.play().catch(function(error) {
                             console.log("Autoplay blocked: " + error);
-                            alert("浏览器阻止自动声音，请点击允许音频播放");
+                            alert("请点击页面允许自动声音播放");
                         });
                     </script>
                     """,
@@ -148,7 +146,6 @@ while True:
         except Exception as e:
             data_rows.append([coin, "错误", str(e)[:40], "", "", "", ""])
 
-    # 显示表格
     columns = ["币种", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
     df_display = pd.DataFrame(data_rows, columns=columns)
 

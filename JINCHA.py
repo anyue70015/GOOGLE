@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 st.set_page_config(page_title="加密货币现货放量/吃单扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（公共端点）")
+st.title("加密货币现货实时放量/吃单扫描器（免翻镜像）")
 
 # ==============================================
 # 上传币种列表
@@ -16,8 +16,11 @@ if uploaded:
     symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
     symbols = list(dict.fromkeys(symbols))
     
-    # 自动补 /USDT
+    # 自动补 /USDT，但避免重复
     symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
+    symbols = [s.replace('-', '/') for s in symbols]  # BTC-USD → BTC/USDT
+    symbols = [s if not s.endswith('/USDT/USDT') else s.replace('/USDT/USDT', '/USDT') for s in symbols]  # 防重复
+    
     st.success(f"已加载 {len(symbols)} 个交易对")
     st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
 else:
@@ -31,7 +34,7 @@ col1, col2, col3, col4 = st.columns(4)
 with col1:
     timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+，避免限频")
+    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+")
 with col3:
     vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
 with col4:
@@ -45,17 +48,21 @@ use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
 vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 
-# 状态管理（避免重复报警）
+# 状态管理
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
 # ==============================================
-# 创建 ccxt Binance 实例（公共端点）
+# 创建 ccxt Binance 实例，使用你的免翻地址
 # ==============================================
 exchange = ccxt.binance({
-    'enableRateLimit': True,  # 必须开启，防限频
-    'options': {
-        'defaultType': 'spot',  # 现货市场
+    'enableRateLimit': True,
+    'options': {'defaultType': 'spot'},
+    'urls': {
+        'api': {
+            'public': 'https://www.bmwweb.academy/api/v3',
+            'private': 'https://www.bmwweb.academy/api/v3',  # 如果以后加 key 用
+        }
     }
 })
 
@@ -71,7 +78,6 @@ while True:
 
     for symbol in symbols:
         try:
-            # 获取 OHLCV
             ohlcv = exchange.fetch_ohlcv(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -102,21 +108,18 @@ while True:
 
             price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
-            # 方法1
             signal1 = False
             if use_method1:
                 is_bull = current_close > current_open
                 vol_spike = vol_ratio > vol_multiplier_adjusted
                 signal1 = is_bull and vol_spike and vol_ratio > 1.0
 
-            # 方法2
             signal2 = False
             if use_method2 and vol_ratio > 1.0:
                 strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
                 vol_spike = vol_ratio > vol_multiplier_adjusted
                 signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
 
-            # 方法3
             signal3 = False
             if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
                 obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
@@ -143,14 +146,12 @@ while True:
             ]
             data_rows.append(row)
 
-            # 报警：只首次触发
             key = f"{symbol}_{timeframe}"
             if has_signal and key not in st.session_state.alerted:
                 alert_msg = f"【{symbol} {timeframe}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
                 new_alerts.append(alert_msg)
                 st.session_state.alerted.add(key)
 
-                # 浏览器自动播放声音
                 st.components.v1.html(
                     """
                     <audio autoplay>
@@ -160,7 +161,7 @@ while True:
                         var audio = document.querySelector('audio');
                         audio.play().catch(function(error) {
                             console.log("Autoplay blocked: " + error);
-                            alert("浏览器阻止自动播放声音，请点击页面任意位置允许音频");
+                            alert("浏览器阻止自动播放声音，请点击页面允许音频");
                         });
                     </script>
                     """,
@@ -168,9 +169,8 @@ while True:
                 )
 
         except Exception as e:
-            data_rows.append([symbol, "错误", str(e)[:40], "", "", "", ""])
+            data_rows.append([symbol, "错误", str(e)[:50], "", "", "", ""])
 
-    # 显示表格
     columns = ["交易对", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
     df_display = pd.DataFrame(data_rows, columns=columns)
 

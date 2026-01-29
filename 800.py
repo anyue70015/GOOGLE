@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 st.set_page_config(page_title="加密货币现货放量/吃单扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（免翻镜像）")
+st.title("加密货币现货实时放量/吃单扫描器（OKX + Binance 镜像）")
 
 # ==============================================
 # 上传币种列表
@@ -16,7 +16,7 @@ if uploaded:
     symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
     symbols = list(dict.fromkeys(symbols))
     
-    # 自动补 /USDT，但避免重复
+    # 自动补 /USDT
     symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
     symbols = [s.replace('-', '/') for s in symbols]  # BTC-USD → BTC/USDT
     symbols = [s if not s.endswith('/USDT/USDT') else s.replace('/USDT/USDT', '/USDT') for s in symbols]  # 防重复
@@ -30,14 +30,16 @@ else:
 # ==============================================
 # 参数设置
 # ==============================================
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
-    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
+    exchange_name = st.selectbox("交易所", ["OKX (推荐)", "Binance (免翻镜像)"], index=0)
 with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+")
+    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col3:
-    vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
+    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60)
 with col4:
+    vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
+with col5:
     min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
 
 use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
@@ -53,18 +55,25 @@ if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
 # ==============================================
-# 创建 ccxt Binance 实例，使用你的免翻地址
+# 创建交易所实例
 # ==============================================
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'spot'},
-    'urls': {
-        'api': {
-            'public': 'https://www.bmwweb.academy/api/v3',
-            'private': 'https://www.bmwweb.academy/api/v3',  # 如果以后加 key 用
+if exchange_name.startswith("OKX"):
+    exchange = ccxt.okx({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'},
+    })
+else:
+    # Binance 镜像
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'},
+        'urls': {
+            'api': {
+                'public': 'https://www.bmwweb.academy/api/v3',
+                'private': 'https://www.bmwweb.academy/api/v3',
+            }
         }
-    }
-})
+    })
 
 # ==============================================
 # 主扫描循环
@@ -180,7 +189,7 @@ while True:
     styled = df_display.style.apply(highlight, axis=1)
 
     with placeholder.container():
-        st.subheader(f"当前监控（周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
+        st.subheader(f"当前监控（交易所：{exchange_name}，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
         st.dataframe(styled, use_container_width=True, height=600)
 
         if new_alerts:

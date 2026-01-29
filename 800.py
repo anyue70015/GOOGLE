@@ -1,209 +1,160 @@
 import streamlit as st
-import ccxt.async_support as ccxt_async  # Use async for faster fetches
+import ccxt.async_support as ccxt_async
 import pandas as pd
 import numpy as np
 import asyncio
 import time
 
-st.set_page_config(page_title="多交易所聚合放量扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（OKX+Gate+Bitget+Binance+Huobi+Bybit聚合）")
+# --- 页面配置 ---
+st.set_page_config(page_title="2026量化神兵-直连优化版", layout="wide")
 
-# 上传币种列表
-uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
+st.title("🚀 加密货币聚合扫描器 (直连优化版 - 优先Binance)")
+st.markdown("优先使用 Binance 数据做放量判断（最可靠）。节点超时可侧边栏切换。")
+
+# --- 侧边栏：直连节点切换 ---
+st.sidebar.title("🌐 节点设置")
+binance_node = st.sidebar.selectbox("币安节点（优先性能集群）", 
+    ["api1.binance.com", "api2.binance.com", "api3.binance.com", "api4.binance.com", 
+     "api.binance.com", "api-gcp.binance.com"],
+    index=0)
+
+# --- 币种列表处理 ---
+uploaded = st.file_uploader("上传币种列表 (.txt)", type="txt")
 if uploaded:
     content = uploaded.read().decode("utf-8")
     symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
-    symbols = list(dict.fromkeys(symbols))  # Remove duplicates
+    symbols = list(dict.fromkeys(symbols))  # 去重
     symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
-    symbols = [s.replace('-', '/') for s in symbols]
-    symbols = [s if not s.endswith('/USDT/USDT') else s.replace('/USDT/USDT', '/USDT') for s in symbols]
     st.success(f"已加载 {len(symbols)} 个交易对")
-    st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
 else:
-    st.info("请先上传包含交易对的txt文件")
     st.stop()
 
-# 参数设置
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
-with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60)
-with col3:
-    vol_multiplier = st.slider("聚合放量倍数阈值", 1.5, 5.0, 2.8, 0.01)
-with col4:
-    min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
+# --- 主参数 ---
+timeframe = st.selectbox("周期", ["1m", "5m", "15m", "1h"], index=1)
+refresh_sec = st.slider("刷新间隔(秒)", 5, 60, 20)
+vol_multiplier = st.slider("放量阈值 (x)", 1.0, 5.0, 2.5)
 
-use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
-use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
-use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
+# --- 交易所实例化 ---
+exchanges = {}
+ex_list = ['binance', 'okx', 'gate', 'bitget', 'bybit']  # huobi → htx 已弃用，换 bybit 更活跃
 
-N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
-vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
+for name in ex_list:
+    cfg = {
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot', 'adjustForTimeDifference': True},
+        'timeout': 20000,  # 20秒宽限
+    }
+    if name == 'binance':
+        cfg['urls'] = {'api': {'public': f'https://{binance_node}'}}
+    
+    ex_class = getattr(ccxt_async, name)
+    exchanges[name] = ex_class(cfg)
 
-if 'alerted' not in st.session_state:
-    st.session_state.alerted = set()
+# Binance 实例单独提出来优先用
+binance_ex = exchanges['binance']
 
-# Reset alerts button
-if st.button("重置警报"):
-    st.session_state.alerted = set()
+# --- 数据抓取 ---
+async def fetch_ohlcv(ex, symbol, timeframe, limit):
+    try:
+        data = await asyncio.wait_for(ex.fetch_ohlcv(symbol, timeframe, limit=limit), timeout=30.0)
+        return data, None
+    except Exception as e:
+        return None, str(e)
 
-# 创建六个异步交易所实例
-exchanges = {
-    'okx': ccxt_async.okx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'gate': ccxt_async.gate({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'bitget': ccxt_async.bitget({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'binance': ccxt_async.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}, 'proxies': {'http': 'http://127.0.0.1:10809', 'https': 'http://127.0.0.1:10809'}}),
-    'huobi': ccxt_async.htx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'bybit': ccxt_async.bybit({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-}
+async def process_symbol(symbol, timeframe):
+    N = {"1m": 40, "5m": 20, "15m": 12, "1h": 8}[timeframe]
+    limit = N + 10  # 多取几根更安全
+
+    # 优先尝试 Binance
+    binance_ohlcv, binance_err = await fetch_ohlcv(binance_ex, symbol, timeframe, limit)
+    
+    if binance_ohlcv and len(binance_ohlcv) > N:
+        df = pd.DataFrame(binance_ohlcv, columns=['t','o','h','l','c','v'])
+        source = "Binance"
+        success = ["binance"]
+        fails = []
+    else:
+        # fallback 到其他交易所，找第一个成功的
+        other_tasks = [fetch_ohlcv(ex, symbol, timeframe, limit) for name, ex in exchanges.items() if name != 'binance']
+        other_results = await asyncio.gather(*other_tasks)
+        
+        df = None
+        source = "无数据"
+        success = []
+        fails = ["binance (优先失败)"]
+        
+        for (name, ex), (ohlcv, err) in zip([n for n in exchanges if n != 'binance'], other_results):
+            if ohlcv and len(ohlcv) > N:
+                df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+                source = name.capitalize()
+                success = [name]
+                fails = ["binance"] + [n for n in exchanges if n != name and n != 'binance']
+                break
+            else:
+                fails.append(name)
+
+    if df is None:
+        return None, success, fails, source
+    
+    return df, success, fails, source
 
 placeholder = st.empty()
-alert_container = st.empty()
 
-async def fetch_ohlcv_async(ex, symbol, timeframe, limit, ex_name):
-    try:
-        ohlcv = await ex.fetch_ohlcv(symbol, timeframe, limit=limit)
-        return ohlcv, None
-    except Exception as e:
-        return None, str(e)  # Return error message
+async def main():
+    while True:
+        data_rows = []
+        for symbol in symbols:
+            df, success, fails, source = await process_symbol(symbol, timeframe)
+            status = f"源:{source} | ✅{len(success)} ❌{len(fails)}"
+            if 'binance' in fails:
+                status += " (Binance超时/失败)"
+            
+            if df is None or len(df) < 5:
+                data_rows.append([symbol, "-", "-", "-", "-", "", "", status])
+                continue
+                
+            df[['c','o','v']] = df[['c','o','v']].apply(pd.to_numeric, errors='coerce')
+            curr_c, prev_c = df['c'].iloc[-1], df['c'].iloc[-2]
+            curr_v = df['v'].iloc[-1]
+            # 用最近20根（不含当前）做平均，更稳
+            avg_v = df['v'].iloc[-21:-1].mean() if len(df) >= 21 else df['v'].iloc[:-1].mean()
+            vol_ratio = curr_v / avg_v if avg_v > 0 else 0
+            change = (curr_c - prev_c) / prev_c * 100 if prev_c != 0 else 0
 
-async def process_symbol(symbol, exchanges, timeframe, N_for_avg):
-    agg_df = None
-    successful_ex = []
-    failed_ex = []
-    tasks = [fetch_ohlcv_async(ex, symbol, timeframe, N_for_avg + 10, ex_name) for ex_name, ex in exchanges.items()]
-    results = await asyncio.gather(*tasks)
+            sig1 = (curr_c > df['o'].iloc[-1]) and (vol_ratio > vol_multiplier)
+            sig2 = (vol_ratio > 1.2) and (change > 0.5)
+            
+            sig_list = [str(i) for i, s in enumerate([sig1, sig2], 1) if s]
+            signal_str = ",".join(sig_list)
+            alert = "⚠️" if sig_list else ""
+            
+            data_rows.append([
+                symbol, f"{curr_c:.4f}", f"{change:+.2f}%", f"{curr_v:,.0f}", 
+                f"{vol_ratio:.2f}x", signal_str, alert, status
+            ])
 
-    for ex_name, (ohlcv, error) in zip(exchanges.keys(), results):
-        if ohlcv and len(ohlcv) > 0:
-            df_ex = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            successful_ex.append(ex_name)
-            if agg_df is None:
-                agg_df = df_ex
-            else:
-                agg_df['volume'] += df_ex['volume']
-        else:
-            error_msg = f":{error}" if error else ""
-            failed_ex.append(f"{ex_name}{error_msg}")
+        if data_rows:
+            df_final = pd.DataFrame(data_rows, columns=["交易对","现价","涨幅(1根)","成交量","放量比","信号","警报","状态"])
+            
+            # 安全转 float 排序
+            df_final['放量比_num'] = pd.to_numeric(df_final['放量比'].str.replace('x', ''), errors='coerce').fillna(0)
+            df_final = df_final.sort_values('放量比_num', ascending=False).drop(columns=['放量比_num'])
 
-    return agg_df, successful_ex, failed_ex
+            # 样式：信号行浅红背景
+            def style_rows(row):
+                if row["警报"] == "⚠️":
+                    return ['background-color: rgba(255, 75, 75, 0.12); color: #FF4B4B; font-weight: bold;'] * len(row)
+                return [''] * len(row)
 
-while True:
-    data_rows = []
-    new_alerts = []
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+            with placeholder.container():
+                st.write(f"⏱️ 更新时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | 当前节点: {binance_node} | 刷新间隔: {refresh_sec}s")
+                st.dataframe(
+                    df_final.style.apply(style_rows, axis=1),
+                    use_container_width=True,
+                    height=800
+                )
+        
+        await asyncio.sleep(refresh_sec)
 
-    for symbol in symbols:
-        agg_df, successful_ex, failed_ex = loop.run_until_complete(process_symbol(symbol, exchanges, timeframe, N_for_avg))
-
-        fetch_status = f"成功: {', '.join(successful_ex)} | 失败: {', '.join(failed_ex) if failed_ex else '无'}"
-
-        if not successful_ex or agg_df is None or len(agg_df) < N_for_avg + 5:
-            data_rows.append([symbol, "历史不足/空", "", "", "", "", "", fetch_status])
-            continue
-
-        current_close = agg_df['close'].iloc[-1]
-        current_open = agg_df['open'].iloc[-1]
-        current_high = agg_df['high'].iloc[-1]
-        current_low = agg_df['low'].iloc[-1]
-        current_vol = agg_df['volume'].iloc[-1]
-        prev_close = agg_df['close'].iloc[-2]
-
-        if np.isnan(current_vol) or not np.isfinite(current_vol):
-            current_vol = 0.0
-
-        current_close = float(current_close)
-        current_open = float(current_open)
-        current_high = float(current_high)
-        current_low = float(current_low)
-        current_vol = float(current_vol)
-        prev_close = float(prev_close)
-
-        if current_vol <= 0:
-            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", "", fetch_status])
-            continue
-
-        avg_vol = agg_df['volume'].iloc[:-1].mean()
-        if np.isnan(avg_vol) or avg_vol <= 0:
-            vol_ratio = 0.0
-        else:
-            vol_ratio = current_vol / avg_vol
-
-        price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
-
-        signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier_adjusted) and (vol_ratio > 1.0)
-        signal2 = use_method2 and (vol_ratio > 1.0) and (((price_change > min_change_pct) and (vol_ratio > vol_multiplier_adjusted)) or ((current_high - current_close) / (current_high - current_low + 1e-8) < 0.3))
-        signal3 = False
-        if use_method3 and len(agg_df) >= 21 and vol_ratio > 1.0:
-            obv = (np.sign(agg_df['close'].diff()) * agg_df['volume']).fillna(0).cumsum()
-            obv_ma = obv.rolling(20).mean().iloc[-1]
-            current_obv = obv.iloc[-1]
-            if not np.isnan(obv_ma):
-                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
-
-        has_signal = signal1 or signal2 or signal3
-        signals_str = []
-        if signal1: signals_str.append("1")
-        if signal2: signals_str.append("2")
-        if signal3: signals_str.append("3")
-        signals_display = ", ".join(signals_str) if signals_str else ""
-
-        row = [
-            symbol,
-            f"{current_close:.2f}",
-            f"{price_change:+.2f}%",
-            f"{current_vol:,.2f}",
-            f"{vol_ratio:.2f}x",
-            signals_display,
-            "⚠️" if has_signal else "",
-            fetch_status
-        ]
-        data_rows.append(row)
-
-        key = f"{symbol}_{timeframe}"
-        if has_signal and key not in st.session_state.alerted:
-            alert_msg = f"【{symbol} {timeframe}】聚合吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
-            new_alerts.append(alert_msg)
-            st.session_state.alerted.add(key)
-
-            # Audio alert (browser may block; fallback to Streamlit error)
-            st.components.v1.html(
-                """
-                <audio autoplay>
-                    <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
-                </audio>
-                <script>
-                    var audio = document.querySelector('audio');
-                    audio.play().catch(function(error) {
-                        console.log("Autoplay blocked: " + error);
-                    });
-                </script>
-                """,
-                height=0
-            )
-
-    columns = ["交易对", "当前价", "涨幅", "聚合成交量", "放量倍数", "触发方法", "信号", "成功/失败交易所"]
-    df_display = pd.DataFrame(data_rows, columns=columns)
-    # Sort by vol_ratio descending for better visibility (handle non-numeric safely)
-    df_display['放量倍数数'] = pd.to_numeric(df_display['放量倍数'].str.rstrip('x'), errors='coerce').fillna(0)
-    df_display = df_display.sort_values(by='放量倍数数', ascending=False).drop(columns='放量倍数数')
-
-    def highlight(row):
-        return ['background-color: #ffcccc' if row["信号"] == "⚠️" else ''] * len(row)
-
-    styled = df_display.style.apply(highlight, axis=1)
-
-    with placeholder.container():
-        st.subheader(f"当前监控（OKX+Gate+Bitget+Binance+Huobi+Bybit聚合，周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
-        st.dataframe(styled, use_container_width=True, height=min(600, len(df_display) * 35 + 50))
-
-    if new_alerts:
-        for msg in new_alerts:
-            st.error(msg)
-
-    # Clean up async loop
-    loop.close()
-    time.sleep(refresh_sec)
-    st.rerun()
+if __name__ == "__main__":
+    asyncio.run(main())

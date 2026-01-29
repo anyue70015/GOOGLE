@@ -4,6 +4,10 @@ import pandas as pd
 import numpy as np
 import asyncio
 import time
+import nest_asyncio
+
+# 关键：允许 Streamlit 环境下嵌套 asyncio 运行
+nest_asyncio.apply()
 
 # --- 页面配置 ---
 st.set_page_config(page_title="2026量化神兵-直连优化版", layout="wide")
@@ -36,7 +40,7 @@ vol_multiplier = st.slider("放量阈值 (x)", 1.0, 5.0, 2.5)
 
 # --- 交易所实例化 ---
 exchanges = {}
-ex_list = ['binance', 'okx', 'gate', 'bitget', 'bybit']  # huobi → htx 已弃用，换 bybit 更活跃
+ex_list = ['binance', 'okx', 'gate', 'bitget', 'bybit']  # 去 huobi，用 bybit 更活跃
 
 for name in ex_list:
     cfg = {
@@ -50,7 +54,7 @@ for name in ex_list:
     ex_class = getattr(ccxt_async, name)
     exchanges[name] = ex_class(cfg)
 
-# Binance 实例单独提出来优先用
+# Binance 单独提出来优先用
 binance_ex = exchanges['binance']
 
 # --- 数据抓取 ---
@@ -68,27 +72,32 @@ async def process_symbol(symbol, timeframe):
     # 优先尝试 Binance
     binance_ohlcv, binance_err = await fetch_ohlcv(binance_ex, symbol, timeframe, limit)
     
-    if binance_ohlcv and len(binance_ohlcv) > N:
+    if binance_ohlcv and len(binance_ohlcv) >= N:
         df = pd.DataFrame(binance_ohlcv, columns=['t','o','h','l','c','v'])
         source = "Binance"
         success = ["binance"]
         fails = []
     else:
-        # fallback 到其他交易所，找第一个成功的
-        other_tasks = [fetch_ohlcv(ex, symbol, timeframe, limit) for name, ex in exchanges.items() if name != 'binance']
-        other_results = await asyncio.gather(*other_tasks)
+        # fallback 到其他交易所
+        fallback_names = [name for name in exchanges if name != 'binance']
+        other_tasks = [fetch_ohlcv(exchanges[name], symbol, timeframe, limit) for name in fallback_names]
+        other_results = await asyncio.gather(*other_tasks, return_exceptions=True)
         
         df = None
         source = "无数据"
         success = []
         fails = ["binance (优先失败)"]
         
-        for (name, ex), (ohlcv, err) in zip([n for n in exchanges if n != 'binance'], other_results):
-            if ohlcv and len(ohlcv) > N:
+        for name, result in zip(fallback_names, other_results):
+            if isinstance(result, Exception):
+                fails.append(f"{name} (异常: {str(result)})")
+                continue
+            ohlcv, err = result
+            if ohlcv and len(ohlcv) >= N:
                 df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
                 source = name.capitalize()
                 success = [name]
-                fails = ["binance"] + [n for n in exchanges if n != name and n != 'binance']
+                fails = ["binance"] + [n for n in fallback_names if n != name]
                 break
             else:
                 fails.append(name)
@@ -100,13 +109,13 @@ async def process_symbol(symbol, timeframe):
 
 placeholder = st.empty()
 
-async def main():
+async def main_loop():
     while True:
         data_rows = []
         for symbol in symbols:
             df, success, fails, source = await process_symbol(symbol, timeframe)
             status = f"源:{source} | ✅{len(success)} ❌{len(fails)}"
-            if 'binance' in fails:
+            if 'binance' in fails or 'binance (优先失败)' in fails:
                 status += " (Binance超时/失败)"
             
             if df is None or len(df) < 5:
@@ -114,10 +123,12 @@ async def main():
                 continue
                 
             df[['c','o','v']] = df[['c','o','v']].apply(pd.to_numeric, errors='coerce')
-            curr_c, prev_c = df['c'].iloc[-1], df['c'].iloc[-2]
+            curr_c = df['c'].iloc[-1]
+            prev_c = df['c'].iloc[-2] if len(df) > 1 else curr_c
             curr_v = df['v'].iloc[-1]
-            # 用最近20根（不含当前）做平均，更稳
-            avg_v = df['v'].iloc[-21:-1].mean() if len(df) >= 21 else df['v'].iloc[:-1].mean()
+            # 用最近20根（不含当前）做平均
+            avg_v_slice = df['v'].iloc[-21:-1]
+            avg_v = avg_v_slice.mean() if not avg_v_slice.empty else 1.0
             vol_ratio = curr_v / avg_v if avg_v > 0 else 0
             change = (curr_c - prev_c) / prev_c * 100 if prev_c != 0 else 0
 
@@ -136,18 +147,18 @@ async def main():
         if data_rows:
             df_final = pd.DataFrame(data_rows, columns=["交易对","现价","涨幅(1根)","成交量","放量比","信号","警报","状态"])
             
-            # 安全转 float 排序
+            # 安全排序
             df_final['放量比_num'] = pd.to_numeric(df_final['放量比'].str.replace('x', ''), errors='coerce').fillna(0)
             df_final = df_final.sort_values('放量比_num', ascending=False).drop(columns=['放量比_num'])
 
-            # 样式：信号行浅红背景
+            # 样式
             def style_rows(row):
                 if row["警报"] == "⚠️":
                     return ['background-color: rgba(255, 75, 75, 0.12); color: #FF4B4B; font-weight: bold;'] * len(row)
                 return [''] * len(row)
 
             with placeholder.container():
-                st.write(f"⏱️ 更新时间: {time.strftime('%Y-%m-%d %H:%M:%S')} | 当前节点: {binance_node} | 刷新间隔: {refresh_sec}s")
+                st.write(f"⏱️ 更新: {time.strftime('%Y-%m-%d %H:%M:%S')} | 节点: {binance_node} | 间隔: {refresh_sec}s")
                 st.dataframe(
                     df_final.style.apply(style_rows, axis=1),
                     use_container_width=True,
@@ -156,5 +167,6 @@ async def main():
         
         await asyncio.sleep(refresh_sec)
 
+# --- 运行入口 ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_loop())

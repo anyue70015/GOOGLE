@@ -13,7 +13,6 @@ if uploaded:
     content = uploaded.read().decode("utf-8")
     coins = [line.strip().upper() for line in content.splitlines() if line.strip()]
     coins = list(dict.fromkeys(coins))
-    # 自动补 -USD
     coins = [c if c.endswith('-USD') else f"{c}-USD" for c in coins]
     st.success(f"已加载 {len(coins)} 个币种")
     st.write("监控列表：", ", ".join(coins[:10]) + " ..." if len(coins) > 10 else ", ".join(coins))
@@ -36,11 +35,9 @@ use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
 use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
 use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
-# 周期参数
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[interval]
 period_map = {"1m": "7d", "5m": "7d", "15m": "1mo", "1h": "1mo"}
 
-# 状态
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
@@ -52,84 +49,89 @@ while True:
     new_alerts = []
 
     for coin in coins:
-        try:
-            period = period_map[interval]
-            df = yf.download(coin, period=period, interval=interval, progress=False)
-            if df.empty or len(df) < N_for_avg + 5:
-                data_rows.append([coin, "历史不足/空", "", "", "", "", f"根数={len(df)}"])
-                continue
+        df = None
+        for attempt in range(2):  # 重试一次
+            try:
+                period = period_map[interval]
+                df = yf.download(coin, period=period, interval=interval, progress=False)
+                if not df.empty and len(df) >= N_for_avg + 5:
+                    break
+                time.sleep(1)  # 重试前等1秒
+            except:
+                time.sleep(1)
 
-            df = df.tail(N_for_avg + 10)
+        if df is None or df.empty or len(df) < N_for_avg + 5:
+            data_rows.append([coin, "历史不足/空", "", "", "", "", f"根数={len(df) if df is not None else 'None'}"])
+            continue
 
-            current_close = float(df['Close'].iloc[-1])
-            current_open = float(df['Open'].iloc[-1])
-            current_high = float(df['High'].iloc[-1])
-            current_low = float(df['Low'].iloc[-1])
-            current_vol = float(df['Volume'].iloc[-1])
+        df = df.tail(N_for_avg + 10)
 
-            prev_close = float(df['Close'].iloc[-2])
+        current_close = float(df['Close'].iloc[-1])
+        current_open = float(df['Open'].iloc[-1])
+        current_high = float(df['High'].iloc[-1])
+        current_low = float(df['Low'].iloc[-1])
+        current_vol = float(df['Volume'].iloc[-1])
 
-            if current_vol <= 0:
-                data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", f"根数={len(df)}"])
-                continue
+        prev_close = float(df['Close'].iloc[-2])
 
-            avg_vol = float(df['Volume'].iloc[:-1].mean())
-            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
+        if current_vol <= 0:
+            data_rows.append([coin, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", f"根数={len(df)}"])
+            continue
 
-            price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
+        avg_vol = float(df['Volume'].iloc[:-1].mean())
+        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
 
-            signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier) and (vol_ratio > 1.0)
-            signal2 = use_method2 and (vol_ratio > 1.0) and (((price_change > min_change_pct) and (vol_ratio > vol_multiplier)) or ((current_high - current_close) / (current_high - current_low + 1e-8) < 0.3))
-            signal3 = False
-            if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
-                obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
-                obv_ma = float(obv.rolling(20).mean().iloc[-1])
-                current_obv = float(obv.iloc[-1])
-                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
+        price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
-            has_signal = signal1 or signal2 or signal3
+        signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier) and (vol_ratio > 1.0)
+        signal2 = use_method2 and (vol_ratio > 1.0) and (((price_change > min_change_pct) and (vol_ratio > vol_multiplier)) or ((current_high - current_close) / (current_high - current_low + 1e-8) < 0.3))
+        signal3 = False
+        if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
+            obv = (np.sign(df['Close'].diff()) * df['Volume']).fillna(0).cumsum()
+            obv_ma = float(obv.rolling(20).mean().iloc[-1])
+            current_obv = float(obv.iloc[-1])
+            signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
 
-            signals_str = []
-            if signal1: signals_str.append("1")
-            if signal2: signals_str.append("2")
-            if signal3: signals_str.append("3")
-            signals_display = ", ".join(signals_str) if signals_str else ""
+        has_signal = signal1 or signal2 or signal3
 
-            row = [
-                coin,
-                f"{current_close:.2f}",
-                f"{price_change:+.2f}%",
-                f"{int(current_vol):,}",
-                f"{vol_ratio:.2f}x",
-                signals_display,
-                "⚠️" if has_signal else ""
-            ]
-            data_rows.append(row)
+        signals_str = []
+        if signal1: signals_str.append("1")
+        if signal2: signals_str.append("2")
+        if signal3: signals_str.append("3")
+        signals_display = ", ".join(signals_str) if signals_str else ""
 
-            key = f"{coin}_{interval}"
-            if has_signal and key not in st.session_state.alerted:
-                alert_msg = f"【{coin} {interval}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
-                new_alerts.append(alert_msg)
-                st.session_state.alerted.add(key)
+        row = [
+            coin,
+            f"{current_close:.2f}",
+            f"{price_change:+.2f}%",
+            f"{int(current_vol):,}",
+            f"{vol_ratio:.2f}x",
+            signals_display,
+            "⚠️" if has_signal else ""
+        ]
+        data_rows.append(row)
 
-                st.components.v1.html(
-                    """
-                    <audio autoplay>
-                        <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
-                    </audio>
-                    <script>
-                        var audio = document.querySelector('audio');
-                        audio.play().catch(function(error) {
-                            console.log("Autoplay blocked: " + error);
-                            alert("请点击页面允许声音");
-                        });
-                    </script>
-                    """,
-                    height=0
-                )
+        key = f"{coin}_{interval}"
+        if has_signal and key not in st.session_state.alerted:
+            alert_msg = f"【{coin} {interval}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
+            new_alerts.append(alert_msg)
+            st.session_state.alerted.add(key)
 
-        except Exception as e:
-            data_rows.append([coin, "错误", str(e)[:40], "", "", "", ""])
+            st.components.v1.html(
+                """
+                <audio autoplay>
+                    <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
+                </audio>
+                <script>
+                    var audio = document.querySelector('audio');
+                    audio.play().catch(function(error) {
+                        console.log("Autoplay blocked: " + error);
+                        alert("请点击页面允许声音");
+                    });
+                </script>
+                """,
+                height=0
+            )
 
     columns = ["币种", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
     df_display = pd.DataFrame(data_rows, columns=columns)

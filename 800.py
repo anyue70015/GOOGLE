@@ -11,7 +11,7 @@ nest_asyncio.apply()
 st.set_page_config(page_title="2026量化神兵-WebSocket版", layout="wide")
 
 st.title("🚀 加密货币聚合扫描器 (WebSocket实时版 - 防超时)")
-st.markdown("使用Binance WebSocket订阅kline推送。点击下方按钮启动订阅（避免启动时loop冲突）。")
+st.markdown("点击'启动 WebSocket 订阅'后等待数据推送。如果仍失败，尝试本地跑或加代理。")
 
 # --- 币种列表 ---
 uploaded = st.file_uploader("上传币种列表 (.txt)", type="txt")
@@ -25,35 +25,31 @@ else:
     st.stop()
 
 if len(symbols) > 20:
-    st.warning("建议先用少量交易对（<20）测试WS稳定性，多币种可能连接压力大。")
+    st.warning("建议先用 <20 个交易对测试，太多会增加 WS 连接压力。")
 
 # --- 参数 ---
 timeframe = st.selectbox("周期", ["1m", "5m", "15m", "1h"], index=1)
 refresh_sec = st.slider("刷新间隔(秒)", 5, 120, 30)
 vol_multiplier = st.slider("放量阈值 x", 1.0, 5.0, 2.5)
 
-# --- WS 订阅管理 ---
+# --- WS 管理 ---
 @st.cache_resource
 def get_exchange():
     ex = ccxt_pro.binance({
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'},
-        # 如果V2RayN socks5代理：'proxies': {'https': 'socks5://127.0.0.1:10808'},
+        # 加代理示例（V2RayN socks5）：'proxies': {'https': 'socks5://127.0.0.1:10808'},
     })
     return ex
 
 exchange = get_exchange()
 
-candle_cache = {}  # symbol -> df
+candle_cache = {}
 
 N_dict = {"1m": 40, "5m": 20, "15m": 12, "1h": 8}
 
 async def subscribe_and_update():
     global candle_cache
-    ws_symbols = [s.lower().replace('/', '') for s in symbols]
-    streams = [f"{sym}@kline_{timeframe}" for sym in ws_symbols]
-    # 如果太多symbols，可分批或用 combined stream，但这里简单循环
-
     while True:
         try:
             for sym in symbols:
@@ -80,10 +76,10 @@ async def subscribe_and_update():
                     await asyncio.sleep(5)
             await asyncio.sleep(1)
         except Exception as e:
-            st.error(f"WS断开: {e}，10秒后重连...")
+            st.error(f"WS 断开: {e}，10秒后重连...")
             await asyncio.sleep(10)
 
-# 启动按钮 + session_state 控制
+# 按钮启动控制
 if 'ws_started' not in st.session_state:
     st.session_state.ws_started = False
     st.session_state.ws_task = None
@@ -91,14 +87,17 @@ if 'ws_started' not in st.session_state:
 if st.button("启动 WebSocket 订阅（只点一次）"):
     if not st.session_state.ws_started:
         try:
-            loop = asyncio.get_running_loop()
+            # 显式处理 no running loop：新建 loop 并设置
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             st.session_state.ws_task = loop.create_task(subscribe_and_update())
             st.session_state.ws_started = True
-            st.success("WebSocket 订阅已启动！后台实时更新中...")
+            st.success("WebSocket 订阅启动成功！正在后台接收推送...（初次可能需几秒补历史数据）")
+            st.info("如果无数据更新，检查控制台/日志，或加代理重试。")
         except Exception as e:
-            st.error(f"启动失败: {e}\n请刷新页面重试，或检查nest-asyncio是否生效。")
+            st.error(f"启动失败（新建loop也异常）: {str(e)}\n建议：\n1. 刷新页面重试\n2. 本地跑测试\n3. 加 V2RayN 代理到 ccxt 配置")
     else:
-        st.info("订阅已在运行中。")
+        st.info("订阅已在运行。")
 
 placeholder = st.empty()
 
@@ -107,7 +106,7 @@ def compute_signals():
     for symbol in symbols:
         df = candle_cache.get(symbol)
         if df is None or len(df) < 5:
-            data_rows.append([symbol, "-", "-", "-", "-", "", "", "无数据 (等待WS推送)"])
+            data_rows.append([symbol, "-", "-", "-", "-", "", "", "无数据 (等待WS)"])
             continue
 
         df[['c','o','v']] = df[['c','o','v']].apply(pd.to_numeric, errors='coerce')
@@ -145,7 +144,7 @@ def compute_signals():
             st.write(f"⏱️ 更新: {time.strftime('%Y-%m-%d %H:%M:%S EST')} | WS模式 | 间隔: {refresh_sec}s")
             st.dataframe(df_final.style.apply(style_rows, axis=1), use_container_width=True, height=800)
 
-# 主循环
+# 主循环（定时刷新 UI）
 async def main_loop():
     while True:
         compute_signals()

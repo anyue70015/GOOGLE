@@ -7,61 +7,70 @@ from concurrent.futures import ThreadPoolExecutor
 # ==========================================
 # 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="2026 稳定版资金监控", layout="wide")
+st.set_page_config(page_title="2026 全网大单监控", layout="wide")
 
+# 监控币种
 SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP"]
+# 交易所映射
 EXCHANGE_IDS = {'OKX': 'okx', 'Gate': 'gateio', 'Huobi': 'htx', 'Bitget': 'bitget'}
+# 时间周期
 TFS = ['1m', '5m', '15m', '1h']
 
 # ==========================================
-# 2. 核心抓取逻辑 (增加稳定性)
+# 2. 核心抓取逻辑
 # ==========================================
-def fetch_symbol_data(symbol, big_val):
+def fetch_symbol_data(symbol, big_val_threshold):
     pair = f"{symbol}/USDT"
-    res = {"币种": symbol}
+    # 初始化数据行，默认显示 N/A 防止渲染失败
+    res = {"币种": symbol, "最新价": "N/A"}
+    for tf in TFS: res[f"{tf}涨跌"] = "0.00%"
+    res.update({'OKX': '·', 'Gate': '·', 'Huobi': '·', 'Bitget': '·', '净流入(万)': 0.0, '共振': '', 'raw_sort': 0})
+    
     total_net_flow = 0
     active_ex_count = 0
     
-    # --- 1. 抓取涨跌幅 (OKX优先，Gate备选) ---
-    changes = {f"{tf}涨跌": "0.00%" for tf in TFS}
-    changes['raw_sort'] = 0
-    
-    found_data = False
+    # --- A. 获取价格与多周期涨幅 (OKX优先 -> Gate备份) ---
+    found_base_data = False
     for ex_id in ['OKX', 'Gate']:
-        if found_data: break
+        if found_base_data: break
         try:
             ex_class = getattr(ccxt, EXCHANGE_IDS[ex_id])
-            ex = ex_class({'timeout': 7000, 'enableRateLimit': True})
+            ex = ex_class({'timeout': 8000, 'enableRateLimit': True})
+            
+            # 1. 获取最新价
+            ticker = ex.fetch_ticker(pair)
+            res["最新价"] = f"{ticker['last']}"
+            
+            # 2. 获取各周期 K 线
             for tf in TFS:
                 ohlcv = ex.fetch_ohlcv(pair, tf, limit=2)
                 if len(ohlcv) >= 2:
                     ch = ((ohlcv[-1][4] - ohlcv[-1][1]) / ohlcv[-1][1]) * 100
-                    changes[f"{tf}涨跌"] = f"{ch:+.2f}%"
-                    if tf == '1m': changes['raw_sort'] = ch
-                    found_data = True
+                    res[f"{tf}涨跌"] = f"{ch:+.2f}%"
+                    if tf == '1m': res['raw_sort'] = ch
+            found_base_data = True
         except:
             continue
-    res.update(changes)
 
-    # --- 2. 扫描大单 (循环抓取防止瞬间并发过高) ---
+    # --- B. 扫描各交易所大单成交额 (显示"xx万") ---
     for name, eid in EXCHANGE_IDS.items():
         try:
             ex_class = getattr(ccxt, eid)
-            ex = ex_class({'timeout': 5000, 'enableRateLimit': True})
-            trades = ex.fetch_trades(pair, limit=20) # 进一步缩小深度提速
+            ex = ex_class({'timeout': 6000, 'enableRateLimit': True})
+            trades = ex.fetch_trades(pair, limit=25)
             
-            icons = []
+            # 统计主动买入的大单总额
+            big_buy_sum = sum((t['price'] * t['amount']) for t in trades 
+                              if t['side'] == 'buy' and (t['price'] * t['amount']) >= big_val_threshold)
+            
+            # 计算全量净流入 (买入 - 卖出)
             for t in trades:
                 val = (t['price'] or 0) * (t['amount'] or 0)
-                side = 1 if t['side'] == 'buy' else -1
-                total_net_flow += val * side
-                if t['side'] == 'buy':
-                    if val >= 500000: icons.append("💣")
-                    elif val >= 100000: icons.append("🧨")
-                    elif val >= big_val: icons.append("🔥")
-            
-            if icons: active_ex_count += 1
-            res[name] = "".join(dict.fromkeys(icons)) if icons else "·" # 去重显示
+                total_net_flow += val if t['side'] == 'buy' else -val
+
+            if big_buy_sum > 0:
+                active_ex_count += 1
+                res[name] = f"{big_buy_sum/10000:.1f}万"
         except:
             res[name] = "⚠️"
 
@@ -72,58 +81,53 @@ def fetch_symbol_data(symbol, big_val):
 # ==========================================
 # 3. UI 界面与主循环
 # ==========================================
-st.title("🏹 全网资金流向监控 (稳定版)")
+st.title("🏹 全网资金流向指挥部 (稳定版)")
 
 with st.sidebar:
-    st.header("⚙️ 监控配置")
-    big_val = st.number_input("大单阈值 (USDT)", value=20000, step=5000)
-    refresh_rate = st.slider("扫描间隔 (秒)", 5, 60, 10)
+    st.header("⚙️ 监控设置")
+    big_val = st.number_input("大单定义 (USDT)", value=20000, step=5000)
+    # 默认值改为 40 秒，确保直连 IP 不被封锁
+    refresh_rate = st.slider("扫描间隔 (秒)", 5, 120, 40)
     st.divider()
-    st.write("💡 **绿涨红跌** (国际标准)")
-    st.write("🚨 3家及以上所同时买入")
+    st.write("📈 **绿涨红跌** (国际标准)")
+    st.write("🚨 **全网共振**：3家以上所同时有大买单")
 
 placeholder = st.empty()
 
-# 为了防止 Streamlit 脚本卡死，使用 try-except 包裹主循环
-try:
-    while True:
-        data_list = []
-        # 使用 ThreadPoolExecutor，但 worker 数量不宜过大，防止 IP 被封
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_sym = {executor.submit(fetch_symbol_data, sym, big_val): sym for sym in SYMBOLS}
-            for future in future_to_sym:
-                try:
-                    result = future.result()
-                    if result: data_list.append(result)
-                except Exception as e:
-                    pass
+# 主运行循环
+while True:
+    data_list = []
+    # 限制并发数，保护直连 IP 稳定性
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(fetch_symbol_data, sym, big_val) for sym in SYMBOLS]
+        for f in futures:
+            try:
+                result = f.result()
+                if result: data_list.append(result)
+            except:
+                pass
 
-        if data_list:
-            df = pd.DataFrame(data_list).sort_values("raw_sort", ascending=False).drop(columns="raw_sort")
-            
-            with placeholder.container():
-                st.write(f"🔄 上次更新: {time.strftime('%H:%M:%S')} | 币种数量: {len(df)}")
-                
-                # 样式定制
-                def style_df(row):
-                    if row['共振'] == '🚨':
-                        return ['background-color: #f0f7ff; border: 1px solid #007bff'] * len(row)
-                    return [''] * len(row)
-
-                def color_logic(val):
-                    if not isinstance(val, str): return ''
-                    if '+' in val: return 'color: #28a745; font-weight: bold' # 绿涨
-                    if '-' in val: return 'color: #dc3545; font-weight: bold' # 红跌
-                    return 'color: #212529'
-
-                st.dataframe(
-                    df.style.apply(style_df, axis=1)
-                            .applymap(color_logic, subset=[f"{tf}涨跌" for tf in TFS]),
-                    use_container_width=True, height=600
-                )
+    if data_list:
+        df = pd.DataFrame(data_list)
+        if 'raw_sort' in df.columns:
+            df = df.sort_values("raw_sort", ascending=False).drop(columns="raw_sort")
         
-        # 强制休眠，给 API 喘息时间
-        time.sleep(refresh_rate)
+        with placeholder.container():
+            st.write(f"🔄 更新于: {time.strftime('%H:%M:%S')} | 下次更新预计在 {refresh_rate}秒 后")
+            
+            # 颜色渲染逻辑
+            def color_logic(val):
+                if not isinstance(val, str): return ''
+                if '+' in val: return 'color: #28a745; font-weight: bold' # 绿涨
+                if '-' in val: return 'color: #dc3545; font-weight: bold' # 红跌
+                return 'color: #212529'
 
-except Exception as global_e:
-    st.error(f"程序发生意外中断，请刷新页面重试。错误信息: {global_e}")
+            # 表格样式应用
+            st.dataframe(
+                df.style.applymap(color_logic, subset=[f"{tf}涨跌" for tf in TFS if f"{tf}涨跌" in df.columns])
+                        .set_properties(**{'background-color': '#f8f9fa'}, subset=['OKX', 'Gate', 'Huobi', 'Bitget']),
+                use_container_width=True, height=600
+            )
+    
+    # 强制休眠预设的间隔时间
+    time.sleep(refresh_rate)

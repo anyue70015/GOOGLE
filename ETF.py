@@ -5,7 +5,7 @@ import numpy as np
 import time
 
 st.set_page_config(page_title="多交易所聚合放量扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（OKX + Gate + Bitget + Binance镜像聚合）")
+st.title("加密货币现货实时放量/吃单扫描器（OKX+Gate+Bitget+Binance镜像+Huobi聚合）")
 
 # 上传币种列表
 uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
@@ -43,7 +43,7 @@ vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
-# 创建四个交易所实例
+# 创建五个交易所实例
 exchanges = {
     'okx': ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'gate': ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
@@ -57,7 +57,8 @@ exchanges = {
                 'private': 'https://www.bmwweb.academy/api/v3',
             }
         }
-    })
+    }),
+    'huobi': ccxt.htx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})  # Huobi 现称 HTX
 }
 
 placeholder = st.empty()
@@ -69,17 +70,17 @@ while True:
 
     for symbol in symbols:
         agg_df = None
-        agg_volumes = []
-        successful_ex = []  # 记录成功获取的交易所
+        successful_ex = []  # 成功交易所列表
+        failed_ex = []      # 失败交易所列表
 
         for ex_name, ex in exchanges.items():
             try:
                 ohlcv = ex.fetch_ohlcv(symbol, timeframe, limit=N_for_avg + 10)
                 if not ohlcv:
+                    failed_ex.append(ex_name)
                     continue
 
                 df_ex = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                agg_volumes.append(df_ex['volume'].iloc[-1])
                 successful_ex.append(ex_name)  # 成功记录
 
                 if agg_df is None:
@@ -88,10 +89,10 @@ while True:
                     agg_df['volume'] += df_ex['volume']  # 累加 volume
 
             except Exception:
-                pass  # 失败不记录
+                failed_ex.append(ex_name)  # 失败记录
 
         if not successful_ex or agg_df is None or len(agg_df) < N_for_avg + 5:
-            data_rows.append([symbol, "历史不足/空", "", "", "", "", "成功所: 无"])
+            data_rows.append([symbol, "历史不足/空", "", "", "", "", f"成功: 无 | 失败: {', '.join(failed_ex)}"])
             continue
 
         current_close = float(agg_df['close'].iloc[-1])
@@ -102,8 +103,10 @@ while True:
 
         prev_close = float(agg_df['close'].iloc[-2])
 
+        status = f"成功: {', '.join(successful_ex)} | 失败: {', '.join(failed_ex) if failed_ex else '无'}"
+
         if current_vol <= 0:
-            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", f"成功所: {', '.join(successful_ex)}"])
+            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", status])
             continue
 
         avg_vol = float(agg_df['volume'].iloc[:-1].mean())

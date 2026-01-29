@@ -8,3 +8,4 @@ plotly
 akshare
 baostock
 matplotlib
+nest-asyncio

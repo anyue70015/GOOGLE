@@ -53,16 +53,7 @@ exchanges = {
     'okx': ccxt_async.okx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'gate': ccxt_async.gate({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'bitget': ccxt_async.bitget({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
-    'binance': ccxt_async.binance({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot'},
-        'urls': {
-            'api': {
-                'public': 'https://api.binance.com/api/v3',  # Official URL
-                'private': 'https://api.binance.com/api/v3',
-            }
-        }
-    }),
+    'binance': ccxt_async.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'huobi': ccxt_async.htx({'enableRateLimit': True, 'options': {'defaultType': 'spot'}}),
     'bybit': ccxt_async.bybit({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
 }
@@ -70,20 +61,21 @@ exchanges = {
 placeholder = st.empty()
 alert_container = st.empty()
 
-async def fetch_ohlcv_async(ex, symbol, timeframe, limit):
+async def fetch_ohlcv_async(ex, symbol, timeframe, limit, ex_name):
     try:
-        return await ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+        ohlcv = await ex.fetch_ohlcv(symbol, timeframe, limit=limit)
+        return ohlcv, None
     except Exception as e:
-        return None  # Return None on failure
+        return None, str(e)  # Return error message
 
 async def process_symbol(symbol, exchanges, timeframe, N_for_avg):
     agg_df = None
     successful_ex = []
     failed_ex = []
-    tasks = [fetch_ohlcv_async(ex, symbol, timeframe, N_for_avg + 10) for ex in exchanges.values()]
+    tasks = [fetch_ohlcv_async(ex, symbol, timeframe, N_for_avg + 10, ex_name) for ex_name, ex in exchanges.items()]
     results = await asyncio.gather(*tasks)
 
-    for ex_name, ohlcv in zip(exchanges.keys(), results):
+    for ex_name, (ohlcv, error) in zip(exchanges.keys(), results):
         if ohlcv and len(ohlcv) > 0:
             df_ex = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             successful_ex.append(ex_name)
@@ -92,7 +84,8 @@ async def process_symbol(symbol, exchanges, timeframe, N_for_avg):
             else:
                 agg_df['volume'] += df_ex['volume']
         else:
-            failed_ex.append(ex_name)
+            error_msg = f":{error}" if error else ""
+            failed_ex.append(f"{ex_name}{error_msg}")
 
     return agg_df, successful_ex, failed_ex
 
@@ -111,18 +104,33 @@ while True:
             data_rows.append([symbol, "历史不足/空", "", "", "", "", "", fetch_status])
             continue
 
-        current_close = float(agg_df['close'].iloc[-1])
-        current_open = float(agg_df['open'].iloc[-1])
-        current_high = float(agg_df['high'].iloc[-1])
-        current_low = float(agg_df['low'].iloc[-1])
-        current_vol = float(agg_df['volume'].iloc[-1])
-        prev_close = float(agg_df['close'].iloc[-2])
+        current_close = agg_df['close'].iloc[-1]
+        current_open = agg_df['open'].iloc[-1]
+        current_high = agg_df['high'].iloc[-1]
+        current_low = agg_df['low'].iloc[-1]
+        current_vol = agg_df['volume'].iloc[-1]
+        prev_close = agg_df['close'].iloc[-2]
+
+        if np.isnan(current_vol) or not np.isfinite(current_vol):
+            current_vol = 0.0
+
+        current_close = float(current_close)
+        current_open = float(current_open)
+        current_high = float(current_high)
+        current_low = float(current_low)
+        current_vol = float(current_vol)
+        prev_close = float(prev_close)
+
         if current_vol <= 0:
             data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", "", fetch_status])
             continue
 
-        avg_vol = float(agg_df['volume'].iloc[:-1].mean())
-        vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
+        avg_vol = agg_df['volume'].iloc[:-1].mean()
+        if np.isnan(avg_vol) or avg_vol <= 0:
+            vol_ratio = 0.0
+        else:
+            vol_ratio = current_vol / avg_vol
+
         price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
         signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier_adjusted) and (vol_ratio > 1.0)
@@ -130,9 +138,10 @@ while True:
         signal3 = False
         if use_method3 and len(agg_df) >= 21 and vol_ratio > 1.0:
             obv = (np.sign(agg_df['close'].diff()) * agg_df['volume']).fillna(0).cumsum()
-            obv_ma = float(obv.rolling(20).mean().iloc[-1])
-            current_obv = float(obv.iloc[-1])
-            signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
+            obv_ma = obv.rolling(20).mean().iloc[-1]
+            current_obv = obv.iloc[-1]
+            if not np.isnan(obv_ma):
+                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
 
         has_signal = signal1 or signal2 or signal3
         signals_str = []
@@ -145,7 +154,7 @@ while True:
             symbol,
             f"{current_close:.2f}",
             f"{price_change:+.2f}%",
-            f"{int(current_vol):,}",
+            f"{current_vol:,.2f}",
             f"{vol_ratio:.2f}x",
             signals_display,
             "⚠️" if has_signal else "",

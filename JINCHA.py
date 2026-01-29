@@ -4,7 +4,6 @@ import pandas as pd
 import numpy as np
 import time
 import os
-from playsound import playsound  # 用于本地声音提示
 
 st.set_page_config(page_title="加密货币放量/吃单扫描器", layout="wide")
 st.title("加密货币实时放量/吃单扫描器")
@@ -50,11 +49,6 @@ if 'alerted' not in st.session_state:
 
 if 'last_alert_time' not in st.session_state:
     st.session_state.last_alert_time = 0
-
-# ── 声音文件（需自行准备一个mp3/wav文件，放在脚本同目录） ──
-SOUND_FILE = "alert.mp3"  # 请替换成你自己的声音文件路径
-if not os.path.exists(SOUND_FILE):
-    st.warning(f"声音文件 {SOUND_FILE} 不存在，警示将无声音提示。请放置一个mp3/wav文件")
 
 # ── 主扫描逻辑 ──
 placeholder = st.empty()  # 用于动态更新表格
@@ -130,14 +124,21 @@ while True:
                 new_alerts.append(alert_msg)
                 st.session_state.alerted.add(key)
 
-                # 本地声音提示（只在最近30秒内不重复播放）
-                current_time = time.time()
-                if current_time - st.session_state.last_alert_time > 30:
-                    try:
-                        playsound(SOUND_FILE)
-                    except Exception as e:
-                        st.warning(f"声音播放失败: {e}")
-                    st.session_state.last_alert_time = current_time
+                # 用 JS 播放声音（浏览器自动播放，需用户允许）
+                st.components.v1.html(
+                    """
+                    <audio autoplay>
+                        <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
+                    </audio>
+                    <script>
+                        var audio = document.querySelector('audio');
+                        audio.play().catch(function(error) {
+                            console.log("Autoplay prevented: " + error);
+                        });
+                    </script>
+                    """,
+                    height=0
+                )
 
         except Exception as e:
             data_rows.append([coin, "错误", str(e)[:30], "", "", "", ""])

@@ -70,7 +70,7 @@ while True:
     for symbol in symbols:
         agg_df = None
         agg_volumes = []
-        has_data = False
+        successful_ex = []  # 记录成功获取的交易所
 
         for ex_name, ex in exchanges.items():
             try:
@@ -80,7 +80,7 @@ while True:
 
                 df_ex = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 agg_volumes.append(df_ex['volume'].iloc[-1])
-                has_data = True
+                successful_ex.append(ex_name)  # 成功记录
 
                 if agg_df is None:
                     agg_df = df_ex
@@ -88,10 +88,10 @@ while True:
                     agg_df['volume'] += df_ex['volume']  # 累加 volume
 
             except Exception:
-                pass  # 单个交易所失败，继续下一个
+                pass  # 失败不记录
 
-        if not has_data or agg_df is None or len(agg_df) < N_for_avg + 5:
-            data_rows.append([symbol, "历史不足/空", "", "", "", "", ""])
+        if not successful_ex or agg_df is None or len(agg_df) < N_for_avg + 5:
+            data_rows.append([symbol, "历史不足/空", "", "", "", "", "成功所: 无"])
             continue
 
         current_close = float(agg_df['close'].iloc[-1])
@@ -103,7 +103,7 @@ while True:
         prev_close = float(agg_df['close'].iloc[-2])
 
         if current_vol <= 0:
-            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
+            data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", f"成功所: {', '.join(successful_ex)}"])
             continue
 
         avg_vol = float(agg_df['volume'].iloc[:-1].mean())

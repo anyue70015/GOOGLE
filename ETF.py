@@ -5,9 +5,9 @@ import numpy as np
 import asyncio
 import time
 
-# --- 页面配置 ---
-st.set_page_config(page_title="量化扫描器-清晰版", layout="wide")
-st.title("加密货币聚合扫描器 (视觉增强 & 币安补丁版)")
+# --- 页面视觉优化：清爽背景 ---
+st.set_page_config(page_title="2026量化神兵-直连版", layout="wide")
+st.title("加密货币聚合扫描器 (系统直连/视觉增强版)")
 
 # --- 币种列表处理 ---
 uploaded = st.file_uploader("上传币种列表 (.txt)", type="txt")
@@ -18,73 +18,68 @@ if uploaded:
     symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
     st.success(f"已加载 {len(symbols)} 个交易对")
 else:
-    st.info("💡 请先上传交易对文件")
+    st.info("💡 浏览器能开 API 镜像，本程序就能连通")
     st.stop()
 
-# --- 参数设置区 ---
+# --- 参数设置 ---
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
+    timeframe = st.selectbox("周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    refresh_sec = st.slider("刷新间隔", 5, 60, 20)
+    refresh_sec = st.slider("刷新(秒)", 5, 60, 20)
 with col3:
-    vol_multiplier = st.slider("成交量放大倍数", 1.0, 5.0, 2.5)
+    vol_multiplier = st.slider("放量阈值", 1.0, 5.0, 2.5)
 with col4:
-    min_change_pct = st.slider("方法2最小涨幅(%)", 0.05, 2.0, 0.5)
+    # 增加一个备选镜像切换
+    api_mirror = st.selectbox("币安镜像节点", ["api1", "api2", "api3"], index=2)
 
-# --- 交易所配置 (针对币安连接的终极尝试) ---
-# 如果你的代理端口不是 10809，请在下面修改
-proxy_url = 'http://127.0.0.1:10809' 
-
-ex_config = {
-    'binance': {
-        'urls': {'api': {'public': 'https://api1.binance.com'}},
-        'proxies': {'http': proxy_url, 'https': proxy_url} 
-    },
-    'okx': {}, 'gate': {}, 'bitget': {}, 'huobi': {}, 'bybit': {}
-}
-
+# --- 交易所配置 (直连模式：不指定 proxies 参数) ---
 exchanges = {}
-for name, cfg in ex_config.items():
-    ex_class = getattr(ccxt_async, name if name != 'huobi' else 'htx')
-    exchanges[name] = ex_class({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot'},
-        'timeout': 10000, # 增加到10秒超时
-        **cfg
-    })
+ex_list = ['binance', 'okx', 'gate', 'bitget', 'huobi', 'bybit']
 
-# --- 核心抓取函数 ---
+for name in ex_list:
+    cfg = {
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot', 'adjustForTimeDifference': True},
+        'timeout': 15000,
+        # 注意：这里删除了 proxies 字段，让系统环境自行接管
+    }
+    
+    if name == 'binance':
+        # 动态切换镜像地址
+        cfg['urls'] = {'api': {'public': f'https://{api_mirror}.binance.com'}}
+    
+    ex_class = getattr(ccxt_async, name if name != 'huobi' else 'htx')
+    exchanges[name] = ex_class(cfg)
+
+# --- 核心数据抓取 ---
 async def fetch_ohlcv(ex, symbol, timeframe, limit):
     try:
-        data = await asyncio.wait_for(ex.fetch_ohlcv(symbol, timeframe, limit=limit), timeout=8.0)
+        # 增加超时容错
+        data = await asyncio.wait_for(ex.fetch_ohlcv(symbol, timeframe, limit=limit), timeout=10.0)
         return data, None
     except Exception as e:
         return None, str(e)
 
 async def process_symbol(symbol, timeframe):
-    N = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
-    tasks = [fetch_ohlcv(ex, symbol, timeframe, N + 10) for ex in exchanges.values()]
+    N = {"1m": 40, "5m": 20, "15m": 12, "1h": 8}[timeframe]
+    tasks = [fetch_ohlcv(ex, symbol, timeframe, N + 5) for ex in exchanges.values()]
     results = await asyncio.gather(*tasks)
     
     agg_df = None
-    success_list = []
-    fail_list = []
+    success, fails = [], []
     
     for (name, ex), (ohlcv, err) in zip(exchanges.items(), results):
-        if ohlcv and len(ohlcv) > 5:
+        if ohlcv and len(ohlcv) > 2:
             df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
-            success_list.append(name)
-            if agg_df is None:
-                agg_df = df.copy()
-            else:
-                agg_df['v'] += df['v']
+            success.append(name)
+            if agg_df is None: agg_df = df.copy()
+            else: agg_df['v'] += df['v']
         else:
-            fail_list.append(name)
-            
-    return agg_df, success_list, fail_list
+            fails.append(name)
+    return agg_df, success, fails
 
-# --- 主循环 ---
+# --- 渲染逻辑 ---
 placeholder = st.empty()
 
 async def main():
@@ -92,64 +87,46 @@ async def main():
         data_rows = []
         for symbol in symbols:
             df, success, fails = await process_symbol(symbol, timeframe)
-            
-            # 状态显示优化
-            status_str = f"✅{len(success)} ❌{len(fails)}"
+            status = f"✅{len(success)} ❌{len(fails)}"
             if 'binance' in fails:
-                status_str += " (Binance连不上，请检查10809端口)"
+                status += " (Binance仍受限)"
             
             if df is None or len(df) < 5:
-                data_rows.append([symbol, "无数据", "", "", "", "", "", status_str])
+                data_rows.append([symbol, "-", "-", "-", "-", "", "", status])
                 continue
                 
-            # 数据清洗
-            for col in ['c','o','h','l','v']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            df = df.dropna(subset=['c','v'])
-
+            df[['c','o','v']] = df[['c','o','v']].apply(pd.to_numeric)
             curr_c, prev_c = df['c'].iloc[-1], df['c'].iloc[-2]
             curr_v, avg_v = df['v'].iloc[-1], df['v'].iloc[:-1].tail(15).mean()
             vol_ratio = curr_v / avg_v if avg_v > 0 else 0
-            price_change = (curr_c - prev_c) / prev_c * 100
+            change = (curr_c - prev_c) / prev_c * 100
 
             # 信号算法
             sig1 = (curr_c > df['o'].iloc[-1]) and (vol_ratio > vol_multiplier)
-            sig2 = (vol_ratio > 1.0) and (price_change > min_change_pct)
-            sig3 = False
-            if len(df) >= 20:
-                c_vals = df['c'].values
-                v_vals = df['v'].values
-                if len(c_vals) > 1:
-                    price_diff = np.diff(c_vals)
-                    obv_series = np.cumsum(np.sign(price_diff) * v_vals[1:])
-                    obv_ma = pd.Series(obv_series).rolling(10).mean().iloc[-1]
-                    sig3 = (obv_series[-1] > obv_ma * 1.03) and (price_change > 0)
-
-            sig_list = [str(i) for i, s in enumerate([sig1, sig2, sig3], 1) if s]
-            has_sig = len(sig_list) > 0
+            sig2 = (vol_ratio > 1.2) and (change > 0.5)
             
+            sig_list = [str(i) for i, s in enumerate([sig1, sig2], 1) if s]
             data_rows.append([
-                symbol, f"{curr_c:.4f}", f"{price_change:+.2f}%",
-                f"{curr_v:,.0f}", f"{vol_ratio:.2f}x", 
-                ",".join(sig_list), "⚠️" if has_sig else "", status_str
+                symbol, f"{curr_c}", f"{change:+.2f}%", f"{curr_v:,.0f}", 
+                f"{vol_ratio:.2f}x", ",".join(sig_list), "⚠️" if sig_list else "", status
             ])
 
-        # 渲染表格并应用视觉优化
-        df_final = pd.DataFrame(data_rows, columns=["交易对","现价","涨幅","聚合成交量","放量比","方法","信号","状态"])
-        df_final['v_val'] = pd.to_numeric(df_final['放量比'].str.replace('x',''), errors='coerce').fillna(0)
-        df_final = df_final.sort_values('v_val', ascending=False).drop(columns=['v_val'])
+        # 排序与样式
+        df_final = pd.DataFrame(data_rows, columns=["交易对","现价","涨幅","成交量","放量比","方法","信号","状态"])
+        df_final['sort_v'] = pd.to_numeric(df_final['放量比'].str.replace('x',''), errors='coerce').fillna(0)
+        df_final = df_final.sort_values('sort_v', ascending=False).drop(columns=['sort_v'])
 
-        # --- 重点：视觉透明度优化 ---
+        # --- 清爽视觉样式 ---
         def style_rows(row):
             if row["信号"] == "⚠️":
-                # 使用带透明度的浅红色，确保文字清晰
-                return ['background-color: rgba(255, 0, 0, 0.2); font-weight: bold; color: white;'] * len(row)
+                # 背景用极浅红色，边框加亮，文字用亮红色加粗
+                return ['background-color: rgba(255, 75, 75, 0.1); border: 1px solid #FF4B4B; color: #FF4B4B; font-weight: bold;'] * len(row)
             return [''] * len(row)
 
         with placeholder.container():
-            st.write(f"⏱️ 更新: {time.strftime('%H:%M:%S')} | 周期: {timeframe}")
-            st.dataframe(df_final.style.apply(style_rows, axis=1), use_container_width=True, height=700)
-
+            st.write(f"实时监控中... (OKX/Gate/Binance/Bitget/Huobi/Bybit)")
+            st.dataframe(df_final.style.apply(style_rows, axis=1), use_container_width=True, height=800)
+        
         await asyncio.sleep(refresh_sec)
 
 if __name__ == "__main__":

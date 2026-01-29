@@ -3,15 +3,11 @@ import requests
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime
 
-st.set_page_config(page_title="加密货币全网聚合放量扫描器", layout="wide")
+st.set_page_config(page_title="加密货币全网聚合扫描器", layout="wide")
 st.title("加密货币实时放量/吃单扫描器（CryptoCompare 全网聚合）")
 
-# ==============================================
-# 上传币种列表（CryptoCompare 格式：BTC、ETH 等大写符号）
-# ==============================================
-st.info("CryptoCompare 使用交易对符号（如 BTC、ETH、SOL）。请在 TXT 中填写符号（大写），如 BTC")
+# 上传币种列表
 uploaded = st.file_uploader("上传币种列表 (.txt，每行一个符号，如 BTC)", type="txt")
 if uploaded:
     content = uploaded.read().decode("utf-8")
@@ -23,27 +19,25 @@ else:
     st.info("请先上传包含符号的txt文件")
     st.stop()
 
-# ==============================================
 # 参数设置
-# ==============================================
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 60, 300, 120, help="CryptoCompare 限速，建议120s+")
+    refresh_sec = st.slider("刷新间隔（秒）", 60, 300, 120)
 with col3:
-    vol_multiplier = st.slider("全网放量倍数阈值", 1.5, 5.0, 2.8, 0.01)
+    vol_multiplier = st.slider("放量倍数阈值", 1.5, 5.0, 2.8, 0.01)
 with col4:
     min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
+with col5:
+    min_abs_vol = st.slider("最小绝对成交量阈值", 100, 10000, 1000, 100, help="低于此值视为无有效成交")
 
 use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
-use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
-use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
+use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势", value=True)
+use_method3 = st.checkbox("方法3：OBV急升", value=True)
 
-# 周期参数（CryptoCompare 支持 1m 到 1d）
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
 
-# 状态管理
 if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
@@ -56,7 +50,6 @@ while True:
 
     for fsym in fsyms:
         try:
-            # CryptoCompare histominute/histohour 接口
             limit = N_for_avg + 20
             url = f"https://min-api.cryptocompare.com/data/v2/histo{'minute' if timeframe in ['1m','5m','15m'] else 'hour'}?fsym={fsym}&tsym=USDT&limit={limit}"
             response = requests.get(url)
@@ -85,8 +78,10 @@ while True:
 
             prev_close = float(df['close'].iloc[-2])
 
-            if current_vol <= 0:
-                data_rows.append([fsym, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
+            status = ""
+            if current_vol <= min_abs_vol:
+                status = "无有效成交"
+                data_rows.append([fsym, f"{current_close:.2f}", "Vol低", f"{int(current_vol):,}", "0.00x", "", status])
                 continue
 
             avg_vol = float(df['volume'].iloc[:-1].mean())
@@ -94,21 +89,8 @@ while True:
 
             price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
-            # 方法1
-            signal1 = False
-            if use_method1:
-                is_bull = current_close > current_open
-                vol_spike = vol_ratio > vol_multiplier
-                signal1 = is_bull and vol_spike and vol_ratio > 1.0
-
-            # 方法2
-            signal2 = False
-            if use_method2 and vol_ratio > 1.0:
-                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
-                vol_spike = vol_ratio > vol_multiplier
-                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
-
-            # 方法3
+            signal1 = use_method1 and (current_close > current_open) and (vol_ratio > vol_multiplier) and (vol_ratio > 1.0)
+            signal2 = use_method2 and (vol_ratio > 1.0) and (((price_change > min_change_pct) and (vol_ratio > vol_multiplier)) or ((current_high - current_close) / (current_high - current_low + 1e-8) < 0.3))
             signal3 = False
             if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
                 obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
@@ -131,7 +113,7 @@ while True:
                 f"{int(current_vol):,}",
                 f"{vol_ratio:.2f}x",
                 signals_display,
-                "⚠️" if has_signal else ""
+                "⚠️" if has_signal else status
             ]
             data_rows.append(row)
 
@@ -160,11 +142,15 @@ while True:
         except Exception as e:
             data_rows.append([fsym, "错误", str(e)[:50], "", "", "", ""])
 
-    columns = ["币种", "当前价 (USDT)", "涨幅", "全网成交量", "放量倍数", "触发方法", "信号"]
+    columns = ["币种", "当前价 (USDT)", "涨幅", "全网成交量", "放量倍数", "触发方法", "信号/状态"]
     df_display = pd.DataFrame(data_rows, columns=columns)
 
     def highlight(row):
-        return ['background-color: #ffcccc' if row["信号"] == "⚠️" else ''] * len(row)
+        if row["信号/状态"] == "⚠️":
+            return ['background-color: #ffcccc'] * len(row)
+        if "无有效成交" in row["信号/状态"]:
+            return ['background-color: #ffffcc'] * len(row)
+        return [''] * len(row)
 
     styled = df_display.style.apply(highlight, axis=1)
 

@@ -8,13 +8,16 @@ st.set_page_config(page_title="加密货币现货放量/吃单扫描器", layout
 st.title("加密货币现货实时放量/吃单扫描器（公共端点）")
 
 # ==============================================
-# 1. 上传币种列表
+# 上传币种列表
 # ==============================================
-uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT)", type="txt")
+uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
 if uploaded:
     content = uploaded.read().decode("utf-8")
     symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
     symbols = list(dict.fromkeys(symbols))
+    
+    # 自动补 /USDT
+    symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
     st.success(f"已加载 {len(symbols)} 个交易对")
     st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
 else:
@@ -22,13 +25,13 @@ else:
     st.stop()
 
 # ==============================================
-# 2. 参数设置
+# 参数设置
 # ==============================================
 col1, col2, col3, col4 = st.columns(4)
 with col1:
     timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+，太短容易限频")
+    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+，避免限频")
 with col3:
     vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
 with col4:
@@ -38,7 +41,7 @@ use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
 use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
 use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
-# 根据周期设置参数
+# 周期参数
 N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
 vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 
@@ -47,17 +50,17 @@ if 'alerted' not in st.session_state:
     st.session_state.alerted = set()
 
 # ==============================================
-# 3. 创建 ccxt 交易所实例（公共端点，无需 key）
+# 创建 ccxt Binance 实例（公共端点）
 # ==============================================
 exchange = ccxt.binance({
-    'enableRateLimit': True,  # 防限频，非常重要
+    'enableRateLimit': True,  # 必须开启，防限频
     'options': {
-        'defaultType': 'spot',  # 现货
+        'defaultType': 'spot',  # 现货市场
     }
 })
 
 # ==============================================
-# 4. 主循环 - 扫描
+# 主扫描循环
 # ==============================================
 placeholder = st.empty()
 alert_container = st.empty()
@@ -72,7 +75,7 @@ while True:
             ohlcv = exchange.fetch_ohlcv(
                 symbol=symbol,
                 timeframe=timeframe,
-                limit=N_for_avg + 20  # 多取一点防边界
+                limit=N_for_avg + 20
             )
 
             if not ohlcv or len(ohlcv) < N_for_avg + 5:
@@ -99,21 +102,21 @@ while True:
 
             price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
 
-            # 方法1：阳线 + 异常放量
+            # 方法1
             signal1 = False
             if use_method1:
                 is_bull = current_close > current_open
                 vol_spike = vol_ratio > vol_multiplier_adjusted
                 signal1 = is_bull and vol_spike and vol_ratio > 1.0
 
-            # 方法2：放量上涨 + 尾盘强势（强制需放量）
+            # 方法2
             signal2 = False
             if use_method2 and vol_ratio > 1.0:
                 strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
                 vol_spike = vol_ratio > vol_multiplier_adjusted
                 signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
 
-            # 方法3：OBV急升（需放量 + 数据足够）
+            # 方法3
             signal3 = False
             if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
                 obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()

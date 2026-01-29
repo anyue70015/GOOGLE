@@ -7,11 +7,11 @@ import random
 import os
 import json
 
-st.set_page_config(page_title="我的30只股票 短线扫描工具", layout="wide")
-st.title("我的30只股票 短线扫描工具")
+st.set_page_config(page_title="我的股票 短线扫描工具", layout="wide")
+st.title("我的股票 短线扫描工具")
 
 # ── 持久化进度文件 ──
-progress_file = "scan_progress_my30.json"
+progress_file = "scan_progress_my_stocks.json"
 
 # 只加载一次进度
 if 'progress_loaded' not in st.session_state:
@@ -63,9 +63,29 @@ if st.button("🔄 重置所有进度（从头开始）"):
         os.remove(progress_file)
     st.rerun()
 
-st.write("当前只扫描以下 **我的30只股票**：")
-st.write("LLY, GEV, MIRM, ABBV, HWM, GE, MU, HII, SCCO, SNDK, WDC, SLV, STX, JNJ, FOXA, BK, RTX, WELL, PH, GVA, AHR, ATRO, GLW, CMI, APH, SMH, TPR, SOXX, COR, CAH, HCA, TSM, NESR, RGLD, OKLO, SMR, URNM, URA, NVDA, GOOG, TTMI, TMC, SVM, SKE, RVMD, RGC, RDW, POWL, PL, ONDS, LMND, HYMC, HL, FTAI, EXK, ERAS, DFTX, CDE, ASTS, APLD, NEM")
-st.write("点击「开始/继续扫描」后会自动持续运行。所有30只都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。低流动性标的会标注⚠️。")
+st.write("上传包含股票代码的txt文件（代码之间用空格或换行分隔）")
+
+uploaded_file = st.file_uploader("选择股票列表文件 (.txt)", type=["txt"])
+
+if uploaded_file is not None:
+    try:
+        content = uploaded_file.read().decode("utf-8")
+        raw = content.replace("\n", " ").replace(",", " ").strip()
+        tickers_to_scan = [t.strip().upper() for t in raw.split() if t.strip()]
+        tickers_to_scan = list(dict.fromkeys(tickers_to_scan))  # 去重
+        st.success(f"成功读取 {len(tickers_to_scan)} 只股票")
+        st.write("股票列表预览：", ", ".join(tickers_to_scan[:15]) + " ..." if len(tickers_to_scan)>15 else ", ".join(tickers_to_scan))
+    except:
+        st.error("文件读取失败，请确保是纯文本txt格式")
+        tickers_to_scan = []
+else:
+    st.info("请先上传股票列表txt文件")
+    tickers_to_scan = []
+
+if not tickers_to_scan:
+    st.stop()
+
+st.write("点击「开始/继续扫描」后会自动持续运行。所有股票都会强制显示（即使数据拉取失败或无信号，也会显示 N/A / 0 分）。")
 
 # ==================== 核心常量 ====================
 BACKTEST_CONFIG = {
@@ -79,10 +99,10 @@ BACKTEST_CONFIG = {
 }
 
 # ==================== 数据拉取 ====================
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     try:
-        time.sleep(random.uniform(0.3, 0.8))
+        time.sleep(random.uniform(1.2, 2.8))  # 防限流
         ticker = yf.Ticker(yahoo_symbol)
         df = ticker.history(period=range_str, interval=interval, auto_adjust=True, prepost=False, timeout=30)
         if df.empty or len(df) < 50:
@@ -99,7 +119,7 @@ def fetch_yahoo_ohlcv(yahoo_symbol: str, range_str: str, interval: str = "1d"):
     except Exception:
         return None, None, None, None
 
-# ==================== 指标函数 ====================
+# ==================== 指标函数（不变） ====================
 def ema_np(x: np.ndarray, span: int) -> np.ndarray:
     alpha = 2 / (span + 1)
     ema = np.empty_like(x)
@@ -163,7 +183,7 @@ def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
     pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum()) if (rets <= 0).any() else 999
     return win_rate, pf
 
-# ==================== 核心计算 ====================
+# ==================== 核心计算（新增实时部分） ====================
 @st.cache_data(show_spinner=False)
 def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     yahoo_symbol = symbol.upper()
@@ -171,7 +191,18 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
     close, high, low, volume = fetch_yahoo_ohlcv(yahoo_symbol, BACKTEST_CONFIG[cfg_key]["range"])
     
     if close is None:
-        return None
+        return {
+            "symbol": symbol.upper(),
+            "display_symbol": symbol.upper() + " (无历史数据)",
+            "price": "N/A",
+            "change": "N/A",
+            "score": 0,
+            "prob7": 0.0,
+            "pf7": 0.0,
+            "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
+            "is_crypto": False,
+            "recent_rising放量ATR": False
+        }
 
     macd_hist = macd_hist_np(close)
     rsi = rsi_np(close)
@@ -206,16 +237,44 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
 
     prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], 7)
 
-    price = close[-1]
-    change = (close[-1] / close[-2] - 1) * 100 if len(close) >= 2 else 0
+    # ── 实时价格 + 变化率（基于前一天正规收盘价） ──
+    price = close[-1]  # 默认fallback
+    change = "NO"      # 默认无夜盘/扩展
+    try:
+        ticker = yf.Ticker(yahoo_symbol)
+        # 拉取当天1分钟数据（含盘前/盘后）
+        df_today = ticker.history(period="1d", interval="1m", prepost=True, timeout=15)
+        if not df_today.empty:
+            latest = df_today.iloc[-1]
+            current_price = latest['Close']
+            price = current_price
+            
+            # 前一天正规收盘价（最可靠来源）
+            prev_close = ticker.info.get('previousClose', None)
+            if prev_close is None and len(df_today) > 1:
+                prev_close = df_today.iloc[0]['Close']  # fallback
+            
+            if prev_close and prev_close != 0:
+                change_pct = (current_price / prev_close - 1) * 100
+                change = f"{change_pct:+.2f}%"
+            
+            # 判断是否有扩展数据变动（如果最新价 ≈ regularMarketPrice，则视为无扩展）
+            regular_price = ticker.info.get('regularMarketPrice', current_price)
+            if abs(current_price - regular_price) <= 0.01 * current_price:  # 差异很小，视为无夜盘变动
+                change = "NO"
+    except Exception as e:
+        change = "NO"  # 任何异常都显示NO
 
-    avg_daily_dollar_vol_recent = (volume[-30:] * close[-30:]).mean() if len(close) >= 30 else 0
-    is_low_liquidity = avg_daily_dollar_vol_recent < 50_000_000
-    liquidity_note = " (低流动性⚠️)" if is_low_liquidity else ""
+    # 连升逻辑（不变）
+    recent_rising = False
+    if len(score_arr) >= 3:
+        s3, s2, s1 = score_arr[-3], score_arr[-2], score_arr[-1]
+        if s1 > s2 > s3 and sig_vol and sig_atr:
+            recent_rising = True
 
     return {
         "symbol": symbol.upper(),
-        "display_symbol": symbol.upper() + liquidity_note,
+        "display_symbol": symbol.upper(),
         "price": price,
         "change": change,
         "score": score,
@@ -223,22 +282,13 @@ def compute_stock_metrics(symbol: str, cfg_key: str = "1年"):
         "pf7": pf7,
         "sig_details": sig_details,
         "is_crypto": False,
-        "is_low_liquidity": is_low_liquidity
+        "recent_rising放量ATR": recent_rising
     }
-
-# ==================== 我的30只股票 ====================
-my_30 = [
-    "LLY", "GEV", "MIRM", "ABBV", "HWM", "GE", "MU", "HII", "SCCO", "SNDK",
-    "WDC", "SLV", "STX", "JNJ", "FOXA", "BK", "RTX", "WELL", "PH", "GVA",
-    "AHR", "ATRO", "GLW", "CMI", "APH", "SMH", "TPR", "SOXX", "COR","TSM", "NESR", "RGLD", "OKLO", "SMR", "URNM", "URA", "NVDA", "GOOG", "TTMI", "TMC", "SVM", "SKE", "RVMD", "RGC", "RDW", "POWL", "PL", "ONDS", "LMND", "HYMC", "HL" "FTAI", "EXK", "ERAS", "DFTX", "CDE", "ASTS", "APLD", "CAH", "HCA", "NEM"
-]
-
-tickers_to_scan = my_30
 
 mode = st.selectbox("回测周期", list(BACKTEST_CONFIG.keys()), index=2)
 sort_by = st.selectbox("结果排序方式", ["PF7 (盈利因子)", "7日概率"], index=0)
 
-# ==================== session_state 初始化 ====================
+# session_state 初始化（不变）
 if 'high_prob' not in st.session_state:
     st.session_state.high_prob = []
 if 'scanned_symbols' not in st.session_state:
@@ -250,8 +300,8 @@ if 'fully_scanned' not in st.session_state:
 if 'scanning' not in st.session_state:
     st.session_state.scanning = False
 
-# ==================== 强制全部30只显示（每次渲染页面都重新检查并补齐） ====================
-forced_symbols = set([s.upper() for s in my_30])
+# 强制全部显示（不变）
+forced_symbols = set([s.upper() for s in tickers_to_scan])
 computed_symbols = {x["symbol"] for x in st.session_state.high_prob if x is not None and "symbol" in x}
 missing = forced_symbols - computed_symbols
 
@@ -266,10 +316,9 @@ for sym in missing:
         "pf7": 0.0,
         "sig_details": {"MACD>0": False, "放量": False, "RSI≥60": False, "ATR放大": False, "OBV上升": False},
         "is_crypto": False,
-        "is_low_liquidity": False
+        "recent_rising放量ATR": False
     })
 
-# ==================== 参数变更处理 ====================
 total = len(tickers_to_scan)
 
 if st.session_state.get("prev_mode") != mode:
@@ -279,7 +328,6 @@ if st.session_state.get("prev_mode") != mode:
 
 st.session_state.prev_mode = mode
 
-# ==================== 进度条 ====================
 progress_bar = st.progress(0)
 status_text = st.empty()
 
@@ -294,8 +342,8 @@ if st.session_state.high_prob:
     if not df_all.empty:
         def format_and_sort(df):
             df = df.copy()
-            df['price'] = df['price'].round(2)
-            df['change'] = df['change'].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
+            df['price'] = df['price'].round(2) if isinstance(df['price'].iloc[0], (int, float)) else df['price']
+            df['change'] = df['change'].apply(lambda x: x if x in ["NO", "N/A"] else f"{x}")
             df['prob7_fmt'] = (df['prob7'] * 100).round(1).map("{:.1f}%".format)
             df['pf7'] = df['pf7'].round(2)
             if sort_by == "PF7 (盈利因子)":
@@ -306,41 +354,65 @@ if st.session_state.high_prob:
         
         df_display = format_and_sort(df_all)
         
-        st.subheader(f"全部30只结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
+        st.subheader(f"全部结果（按 {sort_by} 排序） 共 {len(df_display)} 只")
         
-        # 紧凑连续显示：行与行之间零间隙
         for _, row in df_display.iterrows():
             details = row['sig_details']
             detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
-            liquidity_warning = " **⚠️ 低流动性 - 滑点风险高**" if row['is_low_liquidity'] else ""
+            
+            prefix = ""
+            if row.get("recent_rising放量ATR", False):
+                prefix = "↑↑↑放量ATR连升 "
             
             if row['pf7'] == 0.0 and row['prob7'] == 0.0:
-                prefix = "**待计算/无数据** "
+                prefix = "**待计算/无数据** " + prefix
                 score_str = "得分: 0/5 - 无信号"
                 prob_pf_str = "**7日概率: 0.0% | PF7: 0.0**"
             elif row['pf7'] > 4.0 and row['prob7'] > 0.70:
-                prefix = ""
                 score_str = f"**超级优质** 得分: {row['score']}/5 - {detail_str}"
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             else:
-                prefix = ""
                 score_str = f"得分: {row['score']}/5 - {detail_str}"
                 prob_pf_str = f"**7日概率: {row['prob7_fmt']} | PF7: {row['pf7']}**"
             
-            line = f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} ({row['change']}) - {score_str} - {prob_pf_str}{liquidity_warning}"
+            change_display = f"({row['change']})" if row['change'] not in ["NO", "N/A"] else "(NO 夜盘)"
+            line = f"{prefix}{row['display_symbol']} - 价格: ${row['price']:.2f} {change_display} - {score_str} - {prob_pf_str}"
             
-            # 每行直接输出，不加任何额外换行或分隔
             st.markdown(line)
 
 st.info(f"总标的: {total} | 已完成: {current_completed} | 累计有结果: {len(st.session_state.high_prob)} | 失败/跳过: {st.session_state.failed_count}")
 
-# ==================== 扫描逻辑 ====================
+# 下载结果（不变）
+if st.session_state.high_prob and tickers_to_scan:
+    df_download = pd.DataFrame([x for x in st.session_state.high_prob if x is not None])
+    if not df_download.empty:
+        df_download = df_download.sort_values("pf7", ascending=False)
+        
+        lines = []
+        for _, row in df_download.iterrows():
+            details = row['sig_details']
+            detail_str = " | ".join([f"{k}: {'是' if v else '否'}" for k,v in details.items()])
+            prefix = "↑↑↑放量ATR连升 " if row.get("recent_rising放量ATR", False) else ""
+            prob7_fmt = f"{(row['prob7'] * 100):.1f}%"
+            change = row['change'] if row['change'] not in ["NO", "N/A"] else "NO"
+            line = f"{prefix}{row['symbol']} - 价格: ${row['price']:.2f} ({change}) - 得分: {row['score']}/5 - {detail_str} - 7日概率: {prob7_fmt} | PF7: {row['pf7']:.2f}"
+            lines.append(line)
+        
+        txt_content = "\r\n".join(lines)
+        st.download_button(
+            label="📥 下载结果 (按PF7排序 txt)",
+            data=txt_content,
+            file_name="scan_result_my_stocks.txt",
+            mime="text/plain"
+        )
+
+# 扫描逻辑（不变）
 if st.button("🚀 开始/继续全量扫描（点击后自动持续运行，不会停）"):
     st.session_state.scanning = True
 
 if st.session_state.scanning and current_completed < total:
     with st.spinner("扫描进行中（每批次刷新一次页面）..."):
-        batch_size = 15
+        batch_size = 8
         processed_in_this_run = 0
         
         remaining_tickers = [sym for sym in tickers_to_scan if sym not in st.session_state.scanned_symbols]
@@ -358,6 +430,7 @@ if st.session_state.scanning and current_completed < total:
             try:
                 metrics = compute_stock_metrics(sym, mode)
                 if metrics is not None:
+                    st.session_state.high_prob = [m for m in st.session_state.high_prob if m["symbol"] != sym]
                     st.session_state.high_prob.append(metrics)
                 else:
                     st.session_state.failed_count += 1
@@ -383,7 +456,6 @@ if st.session_state.scanning and current_completed < total:
         st.rerun()
 
 if current_completed >= total:
-    st.success("已完成全部30只扫描！结果已全部更新")
+    st.success("已完成全部扫描！结果已全部更新")
 
-st.caption("2026年1月版 | 只包含用户指定的30只股票 | 强制全部显示 | 结果行间亲密无间无空行无横线 | 直接复制运行")
-
+st.caption("2026年1月完整版 | 实时价格+前regular close变化率 | 无夜盘显示NO | 支持txt上传 | 强制全部显示")

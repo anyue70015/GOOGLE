@@ -1,243 +1,191 @@
 import streamlit as st
-import yfinance as yf
+import ccxt
+import pandas as pd
 import numpy as np
 import time
-import re
 
-# ==================== 页面设置 ====================
-st.set_page_config(page_title="回测信号面板 - yfinance 版", layout="wide")
+st.set_page_config(page_title="加密货币现货放量/吃单扫描器", layout="wide")
+st.title("加密货币现货实时放量/吃单扫描器（免翻镜像）")
 
-st.markdown(
-    """
-    <style>
-    body { background:#05060a; }
-    .main { background:#05060a; padding-top:10px !important; }
-    h1 { font-size:26px !important; font-weight:700 !important; margin-bottom:6px !important; }
-    .stCode { background:#14151d; border:1px solid #262736; border-radius:10px; padding:12px; color:#e5e7eb; font-family:Consolas, monospace; white-space:pre; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# ==============================================
+# 上传币种列表
+# ==============================================
+uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
+if uploaded:
+    content = uploaded.read().decode("utf-8")
+    symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
+    symbols = list(dict.fromkeys(symbols))
+    
+    # 自动补 /USDT，但避免重复
+    symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
+    symbols = [s.replace('-', '/') for s in symbols]  # BTC-USD → BTC/USDT
+    symbols = [s if not s.endswith('/USDT/USDT') else s.replace('/USDT/USDT', '/USDT') for s in symbols]  # 防重复
+    
+    st.success(f"已加载 {len(symbols)} 个交易对")
+    st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
+else:
+    st.info("请先上传包含交易对的txt文件")
+    st.stop()
 
-st.title("回测信号面板 - 自助扫描（yfinance 版，按 PF7 排序）")
-
-# ==================== 配置 ====================
-BACKTEST_OPTIONS = ["3个月", "6个月", "1年", "2年", "3年", "5年", "10年"]
-BACKTEST_CONFIG = {
-    "3个月": {"period": "3mo", "interval": "1d"},
-    "6个月": {"period": "6mo", "interval": "1d"},
-    "1年":  {"period": "1y",  "interval": "1d"},
-    "2年":  {"period": "2y",  "interval": "1d"},
-    "3年":  {"period": "3y",  "interval": "1d"},
-    "5年":  {"period": "5y",  "interval": "1d"},
-    "10年": {"period": "10y", "interval": "1d"},
-}
-
-# ==================== 工具函数 ====================
-def format_symbol_for_yahoo(symbol: str) -> str:
-    sym = symbol.strip().upper()
-    if sym.isdigit() and len(sym) == 6:
-        if sym.startswith(("600", "601", "603", "605", "688")):
-            return f"{sym}.SS"
-        if sym.startswith(("000", "001", "002", "003", "300", "301")):
-            return f"{sym}.SZ"
-    return sym
-
-@st.cache_data(ttl=3600)
-def fetch_yahoo_ohlcv(symbol: str, period: str, interval: str):
-    try:
-        ticker = yf.Ticker(format_symbol_for_yahoo(symbol))
-        df = ticker.history(period=period, interval=interval, auto_adjust=False, prepost=False)
-        if df.empty or len(df) < 80:
-            st.warning(f"数据不足 {symbol}")
-            return None, None, None, None
-        close = df["Close"].values
-        high = df["High"].values
-        low = df["Low"].values
-        volume = df["Volume"].values
-        return close, high, low, volume
-    except Exception as e:
-        st.warning(f"OHLCV 加载失败 {symbol}: {str(e)}")
-        return None, None, None, None
-
-# ==================== 指标计算函数（原样保留） ====================
-def ema_np(x: np.ndarray, span: int) -> np.ndarray:
-    alpha = 2 / (span + 1)
-    ema = np.empty_like(x)
-    ema[0] = x[0]
-    for i in range(1, len(x)):
-        ema[i] = alpha * x[i] + (1 - alpha) * ema[i-1]
-    return ema
-
-def macd_hist_np(close: np.ndarray) -> np.ndarray:
-    ema12 = ema_np(close, 12)
-    ema26 = ema_np(close, 26)
-    macd_line = ema12 - ema26
-    signal = ema_np(macd_line, 9)
-    return macd_line - signal
-
-def rsi_np(close: np.ndarray, period: int = 14) -> np.ndarray:
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    alpha = 1 / period
-    gain_ema = np.empty_like(gain)
-    loss_ema = np.empty_like(loss)
-    gain_ema[0] = gain[0]
-    loss_ema[0] = loss[0]
-    for i in range(1, len(gain)):
-        gain_ema[i] = alpha * gain[i] + (1 - alpha) * gain_ema[i-1]
-        loss_ema[i] = alpha * loss[i] + (1 - alpha) * loss_ema[i-1]
-    rs = gain_ema / (loss_ema + 1e-9)
-    return 100 - (100 / (1 + rs))
-
-def atr_np(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
-    atr = np.empty_like(tr)
-    atr[0] = tr[0]
-    alpha = 1 / period
-    for i in range(1, len(tr)):
-        atr[i] = alpha * tr[i] + (1 - alpha) * atr[i-1]
-    return atr
-
-def rolling_mean_np(x: np.ndarray, window: int) -> np.ndarray:
-    if len(x) < window:
-        return np.full_like(x, x.mean())
-    cumsum = np.cumsum(np.insert(x, 0, 0.0))
-    ma = (cumsum[window:] - cumsum[:-window]) / window
-    return np.concatenate([np.full(window-1, ma[0]), ma])
-
-def obv_np(close: np.ndarray, volume: np.ndarray) -> np.ndarray:
-    direction = np.sign(np.diff(close, prepend=close[0]))
-    return np.cumsum(direction * volume)
-
-def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int):
-    if len(close) <= steps + 1:
-        return 0.5, 0.0
-    idx = np.where(score[:-steps] >= 3)[0]
-    if len(idx) == 0:
-        return 0.5, 0.0
-    rets = close[idx + steps] / close[idx] - 1
-    win_rate = (rets > 0).mean()
-    pf = rets[rets > 0].sum() / abs(rets[rets <= 0].sum() or 1)  # 避免除零
-    return win_rate, pf
-
-# ==================== 计算单股票 ====================
-def compute_stock_metrics(symbol: str, cfg_key: str):
-    try:
-        close, high, low, volume = fetch_yahoo_ohlcv(symbol, BACKTEST_CONFIG[cfg_key]["period"], "1d")
-        if close is None:
-            return {"symbol": symbol.upper(), "error": "数据加载失败"}
-
-        macd_hist = macd_hist_np(close)
-        rsi = rsi_np(close)
-        atr = atr_np(high, low, close)
-        obv = obv_np(close, volume)
-        vol_ma20 = rolling_mean_np(volume, 20)
-        atr_ma20 = rolling_mean_np(atr, 20)
-        obv_ma20 = rolling_mean_np(obv, 20)
-
-        sig_macd = (macd_hist > 0).astype(int)
-        sig_vol = (volume > vol_ma20 * 1.1).astype(int)
-        sig_rsi = (rsi >= 60).astype(int)
-        sig_atr = (atr > atr_ma20 * 1.1).astype(int)
-        sig_obv = (obv > obv_ma20 * 1.05).astype(int)
-        score_arr = sig_macd + sig_vol + sig_rsi + sig_atr + sig_obv
-
-        steps7 = 7
-        prob7, pf7 = backtest_with_stats(close[:-1], score_arr[:-1], steps7)
-
-        # 价格和涨幅：跟大的版本一样，从 close 取最后非NaN值
-        price = None
-        change = 0.0
-        if len(close) > 0:
-            valid_close = close[~np.isnan(close)]
-            if len(valid_close) >= 1:
-                price = valid_close[-1]
-                if len(valid_close) >= 2:
-                    change = (valid_close[-1] / valid_close[-2] - 1) * 100
-
-        return {
-            "symbol": symbol.upper(),
-            "price": price,
-            "change": change,
-            "prob7": prob7,
-            "pf7": pf7,
-            "score": score_arr[-1],
-            "macd_yes": macd_hist[-1] > 0,
-            "vol_yes": volume[-1] > vol_ma20[-1]*1.1,
-            "rsi_yes": rsi[-1] >= 60,
-            "atr_yes": atr[-1] > atr_ma20[-1]*1.1,
-            "obv_yes": obv[-1] > obv_ma20[-1]*1.05,
-        }
-    except Exception as e:
-        return {"symbol": symbol.upper(), "error": str(e)}
-
-# ==================== 交互 ====================
-col1, col2 = st.columns([3, 1])
+# ==============================================
+# 参数设置
+# ==============================================
+col1, col2, col3, col4 = st.columns(4)
 with col1:
-    default_tickers = """LLY GEV MIRM ABBV HWM GE MU HII SCCO SNDK WDC SLV STX JNJ WBD FOXA BK RTX WELL PH GVA AHR ATRO GLW CMI APH PM COR CAH HCA NEM"""
-    tickers_input = st.text_area(
-        "输入股票代码（空格/逗号/换行分隔）",
-        value=default_tickers,
-        height=180,
-        key="tickers_input"
-    )
-
+    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
 with col2:
-    mode = st.selectbox("回测周期", BACKTEST_OPTIONS, index=3, key="mode")  # 默认 2年
-    if st.button("开始扫描", type="primary", use_container_width=True):
-        raw = tickers_input.strip()
-        symbols = re.findall(r'[A-Za-z0-9.\-]+', raw.upper())
-        symbols = list(dict.fromkeys(symbols))  # 去重
+    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+")
+with col3:
+    vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
+with col4:
+    min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
 
-        if not symbols:
-            st.warning("请输入至少一个股票代码")
-        else:
-            with st.spinner(f"使用 yfinance 扫描 {len(symbols)} 个股票..."):
-                results = []
-                for sym in symbols:
-                    metrics = compute_stock_metrics(sym, mode)
-                    results.append(metrics)
-                    time.sleep(0.6)  # 轻微延时，避免 rate limit
+use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
+use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
+use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
 
-                st.session_state["scan_results"] = results
+# 周期参数
+N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
+vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
 
-# ==================== 显示结果（纯文本，按 PF7 降序） ====================
-if "scan_results" in st.session_state:
-    results = st.session_state["scan_results"]
-    valid_results = [r for r in results if "error" not in r and isinstance(r.get("pf7"), (int, float))]
+# 状态管理
+if 'alerted' not in st.session_state:
+    st.session_state.alerted = set()
 
-    if valid_results:
-        valid_results.sort(key=lambda x: x["pf7"], reverse=True)
+# ==============================================
+# 创建 ccxt Binance 实例，使用你的免翻地址
+# ==============================================
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'spot'},
+    'urls': {
+        'api': {
+            'public': 'https://www.bmwweb.academy/api/v3',
+            'private': 'https://www.bmwweb.academy/api/v3',  # 如果以后加 key 用
+        }
+    }
+})
 
-        lines = []
-        for row in valid_results:
-            price_str = f"{row['price']:.2f}" if row['price'] is not None else "N/A"
-            change_str = f"{row['change']:+.2f}%" if row['change'] is not None else "N/A"
-            score_str = f"{int(row['score'])}/5"
-            macd_str = "是" if row["macd_yes"] else "否"
-            vol_str  = "是" if row["vol_yes"] else "否"
-            rsi_str  = "是" if row["rsi_yes"] else "否"
-            atr_str  = "是" if row["atr_yes"] else "否"
-            obv_str  = "是" if row["obv_yes"] else "否"
+# ==============================================
+# 主扫描循环
+# ==============================================
+placeholder = st.empty()
+alert_container = st.empty()
 
-            line = (
-                f"{row['symbol']} - "
-                f"价格: ${price_str} ({change_str}) - "
-                f"得分: {score_str} - "
-                f"MACD>0: {macd_str} | 放量: {vol_str} | RSI≥60: {rsi_str} | ATR放大: {atr_str} | OBV上升: {obv_str} - "
-                f"7日概率: {row['prob7']*100:.1f}% | PF7: {row['pf7']:.2f}"
+while True:
+    data_rows = []
+    new_alerts = []
+
+    for symbol in symbols:
+        try:
+            ohlcv = exchange.fetch_ohlcv(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=N_for_avg + 20
             )
-            lines.append(line)
 
-        st.subheader("扫描结果（按 PF7 降序）")
-        st.code("\n".join(lines), language="text")
+            if not ohlcv or len(ohlcv) < N_for_avg + 5:
+                data_rows.append([symbol, "历史不足/空", "", "", "", "", f"根数={len(ohlcv)}"])
+                continue
 
-        st.info("数据来自 yfinance (Yahoo Finance 非官方接口)，价格/涨幅取历史最后有效收盘，实时性取决于市场状态。")
-    else:
-        st.warning("无有效结果（可能加载失败或数据不足）。请检查股票代码或网络。")
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df = df.tail(N_for_avg + 10)
 
-st.caption("Powered by yfinance | 仅供研究参考，不构成投资建议 | 当前时间: 2026年1月")
+            current_close = float(df['close'].iloc[-1])
+            current_open = float(df['open'].iloc[-1])
+            current_high = float(df['high'].iloc[-1])
+            current_low = float(df['low'].iloc[-1])
+            current_vol = float(df['volume'].iloc[-1])
+
+            prev_close = float(df['close'].iloc[-2])
+
+            if current_vol <= 0:
+                data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
+                continue
+
+            avg_vol = float(df['volume'].iloc[:-1].mean())
+            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
+
+            price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
+
+            signal1 = False
+            if use_method1:
+                is_bull = current_close > current_open
+                vol_spike = vol_ratio > vol_multiplier_adjusted
+                signal1 = is_bull and vol_spike and vol_ratio > 1.0
+
+            signal2 = False
+            if use_method2 and vol_ratio > 1.0:
+                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
+                vol_spike = vol_ratio > vol_multiplier_adjusted
+                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
+
+            signal3 = False
+            if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
+                obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
+                obv_ma = float(obv.rolling(20).mean().iloc[-1])
+                current_obv = float(obv.iloc[-1])
+                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
+
+            has_signal = signal1 or signal2 or signal3
+
+            signals_str = []
+            if signal1: signals_str.append("1")
+            if signal2: signals_str.append("2")
+            if signal3: signals_str.append("3")
+            signals_display = ", ".join(signals_str) if signals_str else ""
+
+            row = [
+                symbol,
+                f"{current_close:.2f}",
+                f"{price_change:+.2f}%",
+                f"{int(current_vol):,}",
+                f"{vol_ratio:.2f}x",
+                signals_display,
+                "⚠️" if has_signal else ""
+            ]
+            data_rows.append(row)
+
+            key = f"{symbol}_{timeframe}"
+            if has_signal and key not in st.session_state.alerted:
+                alert_msg = f"【{symbol} {timeframe}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
+                new_alerts.append(alert_msg)
+                st.session_state.alerted.add(key)
+
+                st.components.v1.html(
+                    """
+                    <audio autoplay>
+                        <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
+                    </audio>
+                    <script>
+                        var audio = document.querySelector('audio');
+                        audio.play().catch(function(error) {
+                            console.log("Autoplay blocked: " + error);
+                            alert("浏览器阻止自动播放声音，请点击页面允许音频");
+                        });
+                    </script>
+                    """,
+                    height=0
+                )
+
+        except Exception as e:
+            data_rows.append([symbol, "错误", str(e)[:50], "", "", "", ""])
+
+    columns = ["交易对", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
+    df_display = pd.DataFrame(data_rows, columns=columns)
+
+    def highlight(row):
+        return ['background-color: #ffcccc' if row["信号"] == "⚠️" else ''] * len(row)
+
+    styled = df_display.style.apply(highlight, axis=1)
+
+    with placeholder.container():
+        st.subheader(f"当前监控（周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
+        st.dataframe(styled, use_container_width=True, height=600)
+
+        if new_alerts:
+            for msg in new_alerts:
+                st.error(msg)
+
+    time.sleep(refresh_sec)
+    st.rerun()

@@ -1,99 +1,104 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import ccxt
 import time
-import base64
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 1. 配置中心与音效组件
+# 1. 样式与配置 (强制黑金模式)
 # ==========================================
-st.set_page_config(page_title="2026 全网资金共振指挥部", layout="wide")
+st.set_page_config(page_title="2026 全网资金共振系统", layout="wide")
 
-# 默认监控列表
+st.markdown("""
+    <style>
+    .stApp { background-color: #0E1117; color: #FFFFFF; }
+    [data-testid="stSidebar"] { background-color: #1A1C24; }
+    h1, h2, h3, p { color: #FFFFFF !important; }
+    .stDataFrame { border: 1px solid #31333F; }
+    </style>
+    """, unsafe_allow_html=True)
+
 SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP"]
 EXCHANGE_IDS = {'OKX': 'okx', 'Gate': 'gateio', 'Huobi': 'htx', 'Bitget': 'bitget'}
-SUPPORTED_EX = {name: getattr(ccxt, eid) for name, eid in EXCHANGE_IDS.items() if hasattr(ccxt, eid)}
-
-# 注入音频播放组件 (HTML/JS)
-def play_sound():
-    # 使用一段简短的系统提示音 Base64
-    sound_html = """
-    <audio autoplay><source src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg" type="audio/ogg"></audio>
-    """
-    st.components.v1.html(sound_html, height=0)
+TIMEFRAMES = ['1m', '5m', '15m', '1h'] # 60m 对应 CCXT 的 1h
 
 # ==========================================
-# 2. 核心抓取与能量算法
+# 2. 核心抓取引擎
 # ==========================================
+def get_ex(name):
+    ex_class = getattr(ccxt, EXCHANGE_IDS[name])
+    return ex_class({'enableRateLimit': True, 'timeout': 15000})
+
 def fetch_symbol_data(symbol, big_val):
-    symbol_pair = f"{symbol}/USDT"
+    pair = f"{symbol}/USDT"
     res = {"币种": symbol}
     total_net_flow = 0
-    active_ex_count = 0  # 记录出现大单的交易所数量
+    active_ex_count = 0
 
-    # --- A. 获取基础行情 (OKX) ---
-    try:
-        okx = SUPPORTED_EX['OKX']({'enableRateLimit': True, 'timeout': 5000})
-        ticker = okx.fetch_ticker(symbol_pair)
-        res["OKX涨跌"] = f"{ticker['percentage']:+.2f}%"
-        res["raw_change"] = ticker['percentage']
-    except:
-        res["OKX涨跌"], res["raw_change"] = "0.00%", 0
+    # --- A. 获取多周期涨幅 (OKX 优先 -> Gate 备份) ---
+    def get_change_data():
+        for ex_name in ['OKX', 'Gate']:
+            try:
+                ex = get_ex(ex_name)
+                changes = {}
+                for tf in TIMEFRAMES:
+                    ohlcv = ex.fetch_ohlcv(pair, tf, limit=2)
+                    if len(ohlcv) >= 2:
+                        ch = ((ohlcv[-1][4] - ohlcv[-1][1]) / ohlcv[-1][1]) * 100
+                        changes[f"{tf}涨幅"] = f"{ch:+.2f}%"
+                        if tf == '1m': changes['raw_sort'] = ch # 用1分钟涨幅排序
+                    else:
+                        changes[f"{tf}涨幅"] = "0.00%"
+                return changes, ex_name
+            except:
+                continue
+        return {f"{tf}涨幅": "N/A" for tf in TIMEFRAMES}, "None"
 
-    # --- B. 扫描四个交易所的能量与净流入 ---
-    def get_ex_details(ex_name):
+    change_data, source_name = get_change_data()
+    res.update(change_data)
+    res["来源"] = source_name
+
+    # --- B. 扫描四个交易所的大单与能量 ---
+    def scan_ex(name):
         nonlocal total_net_flow, active_ex_count
         try:
-            ex = SUPPORTED_EX[ex_name]({'enableRateLimit': True, 'timeout': 5000})
-            trades = ex.fetch_trades(symbol_pair, limit=50)
-            
-            # 计算能量等级
-            big_icons = []
-            ex_net_flow = 0
-            has_big_order = False
-            
+            ex = get_ex(name)
+            trades = ex.fetch_trades(pair, limit=50)
+            icons = []
+            ex_net = 0
             for t in trades:
                 val = t['price'] * t['amount']
-                side_mul = 1 if t['side'] == 'buy' else -1
-                ex_net_flow += val * side_mul # 累计净流入
-                
+                side = 1 if t['side'] == 'buy' else -1
+                ex_net += val * side
                 if t['side'] == 'buy':
-                    if val >= 500000: big_icons.append("💣")
-                    elif val >= 100000: big_icons.append("🧨")
-                    elif val >= big_val: big_icons.append("🔥")
+                    if val >= 500000: icons.append("💣")
+                    elif val >= 100000: icons.append("🧨")
+                    elif val >= big_val: icons.append("🔥")
             
-            if big_icons:
-                active_ex_count += 1
-                return "".join(big_icons[:3]) # 最多显示3个图标
-            return "·"
+            total_net_flow += ex_net
+            if icons: active_ex_count += 1
+            return "".join(icons[:3]) if icons else "·"
         except:
-            return "❌"
+            return "⚠️"
 
-    for name in SUPPORTED_EX.keys():
-        res[name] = get_ex_details(name)
+    for name in EXCHANGE_IDS.keys():
+        res[name] = scan_ex(name)
 
     res["净流入(万)"] = round(total_net_flow / 10000, 2)
-    res["共振状态"] = "🚨 共振" if active_ex_count >= 3 else ""
-    
+    res["共振"] = "🚨" if active_ex_count >= 3 else ""
     return res
 
 # ==========================================
-# 3. UI 界面
+# 3. 主界面刷新
 # ==========================================
-st.title("🏹 全网资金流向 & 共振扫描器")
+st.title("🏹 2026 全网资金流向指挥部 (多周期版)")
 
 with st.sidebar:
-    st.header("⚡ 实时参数")
-    big_val = st.number_input("基础大单 (🔥) 阈值", value=20000)
-    st.markdown("""
-    - 🔥 > 基础阈值
-    - 🧨 > 10万 USDT
-    - 💣 > 50万 USDT
-    """)
+    st.header("⚡ 扫描配置")
+    big_val = st.number_input("大单阈值 (USDT)", value=20000)
     refresh_rate = st.slider("扫描频率 (秒)", 5, 60, 10)
-    enable_audio = st.toggle("开启共振音效报警", value=True)
+    st.markdown("---")
+    st.markdown("数据逻辑：\n1. 优先取 OKX 涨幅\n2. OKX 掉线自动取 Gate\n3. 🚨 3家所共振高亮")
 
 placeholder = st.empty()
 
@@ -104,21 +109,17 @@ while True:
         for f in futures:
             final_data.append(f.result())
 
-    df = pd.DataFrame(final_data).sort_values("raw_change", ascending=False).drop(columns="raw_change")
-
-    # 检查是否触发全局音效
-    if enable_audio and not df[df["共振状态"] == "🚨 共振"].empty:
-        play_sound()
+    # 按 1分钟涨幅 排序
+    df = pd.DataFrame(final_data).sort_values("raw_sort", ascending=False).drop(columns="raw_sort")
 
     with placeholder.container():
-        st.write(f"⏱️ 刷新: {time.strftime('%H:%M:%S')} | 10秒内 50笔成交深度分析")
+        st.write(f"⏱️ 刷新: {time.strftime('%H:%M:%S')} | 策略: OKX/Gate 容灾切换")
         
-        # 表格渲染样式
-        def style_rows(row):
-            styles = [''] * len(row)
-            if row['共振状态'] == '🚨 共振':
-                styles = ['background-color: rgba(255, 75, 75, 0.25); font-weight: bold'] * len(row)
-            return styles
+        # 样式渲染
+        def style_logic(row):
+            if row['共振'] == '🚨':
+                return ['background-color: #3e2723; color: #ffcc00; font-weight: bold'] * len(row)
+            return ['color: #e0e0e0'] * len(row)
 
         def color_change(val):
             if isinstance(val, str) and '+' in val: return 'color: #00ff00'
@@ -126,11 +127,9 @@ while True:
             return ''
 
         st.dataframe(
-            df.style.apply(style_rows, axis=1)
-                    .applymap(color_change, subset=["OKX涨跌"])
-                    .set_properties(**{'text-align': 'center'}, subset=['OKX', 'Gate', 'Huobi', 'Bitget']),
-            use_container_width=True,
-            height=600
+            df.style.apply(style_logic, axis=1)
+                    .applymap(color_change, subset=["1m涨幅", "5m涨幅", "15m涨幅", "1h涨幅"]),
+            use_container_width=True, height=650
         )
     
     time.sleep(refresh_rate)

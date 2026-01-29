@@ -1,5 +1,5 @@
 import streamlit as st
-import ccxt.pro as ccxt_pro  # 注意：pro 版
+import ccxt.pro as ccxt_pro
 import pandas as pd
 import numpy as np
 import asyncio
@@ -11,7 +11,7 @@ nest_asyncio.apply()
 st.set_page_config(page_title="2026量化神兵-WebSocket版", layout="wide")
 
 st.title("🚀 加密货币聚合扫描器 (WebSocket实时版 - 防超时)")
-st.markdown("使用Binance WebSocket订阅kline推送，优先Binance数据。适合代理/网络不稳环境。")
+st.markdown("使用Binance WebSocket订阅kline推送。点击下方按钮启动订阅（避免启动时loop冲突）。")
 
 # --- 币种列表 ---
 uploaded = st.file_uploader("上传币种列表 (.txt)", type="txt")
@@ -24,6 +24,9 @@ if uploaded:
 else:
     st.stop()
 
+if len(symbols) > 20:
+    st.warning("建议先用少量交易对（<20）测试WS稳定性，多币种可能连接压力大。")
+
 # --- 参数 ---
 timeframe = st.selectbox("周期", ["1m", "5m", "15m", "1h"], index=1)
 refresh_sec = st.slider("刷新间隔(秒)", 5, 120, 30)
@@ -35,72 +38,76 @@ def get_exchange():
     ex = ccxt_pro.binance({
         'enableRateLimit': True,
         'options': {'defaultType': 'spot'},
-        # 如果代理需要：'proxies': {'https': 'socks5://127.0.0.1:10808'},
+        # 如果V2RayN socks5代理：'proxies': {'https': 'socks5://127.0.0.1:10808'},
     })
     return ex
 
 exchange = get_exchange()
 
-# 全局缓存：{symbol: pd.DataFrame of OHLCV}
 candle_cache = {}  # symbol -> df
-ws_task = None
 
-# N for avg_v 计算
 N_dict = {"1m": 40, "5m": 20, "15m": 12, "1h": 8}
 
 async def subscribe_and_update():
     global candle_cache
-    ws_symbols = [s.lower().replace('/', '') for s in symbols]  # btcusdt
+    ws_symbols = [s.lower().replace('/', '') for s in symbols]
     streams = [f"{sym}@kline_{timeframe}" for sym in ws_symbols]
-    combined_stream = '/'.join(streams)
+    # 如果太多symbols，可分批或用 combined stream，但这里简单循环
 
     while True:
         try:
-            # watchOHLCVForSymbols 支持多symbol，但如果太多可分批
-            # 这里用 watchOHLCV 单symbol 循环 + 容错
             for sym in symbols:
                 try:
-                    ohlcv_list = await exchange.watchOHLCV(sym, timeframe, limit=1)  # 只取最新一根更新
+                    ohlcv_list = await exchange.watchOHLCV(sym, timeframe, limit=1)
                     if ohlcv_list:
-                        latest = ohlcv_list[-1]  # [timestamp, o, h, l, c, v]
+                        latest = ohlcv_list[-1]
                         sym_key = sym.upper()
                         if sym_key not in candle_cache:
-                            # 初次：fetch 历史补齐
                             hist = await exchange.fetch_ohlcv(sym, timeframe, limit=N_dict[timeframe] + 20)
                             df = pd.DataFrame(hist, columns=['t', 'o', 'h', 'l', 'c', 'v'])
                             candle_cache[sym_key] = df
                         else:
                             df = candle_cache[sym_key]
-                            # 更新或追加最新 K
                             new_row = pd.DataFrame([latest], columns=['t', 'o', 'h', 'l', 'c', 'v'])
                             if df['t'].iloc[-1] == latest[0]:
-                                df.iloc[-1] = new_row.iloc[0]  # 更新当前 K
+                                df.iloc[-1] = new_row.iloc[0]
                             else:
                                 df = pd.concat([df, new_row], ignore_index=True)
-                                df = df.tail(N_dict[timeframe] + 30)  # 保持长度
+                                df = df.tail(N_dict[timeframe] + 30)
                             candle_cache[sym_key] = df
-                except Exception as e:
-                    st.warning(f"{sym} WS 更新失败: {e}")
+                except Exception as inner_e:
+                    st.warning(f"{sym} 更新失败: {inner_e}")
                     await asyncio.sleep(5)
-            await asyncio.sleep(1)  # 循环检查
+            await asyncio.sleep(1)
         except Exception as e:
-            st.error(f"WS 连接断开: {e}，尝试重连...")
-            await asyncio.sleep(10)  # 重连等待
+            st.error(f"WS断开: {e}，10秒后重连...")
+            await asyncio.sleep(10)
 
-# 启动 WS 后台任务（只跑一次）
-if 'ws_running' not in st.session_state:
-    st.session_state.ws_running = True
-    ws_task = asyncio.create_task(subscribe_and_update())
-    st.write("WebSocket 订阅已启动（后台实时更新 K 线）")
+# 启动按钮 + session_state 控制
+if 'ws_started' not in st.session_state:
+    st.session_state.ws_started = False
+    st.session_state.ws_task = None
+
+if st.button("启动 WebSocket 订阅（只点一次）"):
+    if not st.session_state.ws_started:
+        try:
+            loop = asyncio.get_running_loop()
+            st.session_state.ws_task = loop.create_task(subscribe_and_update())
+            st.session_state.ws_started = True
+            st.success("WebSocket 订阅已启动！后台实时更新中...")
+        except Exception as e:
+            st.error(f"启动失败: {e}\n请刷新页面重试，或检查nest-asyncio是否生效。")
+    else:
+        st.info("订阅已在运行中。")
 
 placeholder = st.empty()
 
 def compute_signals():
     data_rows = []
     for symbol in symbols:
-        df = candle_cache.get(symbol, None)
+        df = candle_cache.get(symbol)
         if df is None or len(df) < 5:
-            data_rows.append([symbol, "-", "-", "-", "-", "", "", "无数据 (WS等待中)"])
+            data_rows.append([symbol, "-", "-", "-", "-", "", "", "无数据 (等待WS推送)"])
             continue
 
         df[['c','o','v']] = df[['c','o','v']].apply(pd.to_numeric, errors='coerce')
@@ -116,14 +123,12 @@ def compute_signals():
         sig2 = (vol_ratio > 1.2) and (change > 0.5)
         
         sig_list = [str(i) for i, s in enumerate([sig1, sig2], 1) if s]
-        signal_str = ",".join(sig_list)
         alert = "⚠️" if sig_list else ""
-        
-        status = "WS实时" if len(df) > 10 else "历史补齐中"
-        
+        status = "WS实时" if len(df) > 10 else "补齐历史中"
+
         data_rows.append([
             symbol, f"{curr_c:.4f}", f"{change:+.2f}%", f"{curr_v:,.0f}", 
-            f"{vol_ratio:.2f}x", signal_str, alert, status
+            f"{vol_ratio:.2f}x", ",".join(sig_list), alert, status
         ])
 
     if data_rows:
@@ -140,7 +145,7 @@ def compute_signals():
             st.write(f"⏱️ 更新: {time.strftime('%Y-%m-%d %H:%M:%S EST')} | WS模式 | 间隔: {refresh_sec}s")
             st.dataframe(df_final.style.apply(style_rows, axis=1), use_container_width=True, height=800)
 
-# 主循环：定时读取缓存计算
+# 主循环
 async def main_loop():
     while True:
         compute_signals()

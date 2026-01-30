@@ -5,87 +5,73 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 1. 基础配置与缓存初始化
+# 1. 基础配置与全局缓存
 # ==========================================
-st.set_page_config(page_title="指挥部-稳定版", layout="wide")
+st.set_page_config(page_title="指挥部-零延迟版", layout="wide")
 
-# 必须在主线程初始化的缓存
-if 'data_store' not in st.session_state:
-    st.session_state.data_store = {}
-if 'last_slow_update' not in st.session_state:
-    st.session_state.last_slow_update = 0
+# 核心缓存：存储所有币种的最新状态
+if 'master_data' not in st.session_state:
+    st.session_state.master_data = {}
+if 'last_slow_tick' not in st.session_state:
+    st.session_state.last_slow_tick = 0
 
 SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP","ADA", "BCH", "LINK", "LTC", "TRX", "ZEC", "ASTER"]
-EXCHANGES = ['okx', 'gateio', 'bitget']
 CH_COLS = ['1m涨跌', '5m涨跌', '15m涨跌', '1h涨跌', '4h涨跌', '24h涨跌', '7d涨跌']
 
 # ==========================================
-# 2. 核心抓取函数 (增加超时控制)
+# 2. 极速抓取引擎
 # ==========================================
-def get_rolling_change(ex, pair, now_ms, timeframe, offset_ms):
-    """精准滚动涨幅计算"""
-    try:
-        # since 必须精准对齐，limit=1 减少传输量
-        k = ex.fetch_ohlcv(pair, timeframe, since=now_ms - offset_ms, limit=1)
-        return k[0][4] if k else None
-    except:
-        return None
-
-def fetch_symbol_data(symbol, base_threshold, slow_mode):
+def fetch_worker(symbol, threshold, is_slow_update):
     pair = f"{symbol}/USDT"
-    # 获取历史数据作为基准
-    res = st.session_state.data_store.get(symbol, {
-        "币种": symbol, "最新价": "加载中", "OBV预警": "初始化",
+    # 继承旧数据，避免 NO 闪烁
+    res = st.session_state.master_data.get(symbol, {
+        "币种": symbol, "最新价": "Loading", "OBV预警": "待扫描",
         "OKX": "·", "Gate": "·", "Huobi": "·", "Bitget": "·",
         "net_flow": 0, "active_count": 0
     })
     for col in CH_COLS: 
         if col not in res: res[col] = -999.0
 
-    # 优先取数逻辑
-    success_ex_name = None
-    for eid in EXCHANGES:
+    success_ex = None
+    # 优先级：OKX -> Gate -> Bitget (解决 TAO, ZEC 找不到的问题)
+    for eid in ['okx', 'gateio', 'bitget']:
         try:
-            ex = getattr(ccxt, eid)({'timeout': 1200, 'enableRateLimit': True})
+            ex = getattr(ccxt, eid)({'timeout': 1000, 'enableRateLimit': True})
             tk = ex.fetch_ticker(pair)
-            curr_p = tk['last']
-            res["最新价"] = curr_p
+            res["最新价"] = tk['last']
             now_ms = ex.milliseconds()
             
-            # 短周期：每一轮都刷
-            k1m = ex.fetch_ohlcv(pair, '1m', limit=2)
-            if k1m: res['1m涨跌'] = ((curr_p - k1m[0][4]) / k1m[0][4]) * 100
+            # --- 快数据：短线滚动涨幅 ---
+            k1 = ex.fetch_ohlcv(pair, '1m', limit=2)
+            if k1: res['1m涨跌'] = ((tk['last'] - k1[0][4]) / k1[0][4]) * 100
             
-            k5m = ex.fetch_ohlcv(pair, '5m', limit=2)
-            if k5m: res['5m涨跌'] = ((curr_p - k5m[0][4]) / k5m[0][4]) * 100
+            k5 = ex.fetch_ohlcv(pair, '5m', limit=2)
+            if k5: res['5m涨跌'] = ((tk['last'] - k5[0][4]) / k5[0][4]) * 100
 
-            # 长周期：仅在 slow_mode 开启时刷新 (减少 API 压力)
-            if slow_mode:
-                # 近1h (1m周期)
-                p_1h = get_rolling_change(ex, pair, now_ms, '1m', 3600000)
-                if p_1h: res['1h涨跌'] = ((curr_p - p_1h) / p_1h) * 100
-                
-                # 近24h (1h周期) - 彻底解决8点问题
-                p_24h = get_rolling_change(ex, pair, now_ms, '1h', 86400000)
-                if p_24h: res['24h涨跌'] = ((curr_p - p_24h) / p_24h) * 100
-                
-                # 近7d (4h周期)
-                p_7d = get_rolling_change(ex, pair, now_ms, '4h', 604800000)
-                if p_7d: res['7d涨跌'] = ((curr_p - p_7d) / p_7d) * 100
-
-            success_ex_name = eid.replace('io','')
+            # --- 慢数据：精准 24h/7d 滚动 (仅在特定跳动时更新) ---
+            if is_slow_update:
+                # 1h
+                h1 = ex.fetch_ohlcv(pair, '1m', since=now_ms - 3600000, limit=1)
+                if h1: res['1h涨跌'] = ((tk['last'] - h1[0][4]) / h1[0][4]) * 100
+                # 24h (滚动窗口)
+                d1 = ex.fetch_ohlcv(pair, '1h', since=now_ms - 86400000, limit=1)
+                if d1: res['24h涨跌'] = ((tk['last'] - d1[0][4]) / d1[0][4]) * 100
+                # 7d
+                w1 = ex.fetch_ohlcv(pair, '4h', since=now_ms - 604800000, limit=1)
+                if w1: res['7d涨跌'] = ((tk['last'] - w1[0][4]) / w1[0][4]) * 100
+            
+            success_ex = eid.split('io')[0].upper()
             break
         except: continue
 
-    # 大单流向扫描
+    # --- 大单扫描 (压缩笔数提高速度) ---
     res['net_flow'] = 0
     res['active_count'] = 0
-    th = base_threshold if symbol in ['BTC', 'ETH'] else base_threshold / 5
-    
+    th = threshold if symbol in ['BTC', 'ETH'] else threshold / 5
     for name, eid in {'OKX':'okx', 'Gate':'gateio', 'Huobi':'htx', 'Bitget':'bitget'}.items():
         try:
-            ex_t = getattr(ccxt, eid)({'timeout': 800})
-            trades = ex_t.fetch_trades(pair, limit=20)
+            ex_t = getattr(ccxt, eid)({'timeout': 600})
+            trades = ex_t.fetch_trades(pair, limit=15)
             buy_v = 0
             for t in trades:
                 v = t['price'] * t['amount']
@@ -95,54 +81,48 @@ def fetch_symbol_data(symbol, base_threshold, slow_mode):
             if buy_v > 0: res['active_count'] += 1
         except: res[name] = "·"
 
-    res['OBV预警'] = f"💎底背离({success_ex_name})" if (isinstance(res.get('1h涨跌'), float) and res['1h涨跌'] < -0.3 and res['net_flow'] > 0) else f"正常({success_ex_name})"
-    
+    res['OBV预警'] = f"💎底背离({success_ex})" if (isinstance(res.get('1h涨跌'), float) and res['1h涨跌'] < -0.3 and res['net_flow'] > 0) else f"正常({success_ex})"
     return res
 
 # ==========================================
-# 3. UI 渲染逻辑
+# 3. 主界面与调度
 # ==========================================
-st.title("🏹 资金指挥部 - 零延迟版")
-
 with st.sidebar:
     st_val = st.number_input("大单阈值", value=20000)
-    interval = st.slider("刷新频率 (秒)", 5, 60, 15)
-    st.write("注：长周期数据(24h/7d)每10分钟同步一次")
+    interval = st.slider("刷新频率", 5, 30, 10)
+    st.info("💡 1h/24h/7d 滚动数据每 10 分钟深层同步一次，其余时间实时监测价格和大单。")
     countdown = st.empty()
 
 placeholder = st.empty()
 
 while True:
     now = time.time()
-    # 判定是否需要更新 24h/7d 等慢速数据 (每 600 秒一次)
+    # 核心优化：是否进行重型长周期抓取
     is_slow = False
-    if now - st.session_state.last_slow_update > 600:
+    if now - st.session_state.last_slow_tick > 600:
         is_slow = True
-        st.session_state.last_slow_update = now
+        st.session_state.last_slow_tick = now
 
-    # 使用多线程执行，max_workers 限制在 10 以内防止被封 IP
+    # 并发执行 (限制线程数，防止 API 崩溃)
     with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(fetch_symbol_data, s, st_val, is_slow) for s in SYMBOLS]
-        results = [f.result() for f in futures]
+        results = list(executor.map(lambda s: fetch_worker(s, st_val, is_slow), SYMBOLS))
 
-    # 更新全局缓存
-    for r in results:
-        st.session_state.data_store[r['币种']] = r
+    # 更新状态
+    for r in results: st.session_state.master_data[r['币种']] = r
 
-    # 数据处理
+    # 排序与展示
     df = pd.DataFrame(results)
-    df['sort_key'] = df['1m涨跌'].apply(lambda x: x if isinstance(x, float) else -999.0)
-    df = df.sort_values(by="sort_key", ascending=False)
+    df['sk'] = df['1m涨跌'].apply(lambda x: x if isinstance(x, float) else -999)
+    df = df.sort_values(by="sk", ascending=False)
     
-    # 格式化
     display_df = df.copy()
     for col in CH_COLS:
         display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, float) and x != -999.0 else "·")
 
     with placeholder.container():
-        st.write(f"🔄 刷新时间: {time.strftime('%H:%M:%S')} | 状态: {'[全量同步]' if is_slow else '[极速模式]'}")
-        cols_to_show = ["币种", "最新价", "OBV预警"] + CH_COLS + ["OKX", "Gate", "Huobi", "Bitget"]
-        st.dataframe(display_df[cols_to_show], use_container_width=True, height=700)
+        st.write(f"🔄 刷新: {time.strftime('%H:%M:%S')} | 模式: {'[全量对齐]' if is_slow else '[极速监测]'}")
+        st.dataframe(display_df[["币种", "最新价", "OBV预警"] + CH_COLS + ["OKX", "Gate", "Huobi", "Bitget"]], 
+                     use_container_width=True, height=750)
 
     for i in range(interval, 0, -1):
         countdown.metric("下次刷新", f"{i}s")

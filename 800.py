@@ -7,66 +7,89 @@ from concurrent.futures import ThreadPoolExecutor
 # ==========================================
 # 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="指挥部-Bitget全量加速版", layout="wide")
+st.set_page_config(page_title="指挥部-全周期监控版", layout="wide")
 
 SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP","ADA", "BCH", "LINK", "LTC", "TRX", "ZEC", "ASTER"]
+TIMEFRAMES = {
+    '1m涨跌': '1m',
+    '5m涨跌': '5m',
+    '15m涨跌': '15m',
+    '1h涨跌': '1h'
+}
 
 # ==========================================
-# 2. 核心抓取：Bitget 优先 + 并发模式
+# 2. 核心抓取逻辑：多周期回溯
 # ==========================================
-def get_data_from_exchange(symbol):
+def fetch_multi_timeframe_data(symbol):
     pair = f"{symbol}/USDT"
-    # 定义优先级：Bitget 第一（为了 TAO/HYPE/ZEC），OKX 第二，Gate 第三
-    e_ids = ['bitget', 'okx', 'gateio']
+    # TAO 优先 Bitget，其他常用 OKX
+    exchange_list = ['bitget', 'okx'] if symbol in ['TAO', 'HYPE', 'ASTER'] else ['okx', 'bitget']
     
-    for eid in e_ids:
+    res = {"币种": symbol, "最新价": 0.0}
+    
+    for eid in exchange_list:
         try:
-            ex = getattr(ccxt, eid)({'timeout': 3000})
-            tk = ex.fetch_ticker(pair)
-            return {
-                "币种": symbol,
-                "最新价": tk['last'],
-                "24h涨跌": tk['percentage'],
-                "24h成交额": f"{tk['quoteVolume']/10000:.1f}万",
-                "来源": eid.upper()
-            }
+            ex = getattr(ccxt, eid)({'timeout': 5000, 'enableRateLimit': True})
+            ticker = ex.fetch_ticker(pair)
+            curr_p = ticker['last']
+            res["最新价"] = curr_p
+            res["24h涨跌"] = ticker.get('percentage', 0.0)
+            
+            # 抓取不同周期的涨跌
+            for label, tf in TIMEFRAMES.items():
+                try:
+                    # 抓取最近 2 根 K 线：index 0 是前一根(已闭合)，index 1 是当前根
+                    ohlcv = ex.fetch_ohlcv(pair, timeframe=tf, limit=2)
+                    if len(ohlcv) >= 2:
+                        base_p = ohlcv[0][4] # 前一根的收盘价
+                        res[label] = ((curr_p - base_p) / base_p) * 100
+                    else:
+                        res[label] = 0.0
+                except:
+                    res[label] = 0.0
+            
+            res["来源"] = eid.upper()
+            return res # 成功抓取一个交易所就返回
         except:
-            continue # 如果这个交易所没有该币种，自动跳下一个
-    return {"币种": symbol, "最新价": "未找到", "24h涨跌": 0, "来源": "None"}
+            continue
+            
+    # 兜底数据
+    return {**{"币种": symbol, "最新价": 0.0, "24h涨跌": 0.0}, **{k: 0.0 for k in TIMEFRAMES}, "来源": "失败"}
 
 # ==========================================
-# 3. UI 调度
+# 3. UI 渲染与自动刷新
 # ==========================================
-st.title("🚨 Bitget 强化指挥部 (2026.01.30 暴跌监控)")
-
-if 'last_df' not in st.session_state:
-    st.session_state.last_df = pd.DataFrame()
+st.title("🛡️ 2026 金融风暴：多维度全周期监控")
 
 placeholder = st.empty()
 
 while True:
-    # 使用线程池全量并发抓取（不再分批，18个币同时抓）
+    # 全量并发抓取 (18个币同时多时段扫描)
     with ThreadPoolExecutor(max_workers=len(SYMBOLS)) as executor:
-        results = list(executor.map(get_data_from_exchange, SYMBOLS))
+        results = list(executor.map(fetch_multi_timeframe_data, SYMBOLS))
     
     df = pd.DataFrame(results)
     
-    # 排序逻辑：按跌幅最狠的排在最前面
-    df = df.sort_values(by="24h涨跌", ascending=True)
-    
-    # 格式化显示
+    # 排序：按 5 分钟波动最剧烈的排前面（最能反映瞬间插针）
+    if '5m涨跌' in df.columns:
+        df = df.sort_values(by="5m涨跌", ascending=True)
+
+    # 格式化
     display_df = df.copy()
-    display_df['24h涨跌'] = display_df['24h涨跌'].apply(lambda x: f"{x:+.2f}%" if x != 0 else "0.00%")
-    
+    cols_to_fix = ['24h涨跌', '1m涨跌', '5m涨跌', '15m涨跌', '1h涨跌']
+    for col in cols_to_fix:
+        display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%")
+
     with placeholder.container():
-        t_now = time.strftime('%H:%M:%S')
-        st.subheader(f"🔄 全量同步完成 | 刷新时间: {t_now}")
+        st.write(f"🔄 **全周期同步成功** | 刷新时间: {time.strftime('%H:%M:%S')} | 频率: 10s/次")
         
-        # 重点监控 TAO (Bitget)
-        tao_data = df[df['币种'] == 'TAO'].iloc[0] if not df[df['币种'] == 'TAO'].empty else None
-        if tao_data and float(str(tao_data['24h涨跌']).replace('%','')) < -5:
-            st.warning(f"⚠️ Bitget 信号：TAO 正在剧烈波动，当前价: {tao_data['最新价']}")
+        # TAO 专项报警
+        tao_data = df[df['币种'] == 'TAO']
+        if not tao_data.empty:
+            t_5m = tao_data.iloc[0]['5m涨跌']
+            if t_5m < -1: # 5分钟内跌超1%就是危险信号
+                st.error(f"🔥 **TAO 正在插针**: 5分钟跌幅 {t_5m:.2f}% | 请检查 Bitget 杠杆仓位！")
 
-        st.dataframe(display_df, use_container_width=True, height=700)
+        st.dataframe(display_df, use_container_width=True, height=650)
 
-    time.sleep(15) # 暴跌期间建议 15 秒同步一次全量数据
+    time.sleep(10)

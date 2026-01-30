@@ -89,7 +89,7 @@ st.title("🏹 资金指挥部 (KeyError 修复终结版)")
 
 with st.sidebar:
     big_val = st.number_input("大单阈值 (USDT)", value=20000)
-    interval = st.slider("扫描间隔 (秒)", 10, 60, 30)
+    interval = st.slider("扫描间隔 (秒)", 10, 60, 40)
     countdown_area = st.empty()
 
 placeholder = st.empty()
@@ -150,3 +150,4 @@ while True:
     for i in range(interval, 0, -1):
         countdown_area.metric("⏰ 下轮刷新倒计时", f"{i} 秒")
         time.sleep(1)
+

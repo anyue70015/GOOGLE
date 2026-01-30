@@ -13,7 +13,7 @@ st.set_page_config(page_title="资金预警-云端稳定版", layout="wide")
 if 'signal_memory' not in st.session_state:
     st.session_state.signal_memory = {}
 
-SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "SUI", "XRP", "TRX", "LINK", "LTC"] # 建议先减少币种测试稳定性
+SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "SUI", "XRP", "RENDER", "TAO", "HYPE", "UNI", "ZEC"] # 建议先减少币种测试稳定性
 EXCHANGE_IDS = {'OKX': 'okx', 'Gate': 'gateio', 'Bitget': 'bitget'} # 剔除响应慢的交易所
 
 # ==========================================
@@ -107,3 +107,4 @@ while True:
         st.dataframe(df.style.apply(row_style, axis=1), use_container_width=True)
 
     time.sleep(interval)
+

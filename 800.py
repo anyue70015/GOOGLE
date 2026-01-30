@@ -5,9 +5,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 # ==========================================
-# 1. 基础配置与全局持久化
+# 1. 基础配置与全局存储
 # ==========================================
-st.set_page_config(page_title="指挥部-全数据对齐版", layout="wide")
+st.set_page_config(page_title="指挥部-Bitget强化版", layout="wide")
 
 if 'GLOBAL_DATA' not in globals():
     globals()['GLOBAL_DATA'] = {}
@@ -18,130 +18,118 @@ SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "
 CH_COLS = ['1m涨跌', '5m涨跌', '15m涨跌', '1h涨跌', '4h涨跌', '24h涨跌', '7d涨跌']
 
 # ==========================================
-# 2. 核心抓取函数 (多源全自动适配)
+# 2. 增强型抓取 (Bitget 优先逻辑)
 # ==========================================
 def fetch_worker(symbol, threshold):
     pair = f"{symbol}/USDT"
     master_store = globals().get('GLOBAL_DATA', {})
-    res = master_store.get(symbol, {"币种": symbol, "最新价": "---", "OBV预警": "待更新"})
+    res = master_store.get(symbol, {"币种": symbol, "最新价": "---", "OBV预警": "同步中"})
 
-    # 依次尝试：OKX -> Gate -> Bitget
-    # 只要在其中一家找到币，该币的所有指标都由这家提供
     found_source = False
-    for eid in ['okx', 'gateio', 'bitget']:
+    # 调整优先级：OKX -> Bitget (针对 TAO/ZEC 更稳) -> Gate
+    for eid in ['okx', 'bitget', 'gateio']:
         if found_source: break
         try:
             ex = getattr(ccxt, eid)({'timeout': 3000, 'enableRateLimit': True})
-            # 1. 先验证是否有该币对
             tk = ex.fetch_ticker(pair)
             curr_p = tk['last']
             res["最新价"] = curr_p
             now_ms = ex.milliseconds()
             
-            # 2. 如果验证成功，统一抓取该源的所有周期
+            # 滚动周期配置 (修正：如果 since 失败，自动使用 limit 回溯)
             configs = [
-                (60000, '1m涨跌', '1m'),
-                (300000, '5m涨跌', '1m'),
-                (900000, '15m涨跌', '5m'),
-                (3600000, '1h涨跌', '1m'),
-                (14400000, '4h涨跌', '15m'),
-                (86400000, '24h涨跌', '1h'),
-                (604800000, '7d涨跌', '4h')
+                (60000, '1m涨跌', '1m', 2),
+                (300000, '5m涨跌', '5m', 2),
+                (900000, '15m涨跌', '15m', 2),
+                (3600000, '1h涨跌', '1h', 2),
+                (14400000, '4h涨跌', '4h', 2),
+                (86400000, '24h涨跌', '1h', 26), # 24h 前
+                (604800000, '7d涨跌', '4h', 45)  # 7d 前
             ]
             
-            for offset, col, k_tf in configs:
-                # 强制使用 since 对齐“此时此刻”
-                k = ex.fetch_ohlcv(pair, k_tf, since=now_ms - offset, limit=1)
-                if k and len(k) > 0:
-                    res[col] = ((curr_p - k[0][4]) / k[0][4]) * 100
-                else:
-                    res[col] = -999.0 # 数据缺失标记
+            for offset, col, k_tf, k_limit in configs:
+                try:
+                    # 尝试精准时间回溯
+                    k = ex.fetch_ohlcv(pair, k_tf, since=now_ms - offset - 10000, limit=1)
+                    if not k or len(k) == 0:
+                        # 备选：靠根数回溯
+                        k = ex.fetch_ohlcv(pair, k_tf, limit=k_limit)
+                    
+                    if k:
+                        base_p = k[0][4]
+                        res[col] = ((curr_p - base_p) / base_p) * 100
+                    else:
+                        res[col] = -999.0
+                except:
+                    res[col] = -999.0
 
-            source_tag = eid.replace('io','').upper()
-            res['OBV预警'] = "正常" # 初始状态
+            res['OBV预警'] = f"正常({eid.replace('io','').upper()})"
             found_source = True
         except:
-            continue # 如果这家没有该币，尝试下一家
+            continue
 
-    # 3. 跨交易所大单扫描 (不受主源限制)
+    # 3. 大单扫描
     if found_source:
         res['net_flow'] = 0
-        res['active_count'] = 0
         th = threshold if symbol in ['BTC', 'ETH'] else threshold / 5
         for name, tid in {'OKX':'okx', 'Gate':'gateio', 'Huobi':'htx', 'Bitget':'bitget'}.items():
             try:
                 ex_t = getattr(ccxt, tid)({'timeout': 1000})
-                trades = ex_t.fetch_trades(pair, limit=20)
+                trades = ex_t.fetch_trades(pair, limit=15)
                 buy_v = 0
                 for t in trades:
                     v = t['price'] * t['amount']
                     res['net_flow'] += v if t['side'] == 'buy' else -v
                     if t['side'] == 'buy' and v >= th: buy_v += v
                 res[name] = f"{buy_v/10000:.1f}万" if buy_v > 0 else "·"
-                if buy_v > 0: res['active_count'] += 1
             except:
                 res[name] = "·"
-
-        # 底背离判断逻辑
-        if isinstance(res.get('1h涨跌'), float) and res['1h涨跌'] < -0.3 and res['net_flow'] > 0:
-            res['OBV预警'] = f"💎底背离({source_tag})"
-        else:
-            res['OBV预警'] = f"正常({source_tag})"
-            
+                
     return res
 
 # ==========================================
-# 3. 分步渲染逻辑
+# 3. UI 调度
 # ==========================================
 st.markdown("<style>.stDataFrame { opacity: 1.0 !important; }</style>", unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header("⚙️ 监控配置")
-    st_val = st.number_input("大单阈值 (USDT)", value=20000)
-    interval = st.number_input("轮询频率 (秒)", value=40)
+    st_val = st.number_input("大单阈值", value=20000)
+    interval = st.number_input("轮询频率(秒)", value=40)
     countdown = st.empty()
 
 placeholder = st.empty()
 
 while True:
-    # 每一轮处理 3 个币种
     idx = st.session_state.batch_index
     current_batch = SYMBOLS[idx : idx + 3]
     
     with ThreadPoolExecutor(max_workers=3) as executor:
         batch_results = list(executor.map(lambda s: fetch_worker(s, st_val), current_batch))
 
-    # 更新全局数据字典
     for r in batch_results:
         globals()['GLOBAL_DATA'][r['币种']] = r
 
-    # 步进 batch 索引
     st.session_state.batch_index = (st.session_state.batch_index + 3) % len(SYMBOLS)
 
-    # 汇总显示
     all_rows = [globals()['GLOBAL_DATA'].get(s, {"币种": s, "最新价": "同步中..."}) for s in SYMBOLS]
     df = pd.DataFrame(all_rows)
     
-    # 排序处理
     if '1m涨跌' in df.columns:
         df['sort_val'] = df['1m涨跌'].apply(lambda x: x if isinstance(x, (int, float)) else -999)
         df = df.sort_values(by="sort_val", ascending=False).drop(columns=['sort_val'])
     
     display_df = df.copy()
-    # 统一格式化
     for col in CH_COLS:
         if col in display_df.columns:
             display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) and x != -999.0 else "·")
 
     with placeholder.container():
-        st.write(f"🔄 刷新时间: {time.strftime('%H:%M:%S')} | 正在同步: {', '.join(current_batch)}")
-        # 确保列齐全
-        for c in ["OKX", "Gate", "Huobi", "Bitget"] + CH_COLS:
-            if c not in display_df.columns: display_df[c] = "·"
-            
+        st.write(f"🔄 刷新时间: {time.strftime('%H:%M:%S')} | 同步: {', '.join(current_batch)}")
         final_cols = ["币种", "最新价", "OBV预警"] + CH_COLS + ["OKX", "Gate", "Huobi", "Bitget"]
+        for c in final_cols:
+            if c not in display_df.columns: display_df[c] = "·"
         st.dataframe(display_df[final_cols], use_container_width=True, height=750)
 
     for i in range(interval, 0, -1):
-        countdown.metric("下一组同步倒计时", f"{i}s")
+        countdown.metric("下次同步", f"{i}s")
         time.sleep(1)

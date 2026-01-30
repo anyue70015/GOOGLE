@@ -17,7 +17,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP"]
+SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP","ADA", "BCH", "XMR", "LINK", "XLM", "CC", "LEO", "ZEC", "WLFI", "LTC", "XRP","AVAX", "SHIB", "HBAR", "TON", "CRO", "DOT", "MNT", "PEPE", "M", "NEAR", "ICP","ETC", "ASTER", "ONDO", "SKY", "MYX", "PI", "WLD", "ENA", "POL", "APT", "KAS","ATOM", "ALGO", "PUMP", "TRUMP", "ARB", "NIGHT", "RIVER", "QNT", "FIL", "FLR", "VET"]
 EXCHANGE_IDS = {'OKX': 'okx', 'Gate': 'gateio', 'Huobi': 'htx', 'Bitget': 'bitget'}
 TFS = ['1m', '5m', '15m', '1h']
 
@@ -134,3 +134,4 @@ while True:
         countdown_text.metric("下次扫描倒计时", f"{i} 秒")
         countdown_bar.progress((interval - i) / interval)
         time.sleep(1)
+

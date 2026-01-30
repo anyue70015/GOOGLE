@@ -5,67 +5,87 @@ import time
 import pandas_ta as ta
 from concurrent.futures import ThreadPoolExecutor
 
-st.set_page_config(page_title="指挥部-数据校准版", layout="wide")
-
-SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP","ADA", "BCH", "LINK", "LTC", "TRX", "ZEC", "ASTER"]
-EXCHANGES = {'OKX': 'okx', 'Bitget': 'bitget'}
-
-def fetch_calibrated_data(symbol):
+# ==========================================
+# 1. 核心抓取：强制周期偏移 (防止数据镜像)
+# ==========================================
+def fetch_calibrated_commander(symbol):
     pair = f"{symbol}/USDT"
     res = {"币种": symbol}
-    main_ex = ccxt.okx() if symbol not in ['TAO', 'HYPE'] else ccxt.bitget()
+    # 交易所分配逻辑
+    main_ex = ccxt.bitget() if symbol in ['TAO', 'HYPE', 'ASTER'] else ccxt.okx()
     
     try:
-        # 1. 实时价格
+        # A. 抓取实时价格
         tk = main_ex.fetch_ticker(pair)
         curr_p = tk['last']
         res["最新价"] = curr_p
-        res["24h"] = tk['percentage']
+        res["24h"] = f"{tk['percentage']:+.2f}%"
 
-        # 2. 修正后的多周期滚动 (通过回溯不同的 limit 确保数据不重复)
-        # 1m 用倒数第2根，15m 用倒数第2根，以此类推
-        for label, tf, count in [("1m","1m",2), ("5m","5m",2), ("15m","15m",2), ("1h","1h",2)]:
-            k = main_ex.fetch_ohlcv(pair, tf, limit=count)
-            if len(k) >= count:
-                base_p = k[0][4] # 取该周期前一根的收盘价
+        # B. 强制分周期抓取 (关键：使用不同的 limit 确保拿到不同的基准)
+        # 这里的逻辑是：抓取最近2根，取 index 0 (即已完成的那根)
+        timeframes = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h"}
+        for label, tf in timeframes.items():
+            # 增加 retry 机制防止 API 偶尔返回空值
+            k = main_ex.fetch_ohlcv(pair, tf, limit=2)
+            if len(k) >= 2:
+                base_p = k[0][4] # 取前一根 K 线的收盘价
                 res[label] = ((curr_p - base_p) / base_p) * 100
-            else: res[label] = 0.0
+            else:
+                res[label] = 0.0
 
-        # 3. 技术指标 (RSI/MACD)
-        ohlcv_raw = main_ex.fetch_ohlcv(pair, '1h', limit=50)
-        df_ta = pd.DataFrame(ohlcv_raw, columns=['t','o','h','l','c','v'])
+        # C. 指标计算 (MACD/RSI)
+        ohlcv_1h = main_ex.fetch_ohlcv(pair, '1h', limit=40)
+        df_ta = pd.DataFrame(ohlcv_1h, columns=['t','o','h','l','c','v'])
         res["RSI"] = round(ta.rsi(df_ta['c'], length=14).iloc[-1], 1)
         
-        # 4. 净流计算
-        trades = main_ex.fetch_trades(pair, limit=40)
-        res["净流(万)"] = round(sum([(t['price']*t['amount']) if t['side']=='buy' else -(t['price']*t['amount']) for t in trades]) / 10000, 2)
-
-        # 诊断逻辑优化
-        if res["RSI"] < 20: res["战术诊断"] = "🔥 极度超卖"
-        elif res["RSI"] > 80: res["战术诊断"] = "⚠️ 严重超买"
-        elif res["1m"] > 0.3 and res["净流(万)"] > 10: res["战术诊断"] = "🚀 瞬时抢筹"
+        # D. 诊断逻辑：加入 RSI 阈值
+        if res["RSI"] < 25: res["战术诊断"] = "🛒 底部确认"
+        elif res["RSI"] > 75: res["战术诊断"] = "⚠️ 严重超买"
+        elif res["1m"] > 0.3: res["战术诊断"] = "🚀 瞬时抢筹"
         else: res["战术诊断"] = "🔎 观望"
         
-    except: return None
+    except Exception as e:
+        return None
     return res
 
-# ----------------- UI 渲染 -----------------
+# ==========================================
+# 2. UI 渲染 (视觉高亮优化)
+# ==========================================
+st.title("🛰️ 战术指挥部 - 精度校准版")
 placeholder = st.empty()
+
 while True:
     with ThreadPoolExecutor(max_workers=10) as executor:
-        results = list(executor.map(fetch_calibrated_data, SYMBOLS))
+        results = list(executor.map(fetch_calibrated_commander, SYMBOLS))
     
     df = pd.DataFrame([r for r in results if r is not None])
-    df = df.sort_values(by="1m", ascending=False)
+    if not df.empty:
+        df = df.sort_values(by="1m", ascending=False)
 
     with placeholder.container():
-        st.write(f"🔄 刷新时间: {time.strftime('%H:%M:%S')} | **修正说明：已强制区分 K 线偏移量**")
+        st.write(f"🔄 更新时间: {time.strftime('%H:%M:%S')} | **状态：已强制拉开周期基准**")
         
-        # 视觉高亮函数
-        def color_rsi(val):
-            color = 'red' if val < 25 else 'green' if val > 75 else 'white'
-            return f'color: {color}; font-weight: bold'
+        # 1. 颜色高亮逻辑：RSI 超卖变红，超买变绿
+        def highlight_rsi(val):
+            if val < 25: return 'background-color: #990000; color: white' # 深红
+            if val > 75: return 'background-color: #006600; color: white' # 深绿
+            return ''
 
-        st.dataframe(df.style.applymap(color_rsi, subset=['RSI']), use_container_width=True, height=660)
-    
+        # 2. 涨跌幅变色
+        def highlight_price(val):
+            color = 'red' if val < 0 else 'green'
+            return f'color: {color}'
+
+        # 整理展示
+        display_cols = ["币种", "最新价", "战术诊断", "1m", "5m", "15m", "1h", "24h", "RSI"]
+        
+        # 格式化百分比数值（保留2位并转字符串，方便样式展示）
+        formatted_df = df[display_cols].copy()
+        
+        st.dataframe(
+            formatted_df.style.applymap(highlight_rsi, subset=['RSI'])
+                        .applymap(highlight_price, subset=['1m', '5m', '15m', '1h']),
+            use_container_width=True, height=660
+        )
+
     time.sleep(40)

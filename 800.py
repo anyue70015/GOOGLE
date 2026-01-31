@@ -4,11 +4,10 @@ import ccxt
 import time
 import pandas_ta as ta
 import requests
-from concurrent.futures import ThreadPoolExecutor  # ← 这行必须有！修复 NameError
+from concurrent.futures import ThreadPoolExecutor  # 修复 NameError
 
-st.set_page_config(page_title="指挥部 - BTC Binance 专用完整版", layout="wide")
+st.set_page_config(page_title="指挥部 - BTC Binance 完整修复版", layout="wide")
 
-# 只保留 BTC
 SYMBOLS = ["BTC"]
 
 def get_tactical_logic(df, curr_p, flow, rsi, symbol, change_1m):
@@ -24,7 +23,7 @@ def get_tactical_logic(df, curr_p, flow, rsi, symbol, change_1m):
     
     diag = "🔎 观望"
     
-    atr_threshold = 3.0  # BTC 大币阈值
+    atr_threshold = 3.0
     
     if rsi < 30 and obv_trend == "UP":
         diag = "🛒 底部吸筹"
@@ -43,11 +42,10 @@ def fetch_commander_data(symbol):
     pair = f"{symbol}/USDT"
     res = {"币种": symbol}
     
-    # 强制 Binance + 强限频保护
     main_ex = ccxt.binance({
         'enableRateLimit': True,
-        'rateLimit': 1000,          # 每请求间隔1秒
-        'timeout': 15000,
+        'rateLimit': 1200,  # ms delay between requests
+        'timeout': 30000,   # 增加超时时间
         'options': {'defaultType': 'spot'},
     })
     
@@ -55,9 +53,8 @@ def fetch_commander_data(symbol):
         tk = main_ex.fetch_ticker(pair)
         curr_p = tk['last']
         res["最新价"] = f"{curr_p:,.2f}"
-        res["24h"] = tk['percentage']
+        res["24h"] = tk.get('percentage', 0)
 
-        # 短期涨幅
         timeframes = {"1m": '1m', "5m": '5m', "15m": '15m', "1h": '1h'}
         for label, tf in timeframes.items():
             k = main_ex.fetch_ohlcv(pair, tf, limit=2)
@@ -67,16 +64,14 @@ def fetch_commander_data(symbol):
             else:
                 res[label] = 0.0
 
-        # 交易量来源 + 净流入（只 Binance）
         total_flow = 0.0
         volume_sources = []
         
-        tk_ex = main_ex.fetch_ticker(pair)
+        tk_ex = main_ex.fetch_ticker(pair)  # 再取一次确保最新
         qvol = tk_ex.get('quoteVolume', 0) or 0
         bvol = tk_ex.get('baseVolume', 0) or 0
         est_qvol = qvol if qvol > 0 else (bvol * curr_p if bvol > 0 and curr_p > 0 else 0)
         
-        # 日志打印（本地控制台 / Cloud logs 查看）
         print(f"BTC @ BINANCE: quoteVol={qvol}, baseVol={bvol}, est_qvol={est_qvol:.2f}, price={curr_p}")
         
         if est_qvol > 0:
@@ -88,13 +83,12 @@ def fetch_commander_data(symbol):
         res["净流入(万)"] = round(total_flow / 10000, 1)
         res["交易量来源"] = ", ".join(volume_sources) if volume_sources else "-"
 
-        # 指标
         ohlcv_raw = main_ex.fetch_ohlcv(pair, '1h', limit=40)
-        df = pd.DataFrame(ohlcv_raw, columns=['t','o','h','l','c','v'])
-        rsi_val = ta.rsi(df['c'], length=14).iloc[-1] if len(df) >= 14 else 50
+        df_ohlcv = pd.DataFrame(ohlcv_raw, columns=['t','o','h','l','c','v'])
+        rsi_val = ta.rsi(df_ohlcv['c'], length=14).iloc[-1] if len(df_ohlcv) >= 14 else 50
         res["RSI"] = round(rsi_val, 1)
         
-        diag, atr_p, obv_s = get_tactical_logic(df, curr_p, res["净流入(万)"], rsi_val, symbol, res.get("1m", 0))
+        diag, atr_p, obv_s = get_tactical_logic(df_ohlcv, curr_p, res["净流入(万)"], rsi_val, symbol, res.get("1m", 0))
         res["战术诊断"] = diag
         res["ATR%"] = atr_p
         res["OBV"] = obv_s
@@ -102,50 +96,69 @@ def fetch_commander_data(symbol):
         res["TVL (百万$)"] = "-"
         
     except ccxt.RateLimitExceeded as e:
+        print(f"RateLimitExceeded: {e}")
         res["最新价"] = "限频"
-        res["战术诊断"] = "Rate Limit"
-        res["交易量来源"] = str(e)[:30]
-        print(f"Rate limit hit: {e}")
+        res["战术诊断"] = "Rate Limit - 等几分钟重试"
+    except ccxt.NetworkError as e:
+        print(f"NetworkError: {e}")
+        res["最新价"] = "网络问题"
+        res["战术诊断"] = "Network Error"
     except Exception as e:
+        print(f"Fetch Error: {str(e)}")
         res["最新价"] = "Err"
         res["战术诊断"] = "异常"
-        res["交易量来源"] = str(e)[:30]
-        print(f"Error: {e}")
     
     return res
 
-# 界面
-st.title("🛰️ BTC Binance 专用完整版 (限频优化 + 日志)")
+st.title("🛰️ BTC Binance 完整修复版 (防崩溃 + 日志调试)")
 placeholder = st.empty()
 
 while True:
     with ThreadPoolExecutor(max_workers=1) as executor:
         results = list(executor.map(fetch_commander_data, SYMBOLS))
     
-    df = pd.DataFrame([r for r in results if r])
+    valid_results = [r for r in results if isinstance(r, dict) and "币种" in r]
+    df = pd.DataFrame(valid_results)
+    
+    # 调试日志
+    print(f"df rows: {len(df)}, columns: {list(df.columns)}")
     if not df.empty:
+        print(f"Sample: {df.iloc[0].to_dict()}")
+    else:
+        print("df is empty - fetch likely failed")
+    
+    if not df.empty and "1m" in df.columns:
         df = df.sort_values(by="1m", ascending=False)
-
+    elif not df.empty:
+        print("No '1m' column - sorting skipped")
+    
     display_df = df.copy()
     order = ["币种", "最新价", "战术诊断", "1m", "5m", "15m", "1h", "24h", "净流入(万)", "RSI", "ATR%", "OBV", "TVL (百万$)", "交易量来源"]
+    available_order = [col for col in order if col in display_df.columns]
     
     for col in ["1m", "5m", "15m", "1h", "24h"]:
-        display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
 
     with placeholder.container():
-        st.write(f"📊 只监控 BTC | 来源: 纯 Binance | 频率: 180s | 时间: {time.strftime('%H:%M:%S')} | **查看日志确认 quoteVolume**")
+        st.write(f"📊 BTC Binance 测试 | 频率: 180s | 时间: {time.strftime('%H:%M:%S CET')}")
+        st.info("查看 Manage app → Logs 获取调试信息（df shape, quoteVol, errors）")
         
-        def style_logic(val):
-            if "底部吸筹" in val: return 'background-color: #006400; color: white'
-            if "确认破位" in val: return 'background-color: #8B0000; color: white'
-            if "轻微偏强" in val: return 'background-color: #228B22; color: white'
-            if "短线急跌" in val: return 'background-color: #B22222; color: white'
-            if val == "💎流入": return 'color: #00ff00'
-            return ''
-
-        st.dataframe(
-            display_df[order].style.applymap(style_logic, subset=["战术诊断", "OBV"]),
-            use_container_width=True, height=400
-        )
+        if df.empty:
+            st.error("数据为空 – Binance 获取失败（可能限频/网络）。请查看日志并等几分钟重试，或添加 API key。")
+        else:
+            def style_logic(val):
+                if isinstance(val, str):
+                    if "底部吸筹" in val: return 'background-color: #006400; color: white'
+                    if "确认破位" in val: return 'background-color: #8B0000; color: white'
+                    if "轻微偏强" in val: return 'background-color: #228B22; color: white'
+                    if "短线急跌" in val: return 'background-color: #B22222; color: white'
+                    if "💎流入" in val: return 'color: #00ff00'
+                return ''
+            
+            st.dataframe(
+                display_df[available_order].style.applymap(style_logic, subset=["战术诊断", "OBV"]),
+                use_container_width=True, height=400
+            )
 
     time.sleep(180)

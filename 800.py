@@ -4,14 +4,12 @@ import ccxt
 import time
 import pandas_ta as ta
 import requests
+from concurrent.futures import ThreadPoolExecutor  # ← 这行必须有！修复 NameError
 
-st.set_page_config(page_title="指挥部 - BTC Binance 专用测试版", layout="wide")
+st.set_page_config(page_title="指挥部 - BTC Binance 专用完整版", layout="wide")
 
-# 只保留 BTC 测试
+# 只保留 BTC
 SYMBOLS = ["BTC"]
-
-# DeFi 映射（BTC 无，保持）
-DEFI_PROTOCOLS = {}  # BTC 无 DeFi TVL
 
 def get_tactical_logic(df, curr_p, flow, rsi, symbol, change_1m):
     atr_series = ta.atr(df['h'], df['l'], df['c'], length=14)
@@ -41,29 +39,16 @@ def get_tactical_logic(df, curr_p, flow, rsi, symbol, change_1m):
         
     return diag, round(atr_pct, 2), "💎流入" if obv_trend == "UP" else "💀流出"
 
-def fetch_defi_tvl(protocol):
-    try:
-        url = f"https://api.llama.fi/protocol/{protocol}"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            tvl = data.get('tvl', 0) / 1e6
-            return round(tvl, 2)
-    except:
-        pass
-    return "-"
-
 def fetch_commander_data(symbol):
     pair = f"{symbol}/USDT"
     res = {"币种": symbol}
     
-    # 强制只用 Binance 测试
-    main_ex_id = 'binance'
+    # 强制 Binance + 强限频保护
     main_ex = ccxt.binance({
         'enableRateLimit': True,
-        'rateLimit': 1000,  # 每请求间隔 1 秒，防限频
+        'rateLimit': 1000,          # 每请求间隔1秒
         'timeout': 15000,
-        'options': {'defaultType': 'spot'},  # 确保 spot 市场
+        'options': {'defaultType': 'spot'},
     })
     
     try:
@@ -82,27 +67,23 @@ def fetch_commander_data(symbol):
             else:
                 res[label] = 0.0
 
-        # 只用 Binance 测试交易量来源 + 净流入
+        # 交易量来源 + 净流入（只 Binance）
         total_flow = 0.0
         volume_sources = []
         
-        try:
-            tk_ex = main_ex.fetch_ticker(pair)
-            qvol = tk_ex.get('quoteVolume', 0) or 0
-            bvol = tk_ex.get('baseVolume', 0) or 0
-            est_qvol = qvol if qvol > 0 else (bvol * curr_p if bvol > 0 and curr_p > 0 else 0)
-            
-            # 打印关键日志（本地控制台看！）
-            print(f"BTC @ BINANCE: quoteVol={qvol}, baseVol={bvol}, est_qvol={est_qvol:.2f}, price={curr_p}")
-            
-            if est_qvol > 0:  # 阈值降到 0，确保显示
-                volume_sources.append("Binance")
-            
-            # 净流入（用 trades，Binance 支持）
-            trades = main_ex.fetch_trades(pair, limit=50)
-            total_flow += sum((t['price'] * t['amount']) if t['side'] == 'buy' else -(t['price'] * t['amount']) for t in trades)
-        except Exception as e:
-            print(f"BTC Binance ERROR: {str(e)}")
+        tk_ex = main_ex.fetch_ticker(pair)
+        qvol = tk_ex.get('quoteVolume', 0) or 0
+        bvol = tk_ex.get('baseVolume', 0) or 0
+        est_qvol = qvol if qvol > 0 else (bvol * curr_p if bvol > 0 and curr_p > 0 else 0)
+        
+        # 日志打印（本地控制台 / Cloud logs 查看）
+        print(f"BTC @ BINANCE: quoteVol={qvol}, baseVol={bvol}, est_qvol={est_qvol:.2f}, price={curr_p}")
+        
+        if est_qvol > 0:
+            volume_sources.append("Binance")
+        
+        trades = main_ex.fetch_trades(pair, limit=50)
+        total_flow += sum((t['price'] * t['amount']) if t['side'] == 'buy' else -(t['price'] * t['amount']) for t in trades)
         
         res["净流入(万)"] = round(total_flow / 10000, 1)
         res["交易量来源"] = ", ".join(volume_sources) if volume_sources else "-"
@@ -118,23 +99,27 @@ def fetch_commander_data(symbol):
         res["ATR%"] = atr_p
         res["OBV"] = obv_s
         
-        # TVL（BTC 无）
         res["TVL (百万$)"] = "-"
         
+    except ccxt.RateLimitExceeded as e:
+        res["最新价"] = "限频"
+        res["战术诊断"] = "Rate Limit"
+        res["交易量来源"] = str(e)[:30]
+        print(f"Rate limit hit: {e}")
     except Exception as e:
         res["最新价"] = "Err"
         res["战术诊断"] = "异常"
         res["交易量来源"] = str(e)[:30]
-        print(f"总体异常: {str(e)}")
+        print(f"Error: {e}")
     
     return res
 
 # 界面
-st.title("🛰️ BTC Binance 专用测试版 (排查 quoteVolume 问题)")
+st.title("🛰️ BTC Binance 专用完整版 (限频优化 + 日志)")
 placeholder = st.empty()
 
 while True:
-    with ThreadPoolExecutor(max_workers=1) as executor:  # 只1个币，并发1
+    with ThreadPoolExecutor(max_workers=1) as executor:
         results = list(executor.map(fetch_commander_data, SYMBOLS))
     
     df = pd.DataFrame([r for r in results if r])
@@ -148,7 +133,7 @@ while True:
         display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
 
     with placeholder.container():
-        st.write(f"📊 只监控 BTC | 来源: 纯 Binance | 频率: 180s | 时间: {time.strftime('%H:%M:%S')} | **请看本地控制台日志**")
+        st.write(f"📊 只监控 BTC | 来源: 纯 Binance | 频率: 180s | 时间: {time.strftime('%H:%M:%S')} | **查看日志确认 quoteVolume**")
         
         def style_logic(val):
             if "底部吸筹" in val: return 'background-color: #006400; color: white'
@@ -163,4 +148,4 @@ while True:
             use_container_width=True, height=400
         )
 
-    time.sleep(180)  # 慢下来，进一步防限频
+    time.sleep(180)

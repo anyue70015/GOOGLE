@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 st.set_page_config(page_title="指挥部 - 强制注入版", layout="wide")
 
 # 【手动填写区】请填写你代理软件里显示的 HTTP 端口
-MY_PROXY_PORT = "10809"  # 如果是 Clash 请改为 7890
+MY_PROXY_PORT = "10810"  # 如果是 Clash 请改为 7890
 
 def set_env_proxy(port):
     """强制注入系统环境变量，让所有请求强制走代理"""
@@ -81,3 +81,4 @@ while True:
             st.dataframe(df.style.map(style_logic), use_container_width=True, hide_index=True)
             
     time.sleep(10)
+

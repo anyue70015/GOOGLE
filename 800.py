@@ -3,87 +3,96 @@ import pandas as pd
 import ccxt
 import time
 import pandas_ta as ta
+import os
 
-# --- 基础配置 ---
-st.set_page_config(page_title="指挥部 - 模拟浏览器版", layout="wide")
+# --- 核心配置 ---
+st.set_page_config(page_title="指挥部 - 穿透模式", layout="wide")
 
-# 根据你图 7 的截图，使用 mixed 端口 10811
-# 如果依然不通，请在 v2rayN 中确认 HTTP 代理端口（通常是 10809）
-PROXY_URL = "http://127.0.0.1:10811"
+# 强制锁定 10811，这是 v2rayN 最通用的 Mixed 端口
+# 如果 10811 依旧拦截，请尝试改为 10809 (HTTP 端口)
+PROXY_PORT = "10811"
+PROXY_URL = f"http://127.0.0.1:{PROXY_PORT}"
 
-def fetch_data_as_browser(symbol):
-    pair = f"{symbol}/USDT"
-    
-    # 强制伪装成 Chrome 浏览器，对齐你浏览器的成功握手特征
-    ex = ccxt.binance({
+def get_exchange_instance():
+    """
+    创建一个具备持久连接能力的交易所实例
+    """
+    return ccxt.binance({
         'proxies': {
             'http': PROXY_URL,
             'https': PROXY_URL,
         },
         'enableRateLimit': True,
-        'timeout': 30000,
-        'hostname': 'api.binance.me', 
+        'timeout': 40000,
+        'hostname': 'api.binance.me', # 浏览器已验证可行的域名
         'headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'application/json',
-            'Referer': 'https://www.binance.me/'
+            # 完整伪装浏览器头部
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
         }
     })
-    
+
+def fetch_safe(symbol):
+    pair = f"{symbol}/USDT"
+    ex = get_exchange_instance()
     try:
-        # 获取基础行情
+        # 第一步：只拿价格，测试链路
         tk = ex.fetch_ticker(pair)
         
-        # 获取K线做技术分析
+        # 第二步：获取 K 线
         ohlcv = ex.fetch_ohlcv(pair, '1h', limit=30)
         df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
         
-        rsi = ta.rsi(df['c'], length=14).iloc[-1] if not df.empty else 50
+        # 计算核心指标
+        rsi = ta.rsi(df['c'], length=14).iloc[-1]
         obv = ta.obv(df['c'], df['v'])
-        obv_trend = "💎流入" if len(obv) > 1 and obv.iloc[-1] > obv.iloc[-2] else "💀流出"
+        obv_s = "💎流入" if obv.iloc[-1] > obv.iloc[-2] else "💀流出"
         
         return {
             "币种": symbol,
             "最新价": f"{tk['last']:,.2f}",
             "RSI": round(rsi, 1),
-            "资金流": obv_trend,
-            "链路状态": "✅ 握手成功"
+            "OBV": obv_s,
+            "链路": "✅ 穿透成功"
         }
     except Exception as e:
-        # 如果依然报错，将具体原因打印到后台
-        print(f"DEBUG: {symbol} 失败原因 -> {e}")
+        error_msg = str(e)
+        # 简化报错显示
+        state = "❌ 节点截断" if "EOF" in error_msg else "⚠️ 超时"
         return {
-            "币种": symbol,
-            "最新价": "❌ 拦截",
-            "RSI": "-",
-            "资金流": "-",
-            "链路状态": "节点掐断连接"
+            "币种": symbol, "最新价": "等待中", "RSI": "-", "OBV": "-", "链路": state
         }
 
 # --- UI 渲染 ---
-st.title("🛰️ 终极对齐版 - 浏览器流量特征模拟")
-st.info(f"当前策略：伪装 Chrome 访问 `api.binance.me` | 端口：{PROXY_URL}")
+st.title("🛰️ 终极指挥部 - 深度链路穿透版")
+st.caption(f"当前物理链路：{PROXY_URL} | 目标：api.binance.me")
 
-if st.button("🔄 刷新链路"):
+if st.button("⚡ 暴力重置连接"):
+    # 清理所有环境变量，防止冲突
+    os.environ.pop('http_proxy', None)
+    os.environ.pop('https_proxy', None)
     st.rerun()
 
 placeholder = st.empty()
 
-# 循环更新
 while True:
-    # 先跑 BTC 和 ETH 验证
-    results = [fetch_data_as_browser("BTC"), fetch_data_as_browser("ETH")]
+    # 采用串行抓取，避免并发导致节点限流
+    results = []
+    for s in ["BTC", "ETH", "SOL"]:
+        results.append(fetch_safe(s))
+    
     df = pd.DataFrame(results)
     
     with placeholder.container():
-        def color_row(val):
-            if "✅" in str(val): return 'color: #00ff00; font-weight: bold'
-            if "❌" in str(val): return 'color: #ff4b4b; font-weight: bold'
+        def style_map(val):
+            if "✅" in str(val) or "💎" in str(val): return 'color: #00ff00; font-weight: bold'
+            if "❌" in str(val) or "💀" in str(val): return 'color: #ff4b4b; font-weight: bold'
             return ''
-            
-        st.dataframe(df.style.map(color_row), use_container_width=True, hide_index=True)
-        
-        if "❌ 拦截" in df.values:
-            st.error("⚠️ 节点仍然掐断连接！请进入 v2rayN 设置，彻底关闭『Mux 多路复用』并重启软件。")
 
-    time.sleep(10)
+        st.dataframe(df.style.map(style_map), use_container_width=True, hide_index=True)
+        
+        if "❌ 节点截断" in df.values:
+            st.error("🚨 节点依然掐断连接！请检查 v2rayN 底部状态栏，确保【启用Tun】是开启状态，且系统代理设为【自动配置系统代理】。")
+
+    time.sleep(12)

@@ -10,3 +10,4 @@ baostock
 matplotlib
 nest-asyncio
 requests
+cloudscraper

@@ -3,158 +3,142 @@ import pandas as pd
 import ccxt
 import time
 import pandas_ta as ta
-import requests
 from concurrent.futures import ThreadPoolExecutor
 
-# --- 配置区 ---
-st.set_page_config(page_title="指挥部 - BTC Binance 完整修复版", layout="wide")
+# --- 基础配置 ---
+st.set_page_config(page_title="指挥部 - 智能端口适配版", layout="wide")
 
-# 1. 如果你本地有代理软件，请在此修改端口（常见 7890, 1080, 1081）
-LOCAL_PROXY_URL = "http://127.0.0.1:7890" 
+# 常见的代理端口列表
+COMMON_PROXY_PORTS = [7890, 10808, 10809, 1081, 1080, 7897, 7891]
 
-SYMBOLS = ["BTC"]
+# 在 st.session_state 中存储已经探测成功的端口
+if 'working_proxy' not in st.session_state:
+    st.session_state.working_proxy = None
 
-def get_tactical_logic(df, curr_p, flow, rsi, symbol, change_1m):
+def find_working_proxy():
+    """遍历端口，寻找能连通币安的代理"""
+    st.toast("正在探测本地可用代理端口...")
+    for port in COMMON_PROXY_PORTS:
+        proxy_url = f"http://127.0.0.1:{port}"
+        try:
+            # 使用简单的 requests 测试连通性，超时设短一点
+            import requests
+            # 访问币安的测试接口
+            test_url = "https://api.binance.com/api/v3/ping"
+            resp = requests.get(test_url, proxies={"http": proxy_url, "https": proxy_url}, timeout=2)
+            if resp.status_code == 200:
+                st.success(f"检测到可用代理端口: {port}")
+                return proxy_url
+        except:
+            continue
+    return None
+
+def get_tactical_logic(df, curr_p, flow, rsi, change_1m):
     """战术诊断逻辑"""
     try:
+        if df is None or len(df) < 14: return "计算中", 0.0, "-"
         atr_series = ta.atr(df['h'], df['l'], df['c'], length=14)
-        atr_val = atr_series.iloc[-1] if atr_series is not None and not atr_series.empty else 0
+        atr_val = atr_series.iloc[-1] if atr_series is not None else 0
         atr_pct = (atr_val / curr_p) * 100 if curr_p != 0 else 0
-        
         obv_series = ta.obv(df['c'], df['v'])
-        if len(obv_series) < 2:
-            obv_trend = "UNKNOWN"
-        else:
-            obv_trend = "UP" if obv_series.iloc[-1] > obv_series.iloc[-2] else "DOWN"
-        
-        macd = ta.macd(df['c'])
-        macd_status = "金叉" if macd['MACDh_12_26_9'].iloc[-1] > 0 else "死叉"
-        
+        obv_trend = "UP" if len(obv_series) > 1 and obv_series.iloc[-1] > obv_series.iloc[-2] else "DOWN"
         diag = "🔎 观望"
-        atr_threshold = 3.0
-        
-        if rsi < 30 and obv_trend == "UP":
-            diag = "🛒 底部吸筹"
-        elif atr_pct > atr_threshold and macd_status == "死叉" and flow < -20:
-            diag = "💀 确认破位"
-        elif obv_trend == "DOWN" and rsi > 65:
-            diag = "⚠️ 诱多虚涨"
-        elif change_1m > 1.2 and flow > 20 and rsi > 55 and obv_trend == "UP":
-            diag = "🚀 轻微偏强"
-        elif change_1m < -1.2 and flow < -20:
-            diag = "🩸 短线急跌"
-            
+        if rsi < 35 and obv_trend == "UP": diag = "🛒 底部吸筹"
+        elif rsi > 70 and obv_trend == "DOWN": diag = "⚠️ 诱多虚涨"
+        elif change_1m > 1.0: diag = "🚀 轻微偏强"
+        elif change_1m < -1.0: diag = "🩸 短线急跌"
         return diag, round(atr_pct, 2), "💎流入" if obv_trend == "UP" else "💀流出"
     except:
-        return "计算中", 0.0, "-"
+        return "异常", 0.0, "-"
 
 def fetch_commander_data(symbol):
-    """获取币安数据核心函数"""
     pair = f"{symbol}/USDT"
-    res = {"币种": symbol}
+    res = {"币种": symbol, "最新价": "连接中..."}
     
-    # 2. 初始化 CCXT，集成代理配置
+    # 获取当前已找到的代理
+    proxy_url = st.session_state.get('working_proxy')
+    
     main_ex = ccxt.binance({
         'enableRateLimit': True,
-        'rateLimit': 1200,
-        'timeout': 20000,
-        'options': {'defaultType': 'spot'},
-        # 让 Python 借用浏览器的代理通道
-        'proxies': {
-            'http': LOCAL_PROXY_URL,
-            'https': LOCAL_PROXY_URL,
-        },
+        'timeout': 15000,
+        'proxies': {'http': proxy_url, 'https': proxy_url} if proxy_url else {}
     })
     
     try:
-        # 获取基础价格信息
         tk = main_ex.fetch_ticker(pair)
         curr_p = tk['last']
         res["最新价"] = f"{curr_p:,.2f}"
         res["24h"] = tk.get('percentage', 0)
 
-        # 多周期涨跌幅计算
-        timeframes = {"1m": '1m', "5m": '5m', "15m": '15m', "1h": '1h'}
-        for label, tf in timeframes.items():
-            k = main_ex.fetch_ohlcv(pair, tf, limit=2)
-            if len(k) >= 2:
-                base_p = k[-2][4]
-                res[label] = ((curr_p - base_p) / base_p) * 100
-            else:
-                res[label] = 0.0
+        # 1m 涨跌
+        kline = main_ex.fetch_ohlcv(pair, '1m', limit=2)
+        res["1m"] = ((curr_p - kline[-2][4]) / kline[-2][4]) * 100 if len(kline) >= 2 else 0.0
 
-        # 净流入模拟计算 (基于最近成交)
-        trades = main_ex.fetch_trades(pair, limit=50)
-        total_flow = sum((t['price'] * t['amount']) if t['side'] == 'buy' else -(t['price'] * t['amount']) for t in trades)
-        res["净流入(万)"] = round(total_flow / 10000, 1)
+        # 流入和指标
+        trades = main_ex.fetch_trades(pair, limit=30)
+        flow = sum((t['price'] * t['amount']) if t['side'] == 'buy' else -(t['price'] * t['amount']) for t in trades)
+        res["净流入(万)"] = round(flow / 10000, 1)
 
-        # 指标计算
-        ohlcv_raw = main_ex.fetch_ohlcv(pair, '1h', limit=40)
-        df_ohlcv = pd.DataFrame(ohlcv_raw, columns=['t','o','h','l','c','v'])
-        rsi_val = ta.rsi(df_ohlcv['c'], length=14).iloc[-1] if len(df_ohlcv) >= 14 else 50
+        ohlcv_h1 = main_ex.fetch_ohlcv(pair, '1h', limit=30)
+        df = pd.DataFrame(ohlcv_h1, columns=['t','o','h','l','c','v'])
+        rsi_val = ta.rsi(df['c'], length=14).iloc[-1] if len(df) >= 14 else 50
         res["RSI"] = round(rsi_val, 1)
         
-        diag, atr_p, obv_s = get_tactical_logic(df_ohlcv, curr_p, res["净流入(万)"], rsi_val, symbol, res.get("1m", 0))
-        res["战术诊断"] = diag
-        res["ATR%"] = atr_p
-        res["OBV"] = obv_s
-        res["TVL (百万$)"] = "-"
-        res["交易量来源"] = "Binance"
+        diag, atr_p, obv_s = get_tactical_logic(df, curr_p, res["净流入(万)"], rsi_val, res["1m"])
+        res["战术诊断"], res["ATR%"], res["OBV"] = diag, atr_p, obv_s
 
-    except Exception as e:
-        res["最新价"] = "连接失败"
-        res["战术诊断"] = f"错误: 检查代理端口"
-        print(f"Fetch Error for {symbol}: {e}")
+    except Exception:
+        res["最新价"] = "❌ 连不上"
+        res["战术诊断"] = "代理失效"
     
     return res
 
-# --- UI 渲染区 ---
-st.title("🛰️ BTC Binance 完整修复版 (2026)")
+# --- 页面 UI ---
+st.title("🛰️ 自动适配代理指挥部 (Multi-Port Support)")
 
-# 使用状态容器避免刷新闪烁
+# 自动探测逻辑
+if st.session_state.working_proxy is None:
+    st.session_state.working_proxy = find_working_proxy()
+
 placeholder = st.empty()
 
 while True:
+    # 每一轮开始前检查，如果没代理，重试探测
+    if st.session_state.working_proxy is None:
+        st.session_state.working_proxy = find_working_proxy()
+
     with ThreadPoolExecutor(max_workers=1) as executor:
-        results = list(executor.map(fetch_commander_data, SYMBOLS))
+        results = list(executor.map(fetch_commander_data, ["BTC"]))
     
-    df = pd.DataFrame([r for r in results if "币种" in r])
+    df_raw = pd.DataFrame(results)
     
-    if not df.empty:
-        # 复制一份用于显示的 DF
-        display_df = df.copy()
-        
-        # 定义显示顺序
-        order = ["币种", "最新价", "战术诊断", "1m", "5m", "15m", "1h", "24h", "净流入(万)", "RSI", "ATR%", "OBV"]
-        available_order = [col for col in order if col in display_df.columns]
-        
-        # 格式化百分比列
-        for col in ["1m", "5m", "15m", "1h", "24h"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
+    if not df_raw.empty:
+        # 清理列索引，确保无 KeyError
+        target_order = ["币种", "最新价", "战术诊断", "1m", "24h", "净流入(万)", "RSI", "ATR%", "OBV"]
+        safe_cols = [c for c in target_order if c in df_raw.columns]
+        display_df = df_raw[safe_cols].copy()
+
+        # 格式化数据
+        if "1m" in display_df.columns:
+            display_df["1m"] = display_df["1m"].map(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
 
         with placeholder.container():
-            st.write(f"📊 实时监控中 | 代理地址: `{LOCAL_PROXY_URL}` | 刷新时间: {time.strftime('%H:%M:%S')}")
+            st.caption(f"当前通信通道: `{st.session_state.working_proxy or '直接连接 (不推荐)'}`")
             
-            # --- 样式逻辑 ---
-            def style_logic(val):
+            def style_picker(val):
                 if not isinstance(val, str): return ''
-                if "底部吸筹" in val or "轻微偏强" in val or "💎流入" in val: return 'color: #00ff00; font-weight: bold'
-                if "确认破位" in val or "短线急跌" in val or "💀流出" in val: return 'color: #ff4b4b; font-weight: bold'
+                if any(k in val for k in ["底部", "偏强", "流入"]): return 'color: #00ff00; font-weight: bold'
+                if any(k in val for k in ["破位", "急跌", "流出"]): return 'color: #ff4b4b; font-weight: bold'
                 return ''
 
-            # --- 关键修复点：动态计算 subset ---
-            target_cols = ["战术诊断", "OBV"]
-            # 只有当列确实存在于当前的切片中，才应用样式，防止 KeyError
-            actual_subset = [c for c in target_cols if c in display_df[available_order].columns]
-
-            if actual_subset:
-                styled_df = display_df[available_order].style.map(style_logic, subset=actual_subset)
-            else:
-                styled_df = display_df[available_order]
-
-            st.dataframe(styled_df, use_container_width=True, height=200)
-    else:
-        st.warning("正在尝试连接币安 API，请确保你的代理软件已开启并允许局域网连接...")
-
-    time.sleep(10) # 测试建议设短一点，正常运行可调回 180
+            try:
+                # 动态确定样式子集，彻底防御 KeyError
+                subset_cols = [c for c in ["战术诊断", "OBV"] if c in display_df.columns]
+                if subset_cols:
+                    st.dataframe(display_df.style.map(style_picker, subset=subset_cols), use_container_width=True)
+                else:
+                    st.dataframe(display_df, use_container_width=True)
+            except:
+                st.dataframe(display_df, use_container_width=True)
+    
+    time.sleep(15)

@@ -1,191 +1,144 @@
 import streamlit as st
-import ccxt
 import pandas as pd
-import numpy as np
+import ccxt
 import time
+import pandas_ta as ta
+from concurrent.futures import ThreadPoolExecutor
 
-st.set_page_config(page_title="加密货币现货放量/吃单扫描器", layout="wide")
-st.title("加密货币现货实时放量/吃单扫描器（免翻镜像）")
+# ==========================================
+# 1. 基础配置
+# ==========================================
+st.set_page_config(page_title="指挥部-终极整合版", layout="wide")
 
-# ==============================================
-# 上传币种列表
-# ==============================================
-uploaded = st.file_uploader("上传币种列表 (.txt，每行一个，如 BTC/USDT 或 BTC)", type="txt")
-if uploaded:
-    content = uploaded.read().decode("utf-8")
-    symbols = [line.strip().upper() for line in content.splitlines() if line.strip()]
-    symbols = list(dict.fromkeys(symbols))
+# 确保 18 个币种定义完整（去掉TRX，保持17个+可能的调整）
+SYMBOLS = ["BTC", "ETH", "SOL", "AAVE", "DOGE", "TAO", "SUI", "RENDER", "UNI", "HYPE", "XRP","ADA", "BCH", "LINK", "LTC", "ZEC", "ASTER"]
+EXCHANGES = {'OKX': 'okx', 'Bitget': 'bitget', 'Gate': 'gateio', 'Huobi': 'htx', 'Binance': 'binance'}
+
+# ==========================================
+# 2. 诊断引擎：OBV/ATR/RSI/MACD 逻辑合成
+# ==========================================
+def get_tactical_logic(df, curr_p, flow, rsi):
+    # 计算 ATR (14)
+    atr_series = ta.atr(df['h'], df['l'], df['c'], length=14)
+    atr_val = atr_series.iloc[-1] if atr_series is not None else 0
+    atr_pct = (atr_val / curr_p) * 100 if curr_p != 0 else 0
     
-    # 自动补 /USDT，但避免重复
-    symbols = [s if '/' in s else f"{s}/USDT" for s in symbols]
-    symbols = [s.replace('-', '/') for s in symbols]  # BTC-USD → BTC/USDT
-    symbols = [s if not s.endswith('/USDT/USDT') else s.replace('/USDT/USDT', '/USDT') for s in symbols]  # 防重复
+    # 计算 OBV
+    obv_series = ta.obv(df['c'], df['v'])
+    obv_trend = "UP" if obv_series.iloc[-1] > obv_series.iloc[-2] else "DOWN"
     
-    st.success(f"已加载 {len(symbols)} 个交易对")
-    st.write("监控列表：", ", ".join(symbols[:10]) + " ..." if len(symbols) > 10 else ", ".join(symbols))
-else:
-    st.info("请先上传包含交易对的txt文件")
-    st.stop()
+    # 计算 MACD
+    macd = ta.macd(df['c'])
+    macd_status = "金叉" if macd['MACDh_12_26_9'].iloc[-1] > 0 else "死叉"
+    
+    # 诊断核心
+    diag = "🔎 观望"
+    
+    # 1. 抄底条件：超卖 + OBV 资金流入确认 + 1m不阴跌
+    if rsi < 25 and obv_trend == "UP":
+        diag = "🛒 底部吸筹"
+    
+    # 2. 跑路条件：ATR 暴增(变盘) + MACD死叉 + 大幅流出
+    elif atr_pct > 5.0 and macd_status == "死叉" and flow < -50:
+        diag = "💀 确认破位"
+    
+    # 3. 诱多跑路：价格高位但 OBV 持续背离下跌
+    elif obv_trend == "DOWN" and rsi > 70:
+        diag = "⚠️ 诱多虚涨"
+        
+    return diag, round(atr_pct, 2), "💎流入" if obv_trend == "UP" else "💀流出"
 
-# ==============================================
-# 参数设置
-# ==============================================
-col1, col2, col3, col4 = st.columns(4)
-with col1:
-    timeframe = st.selectbox("K线周期", ["1m", "5m", "15m", "1h"], index=1)
-with col2:
-    refresh_sec = st.slider("刷新间隔（秒）", 30, 120, 60, help="建议60s+")
-with col3:
-    vol_multiplier = st.slider("放量倍数阈值", 1.5, 4.0, 2.54, 0.01)
-with col4:
-    min_change_pct = st.slider("方法2最小涨幅(%)", 0.3, 2.0, 0.6, 0.1)
+# ==========================================
+# 3. 核心抓取：物理隔离 + 净流聚合
+# ==========================================
+def fetch_commander_data(symbol):
+    pair = f"{symbol}/USDT"
+    res = {"币种": symbol}
+    main_ex_id = 'bitget' if symbol in ['TAO', 'HYPE', 'ASTER', 'ZEC'] else 'okx'
+    main_ex = getattr(ccxt, main_ex_id)({'timeout': 5000})
+    
+    try:
+        # A. 实时价格与 24h 基础
+        tk = main_ex.fetch_ticker(pair)
+        curr_p = tk['last']
+        res["最新价"] = curr_p
+        res["24h"] = tk['percentage']
 
-use_method1 = st.checkbox("方法1：阳线 + 异常放量", value=True)
-use_method2 = st.checkbox("方法2：放量上涨 + 尾盘强势（需放量>1x）", value=True)
-use_method3 = st.checkbox("方法3：OBV急升（需放量>1x）", value=True)
+        # B. 物理偏移抓取 (1m, 5m, 15m, 1h) - 解决数据重复/0的问题（改进1m实时性：取最近2根，确保前一根作为基准）
+        offsets = {"1m": '1m', "5m": '5m', "15m": '15m', "1h": '1h'}
+        for label, timeframe in offsets.items():
+            k = main_ex.fetch_ohlcv(pair, timeframe, limit=2)
+            if len(k) >= 2:
+                base_p = k[-2][4]  # 前一根的收盘价
+                res[label] = ((curr_p - base_p) / base_p) * 100
+            elif len(k) == 1:
+                base_p = k[0][4]
+                res[label] = ((curr_p - base_p) / base_p) * 100
+            else:
+                res[label] = 0.0
 
-# 周期参数
-N_for_avg = {"1m": 60, "5m": 20, "15m": 12, "1h": 8}[timeframe]
-vol_multiplier_adjusted = vol_multiplier + (0.5 if timeframe == "1m" else 0)
+        # C. 全网净流入 (聚合五所，包括Binance)
+        total_flow = 0.0
+        for eid in EXCHANGES.values():
+            try:
+                ex = getattr(ccxt, eid)({'timeout': 1500})
+                trades = ex.fetch_trades(pair, limit=50)
+                total_flow += sum([(t['price']*t['amount']) if t['side']=='buy' else -(t['price']*t['amount']) for t in trades])
+            except: continue
+        res["净流入(万)"] = round(total_flow / 10000, 2)
 
-# 状态管理
-if 'alerted' not in st.session_state:
-    st.session_state.alerted = set()
+        # D. 合成指标诊断
+        ohlcv_raw = main_ex.fetch_ohlcv(pair, '1h', limit=40)
+        df = pd.DataFrame(ohlcv_raw, columns=['t','o','h','l','c','v'])
+        rsi_val = ta.rsi(df['c'], length=14).iloc[-1]
+        res["RSI"] = round(rsi_val, 1)
+        
+        diag, atr_p, obv_s = get_tactical_logic(df, curr_p, res["净流入(万)"], rsi_val)
+        res["战术诊断"] = diag
+        res["ATR%"] = atr_p
+        res["OBV"] = obv_s
+        
+    except Exception as e:
+        return None
+    return res
 
-# ==============================================
-# 创建 ccxt Binance 实例，使用你的免翻地址
-# ==============================================
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {'defaultType': 'spot'},
-    'urls': {
-        'api': {
-            'public': 'https://www.bmwweb.academy/api/v3',
-            'private': 'https://www.bmwweb.academy/api/v3',  # 如果以后加 key 用
-        }
-    }
-})
-
-# ==============================================
-# 主扫描循环
-# ==============================================
+# ==========================================
+# 4. 界面渲染
+# ==========================================
+st.title("🛰️ 全球资产指挥部 (全周期/全功能/校准版)")
 placeholder = st.empty()
-alert_container = st.empty()
+
+
 
 while True:
-    data_rows = []
-    new_alerts = []
+    with ThreadPoolExecutor(max_workers=len(SYMBOLS)) as executor:
+        results = list(executor.map(fetch_commander_data, SYMBOLS))
+    
+    df = pd.DataFrame([r for r in results if r is not None])
+    if not df.empty:
+        df = df.sort_values(by="1m", ascending=False)
 
-    for symbol in symbols:
-        try:
-            ohlcv = exchange.fetch_ohlcv(
-                symbol=symbol,
-                timeframe=timeframe,
-                limit=N_for_avg + 20
-            )
-
-            if not ohlcv or len(ohlcv) < N_for_avg + 5:
-                data_rows.append([symbol, "历史不足/空", "", "", "", "", f"根数={len(ohlcv)}"])
-                continue
-
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df = df.tail(N_for_avg + 10)
-
-            current_close = float(df['close'].iloc[-1])
-            current_open = float(df['open'].iloc[-1])
-            current_high = float(df['high'].iloc[-1])
-            current_low = float(df['low'].iloc[-1])
-            current_vol = float(df['volume'].iloc[-1])
-
-            prev_close = float(df['close'].iloc[-2])
-
-            if current_vol <= 0:
-                data_rows.append([symbol, f"{current_close:.2f}", "Vol=0", "0", "0.00x", "", ""])
-                continue
-
-            avg_vol = float(df['volume'].iloc[:-1].mean())
-            vol_ratio = current_vol / avg_vol if avg_vol > 0 else 0.0
-
-            price_change = (current_close - prev_close) / prev_close * 100 if prev_close != 0 else 0.0
-
-            signal1 = False
-            if use_method1:
-                is_bull = current_close > current_open
-                vol_spike = vol_ratio > vol_multiplier_adjusted
-                signal1 = is_bull and vol_spike and vol_ratio > 1.0
-
-            signal2 = False
-            if use_method2 and vol_ratio > 1.0:
-                strong_close = (current_high - current_close) / (current_high - current_low + 1e-8) < 0.3
-                vol_spike = vol_ratio > vol_multiplier_adjusted
-                signal2 = ((price_change > min_change_pct) and vol_spike) or strong_close
-
-            signal3 = False
-            if use_method3 and len(df) >= 21 and vol_ratio > 1.0:
-                obv = (np.sign(df['close'].diff()) * df['volume']).fillna(0).cumsum()
-                obv_ma = float(obv.rolling(20).mean().iloc[-1])
-                current_obv = float(obv.iloc[-1])
-                signal3 = (current_obv > obv_ma * 1.05) and (price_change > 0)
-
-            has_signal = signal1 or signal2 or signal3
-
-            signals_str = []
-            if signal1: signals_str.append("1")
-            if signal2: signals_str.append("2")
-            if signal3: signals_str.append("3")
-            signals_display = ", ".join(signals_str) if signals_str else ""
-
-            row = [
-                symbol,
-                f"{current_close:.2f}",
-                f"{price_change:+.2f}%",
-                f"{int(current_vol):,}",
-                f"{vol_ratio:.2f}x",
-                signals_display,
-                "⚠️" if has_signal else ""
-            ]
-            data_rows.append(row)
-
-            key = f"{symbol}_{timeframe}"
-            if has_signal and key not in st.session_state.alerted:
-                alert_msg = f"【{symbol} {timeframe}】吃单信号！涨幅{price_change:+.2f}%，放量{vol_ratio:.2f}x → 方法{signals_display}"
-                new_alerts.append(alert_msg)
-                st.session_state.alerted.add(key)
-
-                st.components.v1.html(
-                    """
-                    <audio autoplay>
-                        <source src="https://www.soundjay.com/buttons/beep-07.mp3" type="audio/mpeg">
-                    </audio>
-                    <script>
-                        var audio = document.querySelector('audio');
-                        audio.play().catch(function(error) {
-                            console.log("Autoplay blocked: " + error);
-                            alert("浏览器阻止自动播放声音，请点击页面允许音频");
-                        });
-                    </script>
-                    """,
-                    height=0
-                )
-
-        except Exception as e:
-            data_rows.append([symbol, "错误", str(e)[:50], "", "", "", ""])
-
-    columns = ["交易对", "当前价", "涨幅", "成交量", "放量倍数", "触发方法", "信号"]
-    df_display = pd.DataFrame(data_rows, columns=columns)
-
-    def highlight(row):
-        return ['background-color: #ffcccc' if row["信号"] == "⚠️" else ''] * len(row)
-
-    styled = df_display.style.apply(highlight, axis=1)
+    display_df = df.copy()
+    # 严格按照要求的顺序排列
+    order = ["币种", "最新价", "战术诊断", "1m", "5m", "15m", "1h", "24h", "净流入(万)", "RSI", "ATR%", "OBV"]
+    
+    # 百分比美化
+    for col in ["1m", "5m", "15m", "1h", "24h"]:
+        display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%")
 
     with placeholder.container():
-        st.subheader(f"当前监控（周期：{timeframe}，刷新间隔：{refresh_sec}秒）")
-        st.dataframe(styled, use_container_width=True, height=600)
+        st.write(f"📊 **策略监控中** | 频率: 40s | 时间: {time.strftime('%H:%M:%S')} | **诊断：RSI+OBV+ATR+MACD**")
+        
+        def style_logic(val):
+            if val == "🛒 底部吸筹": return 'background-color: #700; color: white'
+            if val == "💀 确认破位": return 'background-color: #ff0000; color: white'
+            if val == "💎流入": return 'color: #00ff00'
+            return ''
 
-        if new_alerts:
-            for msg in new_alerts:
-                st.error(msg)
+        st.dataframe(
+            display_df[order].style.applymap(style_logic), 
+            use_container_width=True, 
+            height=660
+        )
 
-    time.sleep(refresh_sec)
-    st.rerun()
+    time.sleep(40)

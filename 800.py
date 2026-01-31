@@ -87,7 +87,7 @@ def fetch_commander_data(symbol):
         tk = main_ex.fetch_ticker(pair)
         curr_p = tk['last']
         res["最新价"] = f"{curr_p:,.4f}" if curr_p < 10 else f"{curr_p:,.2f}"
-        res["24h"] = tk['percentage']
+        res["24h"] = tk.get('percentage', 0)
 
         # 短期涨幅（用limit=2更稳）
         timeframes = {"1m": '1m', "5m": '5m', "15m": '15m', "1h": '1h'}
@@ -131,41 +131,79 @@ def fetch_commander_data(symbol):
         res["最新价"] = "Err"
         res["战术诊断"] = "异常"
         res["交易量来源"] = str(e)[:20]
+        # 防止后续样式崩溃，给默认值
+        res["RSI"] = 50.0
+        res["ATR%"] = 0.0
+        res["OBV"] = "未知"
+        res["1m"] = 0.0  # 防止无 "1m" 导致排序崩溃
     
     return res
 
-# 界面（完全不变）
+# 界面
 st.title("🛰️ 全球资产指挥部 (优化诊断 + 交易量来源)")
 placeholder = st.empty()
 
 while True:
-    with ThreadPoolExecutor(max_workers=8) as executor:  # 降并发，稳一点
+    with ThreadPoolExecutor(max_workers=6) as executor:  # 降到6，减少并发压力
         results = list(executor.map(fetch_commander_data, SYMBOLS))
     
     df = pd.DataFrame([r for r in results if r])
+    
+    # 安全排序：先检查列是否存在
     if not df.empty:
-        df = df.sort_values(by="1m", ascending=False)
-
+        if "1m" in df.columns:
+            df = df.sort_values(by="1m", ascending=False)
+        else:
+            st.warning("缺少 '1m' 列，跳过排序")
+    
     display_df = df.copy()
     order = ["币种", "最新价", "战术诊断", "1m", "5m", "15m", "1h", "24h", "净流入(万)", "RSI", "ATR%", "OBV", "交易量来源"]
     
+    # 只处理存在的列
+    available_order = [col for col in order if col in display_df.columns]
+    
     for col in ["1m", "5m", "15m", "1h", "24h"]:
-        display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
+        if col in display_df.columns:
+            display_df[col] = display_df[col].apply(lambda x: f"{x:+.2f}%" if isinstance(x, (int, float)) else x)
 
     with placeholder.container():
         st.write(f"📊 监控中 | 频率: 90s | 时间: {time.strftime('%H:%M:%S')} | 诊断优化：RSI放宽/ATR分层/短脉冲/净流入-20")
         
         def style_logic(val):
-            if "底部吸筹" in val: return 'background-color: #006400; color: white'
-            if "确认破位" in val: return 'background-color: #8B0000; color: white'
-            if "轻微偏强" in val or "脉冲" in val: return 'background-color: #228B22; color: white'
-            if "短线急跌" in val: return 'background-color: #B22222; color: white'
-            if val == "💎流入": return 'color: #00ff00'
+            # 强制转字符串，防止 NaN/None/数字导致崩溃
+            val_str = str(val) if val is not None else ""
+            
+            if "底部吸筹" in val_str:
+                return 'background-color: #006400; color: white'
+            if "确认破位" in val_str:
+                return 'background-color: #8B0000; color: white'
+            if "轻微偏强" in val_str or "脉冲" in val_str:
+                return 'background-color: #228B22; color: white'
+            if "短线急跌" in val_str:
+                return 'background-color: #B22222; color: white'
+            if val_str == "💎流入":
+                return 'color: #00ff00'
             return ''
+        
+        # 安全渲染
+        if "战术诊断" not in display_df.columns and "OBV" not in display_df.columns:
+            st.warning("缺少样式列，显示原始表格")
+            st.dataframe(display_df[available_order], use_container_width=True, height=700)
+        else:
+            try:
+                subset_cols = [col for col in ["战术诊断", "OBV"] if col in display_df.columns]
+                if subset_cols:
+                    styled_df = display_df[available_order].style.applymap(style_logic, subset=subset_cols)
+                else:
+                    styled_df = display_df[available_order].style
+                
+                st.dataframe(
+                    styled_df,
+                    use_container_width=True,
+                    height=700
+                )
+            except Exception as e:
+                st.error(f"样式渲染异常（数据类型问题）：{str(e)}")
+                st.dataframe(display_df[available_order], use_container_width=True, height=700)
 
-        st.dataframe(
-            display_df[order].style.applymap(style_logic, subset=["战术诊断", "OBV"]),
-            use_container_width=True, height=700
-        )
-
-    time.sleep(60)  # 频率降到90s，减少负载
+    time.sleep(90)  # 建议90s，减少负载

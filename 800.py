@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 st.set_page_config(page_title="指挥部 - 智能端口适配版", layout="wide")
 
 # 常见的代理端口列表
-COMMON_PROXY_PORTS = [7890, 10808, 10809, 1081, 1080, 7897, 7891]
+COMMON_PROXY_PORTS = [7890, 10808, 10809, 1081, 1080, 7897, 7891, 10810, 10811]
 
 # 在 st.session_state 中存储已经探测成功的端口
 if 'working_proxy' not in st.session_state:
@@ -142,3 +142,4 @@ while True:
                 st.dataframe(display_df, use_container_width=True)
     
     time.sleep(15)
+

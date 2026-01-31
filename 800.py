@@ -5,78 +5,85 @@ import time
 import pandas_ta as ta
 
 # --- 基础配置 ---
-st.set_page_config(page_title="指挥部 - 高延迟暴力重连版", layout="wide")
+st.set_page_config(page_title="指挥部 - 模拟浏览器版", layout="wide")
 
-# 根据你图 7 的截图， mixed 端口是 10811，这是最稳的端口
-PROXY_CONFIG = {
-    'http': 'http://127.0.0.1:10811',
-    'https': 'http://127.0.0.1:10811',
-}
+# 根据你图 7 的截图，使用 mixed 端口 10811
+# 如果依然不通，请在 v2rayN 中确认 HTTP 代理端口（通常是 10809）
+PROXY_URL = "http://127.0.0.1:10811"
 
-def fetch_data_with_patience(symbol):
-    """
-    针对 2300ms 极高延迟节点优化的抓取函数
-    """
+def fetch_data_as_browser(symbol):
     pair = f"{symbol}/USDT"
-    # 强制锁定 binance.me
+    
+    # 强制伪装成 Chrome 浏览器，对齐你浏览器的成功握手特征
     ex = ccxt.binance({
-        'proxies': PROXY_CONFIG,
+        'proxies': {
+            'http': PROXY_URL,
+            'https': PROXY_URL,
+        },
         'enableRateLimit': True,
-        'timeout': 60000, # 极长超时：60秒，对付你 2秒多的物理延迟
+        'timeout': 30000,
         'hostname': 'api.binance.me', 
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Referer': 'https://www.binance.me/'
+        }
     })
     
-    # 暴力重试机制
-    for i in range(3):
-        try:
-            # 基础行情
-            tk = ex.fetch_ticker(pair)
-            
-            # K线分析
-            ohlcv = ex.fetch_ohlcv(pair, '1h', limit=30)
-            df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
-            rsi = ta.rsi(df['c'], length=14).iloc[-1] if not df.empty else 50
-            
-            return {
-                "币种": symbol,
-                "最新价": f"{tk['last']:,.2f}",
-                "RSI": round(rsi, 1),
-                "状态": "✅ 已穿透高延迟"
-            }
-        except Exception as e:
-            if i < 2:
-                time.sleep(1) # 失败了歇一秒再试
-                continue
-            return {
-                "币种": symbol,
-                "最新价": "❌ 链路拥堵",
-                "RSI": "-",
-                "状态": "节点延迟过高"
-            }
+    try:
+        # 获取基础行情
+        tk = ex.fetch_ticker(pair)
+        
+        # 获取K线做技术分析
+        ohlcv = ex.fetch_ohlcv(pair, '1h', limit=30)
+        df = pd.DataFrame(ohlcv, columns=['t','o','h','l','c','v'])
+        
+        rsi = ta.rsi(df['c'], length=14).iloc[-1] if not df.empty else 50
+        obv = ta.obv(df['c'], df['v'])
+        obv_trend = "💎流入" if len(obv) > 1 and obv.iloc[-1] > obv.iloc[-2] else "💀流出"
+        
+        return {
+            "币种": symbol,
+            "最新价": f"{tk['last']:,.2f}",
+            "RSI": round(rsi, 1),
+            "资金流": obv_trend,
+            "链路状态": "✅ 握手成功"
+        }
+    except Exception as e:
+        # 如果依然报错，将具体原因打印到后台
+        print(f"DEBUG: {symbol} 失败原因 -> {e}")
+        return {
+            "币种": symbol,
+            "最新价": "❌ 拦截",
+            "RSI": "-",
+            "资金流": "-",
+            "链路状态": "节点掐断连接"
+        }
 
-# --- 界面渲染 ---
-st.title("🛰️ 终极暴力监控站")
-st.warning(f"检测到物理链路延迟高达 2000ms+，正在通过 10811 端口进行暴力穿透...")
+# --- UI 渲染 ---
+st.title("🛰️ 终极对齐版 - 浏览器流量特征模拟")
+st.info(f"当前策略：伪装 Chrome 访问 `api.binance.me` | 端口：{PROXY_URL}")
 
-if st.button("⚡ 强制重试链路"):
+if st.button("🔄 刷新链路"):
     st.rerun()
 
 placeholder = st.empty()
 
+# 循环更新
 while True:
-    # 减少并发，一个一个抓，防止由于节点太差导致并发死锁
-    results = []
-    for s in ["BTC", "ETH"]:
-        results.append(fetch_data_with_patience(s))
-    
+    # 先跑 BTC 和 ETH 验证
+    results = [fetch_data_as_browser("BTC"), fetch_data_as_browser("ETH")]
     df = pd.DataFrame(results)
     
     with placeholder.container():
-        def style_logic(val):
+        def color_row(val):
             if "✅" in str(val): return 'color: #00ff00; font-weight: bold'
             if "❌" in str(val): return 'color: #ff4b4b; font-weight: bold'
             return ''
             
-        st.dataframe(df.style.map(style_logic), use_container_width=True, hide_index=True)
-    
+        st.dataframe(df.style.map(color_row), use_container_width=True, hide_index=True)
+        
+        if "❌ 拦截" in df.values:
+            st.error("⚠️ 节点仍然掐断连接！请进入 v2rayN 设置，彻底关闭『Mux 多路复用』并重启软件。")
+
     time.sleep(10)

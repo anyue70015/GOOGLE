@@ -11,3 +11,4 @@ matplotlib
 nest-asyncio
 requests
 cloudscraper
+urllib3

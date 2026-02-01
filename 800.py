@@ -1,103 +1,118 @@
 import streamlit as st
 import pandas as pd
-import ccxt
+import requests
 import time
+import urllib3
+import random
 
-# --- 1. 基础配置 ---
-st.set_page_config(page_title="全球量化指挥部 - CCXT稳定版", layout="wide")
+# 基础配置
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+st.set_page_config(page_title="全球量化指挥部 - 云端生存版", layout="wide")
 
-# 初始化币安合约引擎 (内置高可用接入点)
-@st.cache_resource
-def get_exchange():
-    # 使用 binanceusdm (币安 U 基合约)
-    return ccxt.binanceusdm({
-        'timeout': 10000,
-        'enableRateLimit': True,
-    })
+# --- 云端生存级域名列表 ---
+# 如果第一个不通，系统会自动尝试后面的
+BINANCE_ENDPOINTS = [
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+    "https://fapi.binance.us"
+]
 
-exchange = get_exchange()
-
-# 币种名单
 SYMBOLS = ["BTC", "RENDER", "SUI", "TAO", "ETH", "SOL", "XRP", "UNI", "BCH", "HYPE", "DOGE", "AAVE", "ZEC", "CHZ"]
 
-# ------------------------------------------------
-# 2. 核心诊断逻辑
-# ------------------------------------------------
-def get_strategy_logic(m1, m5, h1, c24):
-    if m1 > 0.15 and m5 > 0.5: return "🎯 战术突击 (强吸筹)"
-    if m1 < -0.15 and m5 < -0.5: return "💀 战略撤退 (砸盘)"
-    if c24 > 3 and m1 < -0.05: return "🔋 战术回撤 (洗盘)"
-    if c24 < -3 and m1 > 0.05: return "🛡️ 战略修复 (抄底)"
-    if abs(m1) < 0.05 and abs(m5) < 0.1: return "😴 战略横盘"
-    return "⚖️ 中性博弈"
+# 模拟真实的浏览器请求头，防止被 403
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache"
+}
 
-def fetch_data_from_ccxt(symbol):
+# ------------------------------------------------
+# 2. 增强型抓取引擎
+# ------------------------------------------------
+def safe_request(path, params=None):
+    """自动轮询不同的币安节点，绕过 IP 封锁"""
+    for base_url in BINANCE_ENDPOINTS:
+        try:
+            url = f"{base_url}{path}"
+            r = requests.get(url, params=params, headers=HEADERS, timeout=2, verify=False)
+            if r.status_code == 200:
+                return r.json()
+        except:
+            continue
+    return None
+
+def fetch_data_row(s):
     try:
-        pair = f"{symbol}/USDT"
-        
-        # 1. 获取 24h 涨幅数据
-        ticker = exchange.fetch_ticker(pair)
-        price = ticker['last']
-        c24 = ticker['percentage'] # 24h 涨跌幅百分比
-        vol = ticker['quoteVolume'] # 24h 成交额
+        # 1. 获取基础行情数据
+        ticker_data = safe_request("/fapi/v1/ticker/24hr", {"symbol": f"{s}USDT"})
+        if not ticker_data:
+            # HYPE 特殊逻辑：尝试 OKX
+            if s == "HYPE":
+                r_okx = requests.get("https://www.okx.com/api/v5/market/ticker?instId=HYPE-USDT", timeout=2)
+                d = r_okx.json()['data'][0]
+                price, c24, vol = float(d['last']), float(d['last']) * float(d['vol24h']), float(d['vol24h'])
+            else: return None
+        else:
+            price = float(ticker_data['lastPrice'])
+            c24 = float(ticker_data['priceChangePercent'])
+            vol = float(ticker_data['quoteVolume'])
 
-        # 2. 获取 K 线数据 (获取最近 100 根 1m 线)
-        # 内部自动处理了分页和频率限制
-        ohlcv = exchange.fetch_ohlcv(pair, timeframe='1m', limit=61)
-        df_k = pd.DataFrame(ohlcv, columns=['ts', 'o', 'h', 'l', 'c', 'v'])
+        # 2. 高精度回溯 (1m/5m/1h)
+        # 获取 120 根 1m 线，一次性计算三个维度
+        k_data = safe_request("/fapi/v1/klines", {"symbol": f"{s}USDT", "interval": "1m", "limit": 120})
         
-        # 计算 1m 涨幅
-        m1 = (df_k['c'].iloc[-1] - df_k['o'].iloc[-1]) / df_k['o'].iloc[-1] * 100
-        # 计算 5m 涨幅 (最近 5 根线的合集)
-        m5 = (df_k['c'].iloc[-1] - df_k['o'].iloc[-5]) / df_k['o'].iloc[-5] * 100
-        # 计算 1h 涨幅
-        h1 = (df_k['c'].iloc[-1] - df_k['o'].iloc[-60]) / df_k['o'].iloc[-60] * 100
+        if k_data:
+            # 计算 1m: 最新收盘 - 当前根开盘
+            m1 = (float(k_data[-1][4]) - float(k_data[-1][1])) / float(k_data[-1][1]) * 100
+            # 计算 5m: 最新收盘 - 5根前的开盘
+            m5 = (float(k_data[-1][4]) - float(k_data[-5][1])) / float(k_data[-5][1]) * 100
+            # 计算 1h: 最新收盘 - 60根前的开盘
+            h1 = (float(k_data[-1][4]) - float(k_data[-60][1])) / float(k_data[-60][1]) * 100
+        else:
+            m1 = m5 = h1 = 0.0
 
         return {
-            "币种": symbol,
+            "币种": s,
             "最新价": round(price, 4) if price < 10 else round(price, 2),
-            "1m%": m1, 
-            "5m%": m5, 
-            "1h%": h1, 
-            "24h%": c24,
-            "净流入(万)": round((c24 * vol / 100000000), 1), # 估算净流入
-            "战术/战略诊断": get_strategy_logic(m1, m5, h1, c24),
-            "来源": "CCXT聚合"
+            "1m%": m1, "5m%": m5, "1h%": h1, "24h%": c24,
+            "净流入(万)": round((c24 * vol / 10000000), 1),
+            "战术诊断": "🎯 突击" if m1 > 0.1 else "⚖️ 盘整",
+            "来源": "Binance-Multi"
         }
-    except Exception as e:
-        return None
+    except: return None
 
 # ------------------------------------------------
-# 3. 界面渲染
+# 3. 页面渲染
 # ------------------------------------------------
-st.title("🛰️ 全球量化指挥部 - 实时战略中心")
-st.caption(f"底层引擎: CCXT (自动路由) | 刷新间隔: 5s")
+st.title("🛰️ 全球量化指挥部 - 云端最终版")
+
+# 侧边栏调试信息
+st.sidebar.header("系统状态")
+st.sidebar.write("✅ 域名轮询开启")
+st.sidebar.write("✅ 浏览器头伪装开启")
 
 placeholder = st.empty()
 
 while True:
     rows = []
-    # 使用 Streamlit 进度条显示加载状态，防止白屏
+    # 随机化币种顺序，避免被币安检测到固定步频抓取
+    random.shuffle(SYMBOLS)
+    
     for s in SYMBOLS:
-        res = fetch_data_row = fetch_data_from_ccxt(s)
-        if res:
-            rows.append(res)
+        res = fetch_data_row(s)
+        if res: rows.append(res)
     
     if rows:
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows).sort_values(by="1m%", ascending=False)
         with placeholder.container():
             st.dataframe(
-                df.style.format({
-                    "1m%": "{:+,.2f}%", "5m%": "{:+,.2f}%", 
-                    "1h%": "{:+,.2f}%", "24h%": "{:+,.2f}%",
-                    "最新价": "{:,}"
-                }).background_gradient(subset=["1m%", "24h%"], cmap="RdYlGn", vmin=-1.0, vmax=1.0),
-                use_container_width=True,
-                height=(len(SYMBOLS) + 1) * 38,
-                hide_index=True
+                df.style.format({"1m%": "{:+,.2f}%", "5m%": "{:+,.2f}%", "24h%": "{:+,.2f}%"}),
+                use_container_width=True, hide_index=True
             )
-            st.caption(f"📊 数据源同步正常 | 刷新时间: {time.strftime('%H:%M:%S')}")
+            st.caption(f"📊 实时监测中 | 刷新时间: {time.strftime('%H:%M:%S')}")
     else:
-        st.error("⚠️ 云端链路被拦截，请尝试在本地运行或更换部署区域。")
+        st.warning("⚠️ 节点正在被风控，系统正在自动更换接入点...")
 
-    time.sleep(5)
+    time.sleep(4)

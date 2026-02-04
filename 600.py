@@ -10,7 +10,7 @@ from streamlit_autorefresh import st_autorefresh
 import requests
 
 # --- 1. 基础配置 ---
-st.set_page_config(page_title="UT Bot 实时看板", layout="wide")
+st.set_page_config(page_title="UT Bot 终极全维看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
 def get_now_beijing():
@@ -35,15 +35,15 @@ st_autorefresh(interval=60 * 1000, key="refresh")
 def calculate_ut_bot(df):
     if df.empty or len(df) < atr_period + 5: return pd.DataFrame()
     
-    # 统一列名
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    cols = {c.lower(): c for c in df.columns}
-    df = df.rename(columns={cols['high']: 'High', cols['low']: 'Low', cols['close']: 'Close'})
-    
-    # 计算 UT Bot
+    # 强制列名大写标准化
+    df.columns = [str(c).capitalize() for c in df.columns]
+    if 'Close' not in df.columns: # 针对 yfinance 可能的 MultiIndex
+        df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+        df.columns = [str(c).capitalize() for c in df.columns]
+
     df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
     df = df.dropna(subset=['atr']).copy()
+    
     n_loss = sensitivity * df['atr']
     src = df['Close']
     trail_stop = np.zeros(len(df))
@@ -62,34 +62,34 @@ def calculate_ut_bot(df):
     df['sell'] = (df['Close'] < df['trail_stop']) & (df['Close'].shift(1) >= df['trail_stop'].shift(1))
     return df
 
-def get_signal_info(df):
+def get_signal_info(df, is_crypto=True):
     if df.empty or len(df) < 2: return "N/A", 0
     curr_p = df.iloc[-1]['Close']
     
-    # 状态追溯
     buys = df[df['buy'] == True]
     sells = df[df['sell'] == True]
     l_b = buys.index[-1] if not buys.empty else None
     l_s = sells.index[-1] if not sells.empty else None
     
-    now_bj = get_now_beijing().replace(tzinfo=None) # 统一用无时区北京时间对比
+    now_bj = get_now_beijing()
 
-    def to_bj_naive(ts):
+    def normalize_time(ts):
         if ts is None: return None
-        if ts.tzinfo is not None:
-            return ts.astimezone(BEIJING_TZ).replace(tzinfo=None)
-        # 币圈数据通常是 UTC，手动加 8 小时
-        return ts + timedelta(hours=8)
+        # 如果是加密货币 (CCXT 默认无时区 UTC)
+        if is_crypto:
+            return pytz.utc.localize(ts).astimezone(BEIJING_TZ)
+        # 如果是美股 (yfinance 带有明确时区)
+        return ts.astimezone(BEIJING_TZ)
 
-    l_b_bj = to_bj_naive(l_b)
-    l_s_bj = to_bj_naive(l_s)
+    l_b_bj = normalize_time(l_b)
+    l_s_bj = normalize_time(l_s)
 
     if l_b_bj and (not l_s_bj or l_b_bj > l_s_bj):
         dur = int((now_bj - l_b_bj).total_seconds() / 60)
-        return (f"🚀 BUY({dur}m)" if 0 <= dur <= 30 else "多 🟢"), curr_p
+        return (f"🚀 BUY({dur}m)" if 0 <= dur <= 35 else "多 🟢"), curr_p
     elif l_s_bj and (not l_b_bj or l_s_bj > l_b_bj):
         dur = int((now_bj - l_s_bj).total_seconds() / 60)
-        return (f"📉 SELL({dur}m)" if 0 <= dur <= 30 else "空 🔴"), curr_p
+        return (f"📉 SELL({dur}m)" if 0 <= dur <= 35 else "空 🔴"), curr_p
     return "维持", curr_p
 
 # --- 4. 数据执行 ---
@@ -102,9 +102,8 @@ def fetch_all():
         sym = f"{base}/USDT:USDT" if base in CONTRACTS else f"{base}/USDT"
         row = {"资产": base, "持仓多空比": "N/A"}
         try:
-            # 尝试抓取多空比
             url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={base}"
-            res = requests.get(url, timeout=1).json()
+            res = requests.get(url, timeout=2).json()
             if res.get('code') == '0' and res.get('data'):
                 row["持仓多空比"] = float(res['data'][0]['ratio'])
         except: pass
@@ -112,15 +111,16 @@ def fetch_all():
         lp = 0
         for tf in selected_intervals:
             try:
-                bars = exchange.fetch_ohlcv(sym, timeframe=tf, limit=150)
+                bars = exchange.fetch_ohlcv(sym, timeframe=tf, limit=200)
                 data = pd.DataFrame(bars, columns=['Time','Open','High','Low','Close','Volume'])
                 data['Time'] = pd.to_datetime(data['Time'], unit='ms')
                 data.set_index('Time', inplace=True)
                 df = calculate_ut_bot(data)
-                status, price = get_signal_info(df)
+                status, price = get_signal_info(df, is_crypto=True)
                 row[tf] = status
                 if price > 0: lp = price
-            except: row[tf] = "N/A"
+            except Exception as e:
+                row[tf] = "N/A"
         row["现价"] = f"{lp:.4f}"
         results.append(row)
 
@@ -133,7 +133,7 @@ def fetch_all():
             try:
                 data = yf.download(sym, period="10d", interval=yf_map[tf], progress=False, auto_adjust=True)
                 df = calculate_ut_bot(data)
-                status, price = get_signal_info(df)
+                status, price = get_signal_info(df, is_crypto=False)
                 row[tf] = status
                 if price > 0: lp = price
             except: row[tf] = "N/A"
@@ -142,23 +142,24 @@ def fetch_all():
     return pd.DataFrame(results)
 
 # --- 5. 渲染 ---
-if 'data_cache' not in st.session_state or st.sidebar.button("🔄 刷新数据"):
+if 'data_cache' not in st.session_state or st.sidebar.button("🔄 强制同步"):
     st.session_state.data_cache = fetch_all()
 
 df = st.session_state.data_cache
 
 if not df.empty:
     def get_style(val):
-        if 'BUY' in str(val): return 'color: #00ff00; font-weight: bold; background-color: #004400'
-        if 'SELL' in str(val): return 'color: #ff4444; font-weight: bold; background-color: #440000'
-        if '🟢' in str(val): return 'color: #00ff00'
-        if '🔴' in str(val): return 'color: #ff4444'
-        if isinstance(val, float):
+        s = str(val)
+        if 'BUY' in s: return 'color: #00ff00; font-weight: bold; background-color: #004400'
+        if 'SELL' in s: return 'color: #ff4444; font-weight: bold; background-color: #440000'
+        if '🟢' in s: return 'color: #00ff00'
+        if '🔴' in s: return 'color: #ff4444'
+        if isinstance(val, (float, int)):
             if val > 1.1: return 'color: #ff4444'
             if val < 0.9: return 'color: #00ff00'
         return ''
 
-    # HTML 渲染确保 100% 显示所有行
+    # 彻底解除 12 行限制
     html = "<table style='width:100%; border-collapse: collapse;'>"
     html += f"<tr style='background-color: #333; color: white;'>{''.join(f'<th style=padding:10px; border:1px solid #555;>{c}</th>' for c in df.columns)}</tr>"
     for _, row in df.iterrows():

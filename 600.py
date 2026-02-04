@@ -2,41 +2,42 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
-import yfinance as yf
+import ccxt
 from datetime import datetime
 
 # --- 页面配置 ---
-st.set_page_config(page_title="UT Bot Pro 监控面板", layout="wide")
+st.set_page_config(page_title="OKX UT Bot 实时监控", layout="wide")
 
-st.title("🛡️ UT Bot 多周期共振扫描仪")
+st.title("⚡ OKX 实时 UT Bot 多周期监控")
 
-# --- 初始化监测列表 ---
+# --- OKX 币种映射 ---
+# OKX 的格式是 BTC/USDT，贵金属通常需要特定品种或在 OKX 下交易杠杆/永续
 DEFAULT_SYMBOLS = [
-    "AAVE-USD", "HYPE-USD", "BTC-USD", "ETH-USD", "SOL-USD", 
-    "XRP-USD", "RENDER-USD", "TAO-USD", "SUI-USD", "DOGE-USD", 
-    "XAG-USD", "XAU-USD", "UNI-USD"
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "AAVE/USDT", "HYPE/USDT",
+    "XRP/USDT", "RENDER/USDT", "TAO/USDT", "SUI/USDT", "DOGE/USDT", "UNI/USDT"
 ]
 
-# --- 侧边栏配置 ---
-st.sidebar.header("配置中心")
+st.sidebar.header("OKX 监控配置")
 selected_symbols = st.sidebar.multiselect("监测清单", DEFAULT_SYMBOLS, default=DEFAULT_SYMBOLS)
 selected_intervals = st.sidebar.multiselect("监测周期", ["30m", "1h", "4h", "1d"], default=["30m", "1h", "4h", "1d"])
 
-# 时间映射
-INTERVAL_MAP = {"30m": "30m", "1h": "60m", "4h": "1h", "1d": "1d"}
+# OKX API 实例化 (无需 API Key 即可获取 K 线)
+exchange = ccxt.okx()
 
 # --- 核心逻辑 ---
-def get_signal_status(symbol, interval):
-    """计算单个周期下的信号状态"""
+def get_okx_signal(symbol, timeframe):
     try:
-        period = "7d" if "m" in interval else "200d"
-        df = yf.download(symbol, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty or len(df) < 20: return "数据缺失"
+        # 获取 100 根 K 线确保 ATR 准确
+        # OKX fetch_ohlcv: [timestamp, open, high, low, close, volume]
+        limit = 100
+        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-
-        # UT Bot 计算
+        df = pd.DataFrame(bars, columns=['Timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+        df['Close'] = df['Close'].astype(float)
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        
+        # 计算 UT Bot 指标
         df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=10)
         df = df.dropna(subset=['atr']).copy()
         
@@ -44,6 +45,7 @@ def get_signal_status(symbol, interval):
         src = df['Close']
         trail_stop = np.zeros(len(df))
         
+        # 递归计算
         for i in range(1, len(df)):
             p_stop = trail_stop[i-1]
             if src.iloc[i] > p_stop and src.iloc[i-1] > p_stop:
@@ -53,58 +55,56 @@ def get_signal_status(symbol, interval):
             else:
                 trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p_stop else src.iloc[i] + n_loss.iloc[i]
         
-        # 信号判断
+        # 最新状态判定
         curr_p, prev_p = src.iloc[-1], src.iloc[-2]
         curr_s, prev_s = trail_stop[-1], trail_stop[-2]
         
-        # 成交量
+        # 成交量检查
         vol_ma = df['Volume'].rolling(10).mean().iloc[-1]
         is_vol_surge = df['Volume'].iloc[-1] > (vol_ma * 1.5)
 
         if curr_p > curr_s and prev_p <= prev_s:
-            return f"🚀 BUY" + (" (放量)" if is_vol_surge else "")
+            return f"🚀 BUY" + (" (放量)" if is_vol_surge else ""), curr_p
         elif curr_p < curr_s and prev_p >= prev_s:
-            return "📉 SELL"
+            return "📉 SELL", curr_p
         else:
-            return "多 🟢" if curr_p > curr_s else "空 🔴"
-    except:
-        return "错误"
+            status = "多 🟢" if curr_p > curr_s else "空 🔴"
+            return status, curr_p
+    except Exception as e:
+        return f"错误: {str(e)[:10]}", 0
 
 # --- 执行扫描 ---
-if st.sidebar.button("开始全量扫描") or 'data_cache' not in st.session_state:
-    with st.spinner('正在调取各交易所 API 数据...'):
+if st.sidebar.button("同步 OKX 数据扫描"):
+    with st.spinner('正在连接 OKX 全球服务器...'):
         summary = []
         for sym in selected_symbols:
             row_data = {"币种": sym}
-            # 获取当前实时价格
-            current_data = yf.Ticker(sym).history(period="1d")
-            row_data["当前价"] = f"{current_data['Close'].iloc[-1]:.4f}" if not current_data.empty else "N/A"
+            latest_price = 0
             
-            # 遍历每个选中的周期
             for interval in selected_intervals:
-                row_data[interval] = get_signal_status(sym, INTERVAL_MAP[interval])
+                # 注意：OKX 的 1h 是 '1h'，4h 是 '4h'，1d 是 '1d'
+                status, price = get_okx_signal(sym, interval)
+                row_data[interval] = status
+                if price != 0: latest_price = price
+            
+            row_data["OKX现价"] = f"{latest_price:.4f}"
             summary.append(row_data)
         
-        st.session_state.data_cache = pd.DataFrame(summary)
+        st.session_state.okx_cache = pd.DataFrame(summary)
 
-# --- 展示表格 ---
-if 'data_cache' in st.session_state:
-    df_display = st.session_state.data_cache
+# --- 样式渲染 ---
+if 'okx_cache' in st.session_state:
+    df_display = st.session_state.okx_cache
 
-    # 样式定义
-    def highlight_signals(val):
-        if 'BUY' in str(val): return 'background-color: #155724; color: #d4edda; font-weight: bold'
-        if 'SELL' in str(val): return 'background-color: #721c24; color: #f8d7da; font-weight: bold'
+    def style_output(val):
+        if 'BUY' in str(val): return 'background-color: #00ff0022; color: #00ff00; font-weight: bold'
+        if 'SELL' in str(val): return 'background-color: #ff000022; color: #ff0000; font-weight: bold'
         if '🟢' in str(val): return 'color: #28a745'
         if '🔴' in str(val): return 'color: #dc3545'
         return ''
 
-    st.subheader(f"信号看板 (更新于: {datetime.now().strftime('%H:%M:%S')})")
+    st.subheader(f"OKX 行情看板 (更新于: {datetime.now().strftime('%H:%M:%S')})")
     st.dataframe(
-        df_display.style.applymap(highlight_signals, subset=selected_intervals),
-        use_container_width=True,
-        height=(len(selected_symbols) + 1) * 38
+        df_display.style.applymap(style_output, subset=selected_intervals),
+        use_container_width=True
     )
-
-    # 底部说明
-    st.caption("注：'多 🟢' 表示当前处于上涨趋势中，'🚀 BUY' 表示本周期刚刚触发买入信号。")

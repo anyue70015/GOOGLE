@@ -12,3 +12,4 @@ nest-asyncio
 requests
 cloudscraper
 urllib3
+streamlit-autorefresh

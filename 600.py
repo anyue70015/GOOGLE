@@ -36,7 +36,7 @@ if uploaded_file:
     custom_stocks = [line.strip() for line in uploaded_file.read().decode("utf-8").splitlines() if line.strip()]
 
 selected_intervals = ["15m", "30m", "1h", "4h", "1d"]
-# 调快自动刷新频率，建议 1 分钟刷一次，这样倒计时才会动态跳动
+# 1分钟刷新一次，让计时器更准
 st_autorefresh(interval=1 * 60 * 1000, key="datarefresh")
 
 # --- 3. 核心算法 ---
@@ -61,56 +61,30 @@ def calculate_ut_bot(df):
     return df
 
 def get_signal_info(df, timeframe):
-    """
-    精确计算信号持续时间，超过30分钟则隐藏强力警报显示
-    """
     if df.empty or len(df) < 2: return "N/A", 0, ""
-    
-    last_row = df.iloc[-1]
-    curr_p = last_row['Close']
-    
-    # 获取最近一次信号的时间戳 (转换为北京时间对比)
-    buys = df[df['buy'] == True]
-    sells = df[df['sell'] == True]
-    
+    curr_p = df.iloc[-1]['Close']
+    buys, sells = df[df['buy'] == True], df[df['sell'] == True]
     l_b_idx = buys.index[-1] if not buys.empty else None
     l_s_idx = sells.index[-1] if not sells.empty else None
-    
     now_bj = get_now_beijing()
-    
-    # 辅助函数：计算信号到现在过了多少分钟
+
     def get_duration_mins(signal_time):
-        # 确保信号时间是带有时区的
         if signal_time.tzinfo is None:
             signal_time = signal_time.replace(tzinfo=pytz.utc).astimezone(BEIJING_TZ)
         else:
             signal_time = signal_time.astimezone(BEIJING_TZ)
-        diff = now_bj - signal_time
-        return int(diff.total_seconds() / 60)
+        return int((now_bj - signal_time).total_seconds() / 60)
 
-    # 判断当前处于什么趋势
-    if (l_b_idx is not None and l_s_idx is None) or (l_b_idx is not None and l_b_idx > l_s_idx):
-        # 处于买入趋势
+    if (l_b_idx is not None) and (l_s_idx is None or l_b_idx > l_s_idx):
         duration = get_duration_mins(l_b_idx)
-        # 如果报警超过 30 分钟，不再显示 🚀 BUY，恢复为 多 🟢
         if duration <= 30:
-            status = f"🚀 BUY ({duration}m)"
-            alert_type = "BUY" if duration == 0 else "" # 仅在触发那一刻发微信
-        else:
-            status = "多 🟢"
-            alert_type = ""
-        return status, curr_p, alert_type
-    elif (l_s_idx is not None and l_b_idx is None) or (l_s_idx is not None and l_s_idx > l_b_idx):
-        # 处于卖出趋势
+            return f"🚀 BUY ({duration}m)", curr_p, ("BUY" if duration <= 1 else "")
+        return "多 🟢", curr_p, ""
+    elif (l_s_idx is not None) and (l_b_idx is None or l_s_idx > l_b_idx):
         duration = get_duration_mins(l_s_idx)
         if duration <= 30:
-            status = f"📉 SELL ({duration}m)"
-            alert_type = "SELL" if duration == 0 else ""
-        else:
-            status = "空 🔴"
-            alert_type = ""
-        return status, curr_p, alert_type
-    
+            return f"📉 SELL ({duration}m)", curr_p, ("SELL" if duration <= 1 else "")
+        return "空 🔴", curr_p, ""
     return "维持", curr_p, ""
 
 def get_okx_ls_ratio(symbol):
@@ -141,23 +115,19 @@ def fetch_data():
         lp = 0
         for tf in selected_intervals:
             try:
-                # 获取数据，确保 Index 是 Datetime 类型方便计算
                 bars = exchange.fetch_ohlcv(sym, timeframe=tf, limit=150)
                 df = pd.DataFrame(bars, columns=['Time','Open','High','Low','Close','Volume'])
                 df['Time'] = pd.to_datetime(df['Time'], unit='ms')
                 df.set_index('Time', inplace=True)
-                
                 df = calculate_ut_bot(df)
                 status, price, alert = get_signal_info(df, tf)
                 row[tf] = status
                 if price > 0: lp = price
-                # 微信仅在 duration 为 0 的那一刻发一次
-                if alert: send_wechat(f"UT信号: {base} {tf}", f"方向: {alert}\n价格: {price}\n多空比: {ls_ratio}")
+                if alert: send_wechat(f"UT信号: {base} {tf}", f"信号: {alert}\n价格: {price}\n多空比: {ls_ratio}")
             except: row[tf] = "N/A"
         row["现价"] = f"{lp:.4f}"
         results.append(row)
 
-    # 股票/金银逻辑
     yf_map = {"15m":"15m","30m":"30m","1h":"60m","4h":"60m","1d":"1d"}
     for sym in custom_stocks:
         row = {"资产": sym, "来源": "Yahoo", "多空比": "--"}
@@ -166,6 +136,7 @@ def fetch_data():
             try:
                 data = yf.download(sym, period="5d" if "m" in tf else "60d", interval=yf_map[tf], progress=False)
                 if data.empty: row[tf] = "休市"; continue
+                data.index = data.index.tz_localize(None).tz_localize(pytz.utc) # 统一雅虎时间
                 df = calculate_ut_bot(data.copy())
                 df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
                 status, price, _ = get_signal_info(df, tf)
@@ -177,31 +148,29 @@ def fetch_data():
     return pd.DataFrame(results)
 
 # --- 5. 页面展示 ---
-st.markdown("## 🛡️ UT Bot 实时监控 (30分钟报警消失模式)")
+st.markdown("## 🛡️ UT Bot 科学看板")
 c1, c2 = st.columns([2, 1])
 now = get_now_beijing()
-c1.write(f"🕒 当前北京时间: {now.strftime('%H:%M:%S')}")
+c1.write(f"🕒 北京时间: {now.strftime('%H:%M:%S')}")
 
-# 手动同步或自动同步
-if 'data_cache' not in st.session_state or st.sidebar.button("🔄 立即同步行情"):
+if 'data_cache' not in st.session_state or st.sidebar.button("🔄 同步行情"):
     st.session_state.data_cache = fetch_data()
 
 df = st.session_state.data_cache
 if not df.empty:
-    # 进度条
     all_s = df[selected_intervals].values.flatten()
-    bulls = sum(1 for x in all_status if "多" in str(x) or "BUY" in str(x))
+    # 这里已修正变量名错误
+    bulls = sum(1 for x in all_s if "多" in str(x) or "BUY" in str(x))
     total = len([x for x in all_s if x not in ["N/A", "休市"]])
     ratio = bulls/total if total > 0 else 0
     st.progress(ratio, text=f"市场多头占比: {ratio:.1%}")
 
     def style_c(val):
-        if 'BUY' in str(val): return 'background-color: #00ff0033; color: #00ff00; font-weight: bold; border-radius: 5px'
-        if 'SELL' in str(val): return 'background-color: #ff000033; color: #ff0000; font-weight: bold; border-radius: 5px'
+        if 'BUY' in str(val): return 'background-color: #00ff0033; color: #00ff00; font-weight: bold'
+        if 'SELL' in str(val): return 'background-color: #ff000033; color: #ff0000; font-weight: bold'
         if '🟢' in str(val): return 'color: #28a745'
         if '🔴' in str(val): return 'color: #dc3545'
         return ''
-
     st.dataframe(df.style.applymap(style_c, subset=selected_intervals), use_container_width=True)
 
-st.sidebar.write(f"💡 自动刷新已设为 1 分钟/次")
+st.sidebar.write(f"💡 自动刷新模式: 1分钟/次")

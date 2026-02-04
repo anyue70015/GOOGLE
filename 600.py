@@ -9,35 +9,29 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 import requests
 
-# --- 1. 基础配置与北京时间 ---
-st.set_page_config(page_title="UT Bot 终极科学看板", layout="wide")
+# --- 1. 基础配置 ---
+st.set_page_config(page_title="UT Bot 实时科学看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
 def get_now_beijing():
     return datetime.now(BEIJING_TZ)
 
-# --- 2. 侧边栏配置 ---
+# --- 2. 侧边栏 ---
 st.sidebar.header("🛡️ 系统设置")
 sct_key = st.sidebar.text_input("Server酱 SendKey", type="password")
-
-st.sidebar.subheader("策略参数")
-sensitivity = st.sidebar.slider("敏感度 (Multiplier)", 1.0, 5.0, 2.0, 0.1)
+sensitivity = st.sidebar.slider("敏感度", 1.0, 5.0, 2.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 
-# 资产清单
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "UNI", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 selected_cryptos = st.sidebar.multiselect("加密货币", CRYPTO_LIST, default=CRYPTO_LIST)
 
-uploaded_file = st.sidebar.file_uploader("上传股票 TXT (每行一个代码)", type="txt")
-custom_stocks = []
-if uploaded_file:
-    custom_stocks = [line.strip() for line in uploaded_file.read().decode("utf-8").splitlines() if line.strip()]
+uploaded_file = st.sidebar.file_uploader("上传股票 TXT", type="txt")
+custom_stocks = [line.strip() for line in uploaded_file.read().decode("utf-8").splitlines() if line.strip()] if uploaded_file else []
 
 selected_intervals = ["15m", "30m", "1h", "4h", "1d"]
-# 1分钟自动刷新，确保倒计时跳动
-st_autorefresh(interval=60 * 1000, key="datarefresh")
+st_autorefresh(interval=60 * 1000, key="refresh")
 
-# --- 3. 核心算法逻辑 ---
+# --- 3. 核心计算逻辑 ---
 def calculate_ut_bot(df):
     if len(df) < atr_period: return df
     df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
@@ -62,43 +56,56 @@ def get_signal_info(df, timeframe):
     if df.empty or len(df) < 2: return "N/A", 0, ""
     curr_p = df.iloc[-1]['Close']
     buys, sells = df[df['buy'] == True], df[df['sell'] == True]
-    l_b_idx = buys.index[-1] if not buys.empty else None
-    l_s_idx = sells.index[-1] if not sells.empty else None
+    l_b = buys.index[-1] if not buys.empty else None
+    l_s = sells.index[-1] if not sells.empty else None
     now_bj = get_now_beijing()
 
-    def get_duration_mins(sig_time):
+    def get_mins(sig_time):
         if sig_time.tzinfo is None: sig_time = sig_time.replace(tzinfo=pytz.utc).astimezone(BEIJING_TZ)
         return int((now_bj - sig_time).total_seconds() / 60)
 
-    if l_b_idx and (not l_s_idx or l_b_idx > l_s_idx):
-        dur = get_duration_mins(l_b_idx)
+    if l_b and (not l_s or l_b > l_s):
+        dur = get_mins(l_b)
         if dur <= 30: return f"🚀 BUY({dur}m)", curr_p, ("BUY" if dur <= 1 else "")
         return "多 🟢", curr_p, ""
-    elif l_s_idx and (not l_b_idx or l_s_idx > l_b_idx):
-        dur = get_duration_mins(l_s_idx)
+    elif l_s and (not l_b or l_s > l_b):
+        dur = get_mins(l_s)
         if dur <= 30: return f"📉 SELL({dur}m)", curr_p, ("SELL" if dur <= 1 else "")
         return "空 🔴", curr_p, ""
     return "维持", curr_p, ""
 
 def get_okx_ls_ratio(base_symbol):
     """
-    修正后的多空比函数：使用 ccy 参数避免 50014 错误
+    云端专用：尝试多个备用地址抓取多空比
     """
-    try:
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={base_symbol}"
-        res = requests.get(url, timeout=5).json()
-        if res.get('code') == '0' and res.get('data'):
-            return float(res['data'][0]['ratio'])
-    except: pass
+    base = base_symbol.upper()
+    # 尝试地址 1: OKX 备用域名 (有时云端能过)
+    # 尝试地址 2: 如果还是不行，建议改用公链数据或跳过。
+    # 这里我们增加一个随机 User-Agent 伪装
+    urls = [
+        f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={base}",
+        f"https://aws.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy={base}"
+    ]
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    
+    for url in urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=3).json()
+            if res.get('code') == '0' and res.get('data'):
+                return float(res['data'][0]['ratio'])
+        except:
+            continue
     return "N/A"
 
 def send_wechat(t, c):
     if sct_key: requests.post(f"https://sctapi.ftqq.com/{sct_key}.send", data={"title":t, "desp":c})
 
-# --- 4. 数据抓取 ---
+# --- 4. 数据采集 ---
 def fetch_data():
+    # 强制 ccxt 使用代理是不现实的，但 OKX 的 fetch_ohlcv 通常在云端是通的
     exchange = ccxt.okx()
     results = []
+    # TAO, XAG, XAU 合约规则
     CONTRACT_LIST = ["TAO", "XAG", "XAU"]
 
     for base in selected_cryptos:
@@ -117,7 +124,7 @@ def fetch_data():
                 status, price, alert = get_signal_info(df, tf)
                 row[tf] = status
                 if price > 0: lp = price
-                if alert: send_wechat(f"UT信号: {base} {tf}", f"信号: {alert}\n价格: {price}\n多空比: {ls}")
+                if alert: send_wechat(f"UT: {base} {tf}", f"信号:{alert} P:{price} LS:{ls}")
             except: row[tf] = "N/A"
         row["现价"] = f"{lp:.4f}"
         results.append(row)
@@ -138,10 +145,9 @@ def fetch_data():
     return pd.DataFrame(results)
 
 # --- 5. 渲染 ---
-st.markdown("### 🛡️ UT Bot 混合资产实时看板")
-c1, c2 = st.columns([2, 1])
+st.markdown("### 🛡️ UT Bot 科学看板 (云端修复版)")
 now = get_now_beijing()
-c1.write(f"🕒 北京时间: {now.strftime('%H:%M:%S')}")
+st.write(f"🕒 更新时间: {now.strftime('%H:%M:%S')} | 云端 IP 访问限制已尝试绕过")
 
 if 'cache' not in st.session_state or st.sidebar.button("🔄 同步行情"):
     st.session_state.cache = fetch_data()
@@ -151,22 +157,18 @@ if not df.empty:
     all_v = df[selected_intervals].values.flatten()
     bulls = sum(1 for x in all_v if "多" in str(x) or "BUY" in str(x))
     total = len([x for x in all_v if x not in ["N/A", "休市"]])
-    ratio = bulls/total if total > 0 else 0
-    st.progress(ratio, text=f"全市场走牛比例 (多头强度): {ratio:.1%}")
+    st.progress(bulls/total if total > 0 else 0, text=f"全市场多头强度: {bulls/total:.1%}")
 
     def style_cells(v):
-        # 信号颜色
         if 'BUY' in str(v): return 'color: #00ff00; font-weight: bold; background-color: #004400'
         if 'SELL' in str(v): return 'color: #ff4444; font-weight: bold; background-color: #440000'
         if '🟢' in str(v): return 'color: #00ff00'
         if '🔴' in str(v): return 'color: #ff4444'
-        # 多空比颜色：散户多(>1)显红，散户空(<1)显绿
         if isinstance(v, (int, float)):
             if v > 1.1: return 'color: #ff4444; font-weight: bold'
             if v < 0.9: return 'color: #00ff00; font-weight: bold'
         return ''
 
-    # 使用 st.table 强制展开所有行，彻底去掉内部滚动条
     st.table(df.style.applymap(style_cells))
 
-st.sidebar.info("💡 提示：多空比数据每分钟自动更新一次，若显示为 N/A 请检查网络。")
+st.sidebar.warning("注：若多空比仍为 N/A，说明云端 IP 被 OKX 全面封锁。建议在本地运行或更换 API 代理。")

@@ -4,42 +4,35 @@ import numpy as np
 import pandas_ta as ta
 import ccxt
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 import requests
 
-# --- 1. 基础配置与北京时间 ---
-st.set_page_config(page_title="UT Bot 实时科学看板", layout="wide")
+# --- 1. 基础配置 ---
+st.set_page_config(page_title="UT Bot 科学看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
 def get_now_beijing():
     return datetime.now(BEIJING_TZ)
 
-# --- 2. 侧边栏配置 ---
+# --- 2. 侧边栏 ---
 st.sidebar.header("🛡️ 系统设置")
-sct_key = st.sidebar.text_input("Server酱 SendKey (微信预警)", type="password")
-
-st.sidebar.subheader("策略参数")
-sensitivity = st.sidebar.slider("敏感度 (Multiplier)", 1.0, 5.0, 2.0, 0.1)
+sct_key = st.sidebar.text_input("Server酱 Key", type="password")
+sensitivity = st.sidebar.slider("敏感度", 1.0, 5.0, 2.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 
-# 币种配置
+# 币种列表：TAO, XAG, XAU 强制合约，其余现货
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "UNI", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
-selected_cryptos = st.sidebar.multiselect("加密货币 (OKX)", CRYPTO_LIST, default=CRYPTO_LIST)
+selected_cryptos = st.sidebar.multiselect("加密货币", CRYPTO_LIST, default=CRYPTO_LIST)
 
-# 股票上传
-st.sidebar.subheader("股票/外盘配置")
-uploaded_file = st.sidebar.file_uploader("上传 TXT 列表", type="txt")
-custom_stocks = []
-if uploaded_file:
-    custom_stocks = [line.strip() for line in uploaded_file.read().decode("utf-8").splitlines() if line.strip()]
+uploaded_file = st.sidebar.file_uploader("上传股票 TXT", type="txt")
+custom_stocks = [line.strip() for line in uploaded_file.read().decode("utf-8").splitlines() if line.strip()] if uploaded_file else []
 
 selected_intervals = ["15m", "30m", "1h", "4h", "1d"]
-# 1分钟刷新一次，让计时器更准
-st_autorefresh(interval=1 * 60 * 1000, key="datarefresh")
+st_autorefresh(interval=60 * 1000, key="refresh") # 1分钟刷一次
 
-# --- 3. 核心算法 ---
+# --- 3. 核心计算 ---
 def calculate_ut_bot(df):
     if len(df) < atr_period: return df
     df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
@@ -63,59 +56,54 @@ def calculate_ut_bot(df):
 def get_signal_info(df, timeframe):
     if df.empty or len(df) < 2: return "N/A", 0, ""
     curr_p = df.iloc[-1]['Close']
-    buys, sells = df[df['buy'] == True], df[df['sell'] == True]
-    l_b_idx = buys.index[-1] if not buys.empty else None
-    l_s_idx = sells.index[-1] if not sells.empty else None
+    buys, sells = df[df['buy']], df[df['sell']]
+    l_b = buys.index[-1] if not buys.empty else None
+    l_s = sells.index[-1] if not sells.empty else None
     now_bj = get_now_beijing()
 
-    def get_duration_mins(signal_time):
-        if signal_time.tzinfo is None:
-            signal_time = signal_time.replace(tzinfo=pytz.utc).astimezone(BEIJING_TZ)
-        else:
-            signal_time = signal_time.astimezone(BEIJING_TZ)
-        return int((now_bj - signal_time).total_seconds() / 60)
+    def get_mins(sig_time):
+        if sig_time.tzinfo is None: sig_time = sig_time.replace(tzinfo=pytz.utc).astimezone(BEIJING_TZ)
+        return int((now_bj - sig_time).total_seconds() / 60)
 
-    if (l_b_idx is not None) and (l_s_idx is None or l_b_idx > l_s_idx):
-        duration = get_duration_mins(l_b_idx)
-        if duration <= 30:
-            return f"🚀 BUY ({duration}m)", curr_p, ("BUY" if duration <= 1 else "")
-        return "多 🟢", curr_p, ""
-    elif (l_s_idx is not None) and (l_b_idx is None or l_s_idx > l_b_idx):
-        duration = get_duration_mins(l_s_idx)
-        if duration <= 30:
-            return f"📉 SELL ({duration}m)", curr_p, ("SELL" if duration <= 1 else "")
-        return "空 🔴", curr_p, ""
+    if l_b and (not l_s or l_b > l_s):
+        dur = get_mins(l_b)
+        return (f"🚀 BUY ({dur}m)" if dur <= 30 else "多 🟢"), curr_p, ("BUY" if dur <= 1 else "")
+    elif l_s and (not l_b or l_s > l_b):
+        dur = get_mins(l_s)
+        return (f"📉 SELL ({dur}m)" if dur <= 30 else "空 🔴"), curr_p, ("SELL" if dur <= 1 else "")
     return "维持", curr_p, ""
 
 def get_okx_ls_ratio(symbol):
+    """强化版 OKX 多空人数比抓取"""
     try:
-        base = symbol.split('/')[0]
-        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId={base}-USDT"
-        res = requests.get(url, timeout=5).json()
-        if res['code'] == '0': return res['data'][0]['ratio']
+        # 使用 OKX V5 统计接口，instId 需为合约格式
+        instId = f"{symbol}-USDT-SWAP"
+        url = f"https://www.okx.com/api/v5/rubik/stat/contracts/long-short-account-ratio?instId={instId}"
+        headers = {"Content-Type": "application/json"}
+        res = requests.get(url, headers=headers, timeout=5).json()
+        if res.get('code') == '0' and len(res.get('data', [])) > 0:
+            return float(res['data'][0]['ratio'])
     except: pass
     return "N/A"
 
 def send_wechat(t, c):
-    if sct_key: 
-        try: requests.post(f"https://sctapi.ftqq.com/{sct_key}.send", data={"title":t, "desp":c})
-        except: pass
+    if sct_key: requests.post(f"https://sctapi.ftqq.com/{sct_key}.send", data={"title":t, "desp":c})
 
-# --- 4. 数据获取 ---
+# --- 4. 数据采集 ---
 def fetch_data():
     exchange = ccxt.okx()
     results = []
-    CONTRACT_LIST = ["TAO", "XAG", "XAU"] 
+    CONTRACT_ONLY = ["TAO", "XAG", "XAU"] # 你的特殊规则
 
     for base in selected_cryptos:
-        is_contract = base in CONTRACT_LIST
-        sym = f"{base}/USDT:USDT" if is_contract else f"{base}/USDT"
-        ls_ratio = get_okx_ls_ratio(base)
-        row = {"资产": base, "来源": "合约" if is_contract else "现货", "多空比": ls_ratio}
+        is_con = base in CONTRACT_ONLY
+        sym = f"{base}/USDT:USDT" if is_con else f"{base}/USDT"
+        ls = get_okx_ls_ratio(base)
+        row = {"资产": base, "持仓多空比": ls}
         lp = 0
         for tf in selected_intervals:
             try:
-                bars = exchange.fetch_ohlcv(sym, timeframe=tf, limit=150)
+                bars = exchange.fetch_ohlcv(sym, timeframe=tf, limit=100)
                 df = pd.DataFrame(bars, columns=['Time','Open','High','Low','Close','Volume'])
                 df['Time'] = pd.to_datetime(df['Time'], unit='ms')
                 df.set_index('Time', inplace=True)
@@ -123,22 +111,18 @@ def fetch_data():
                 status, price, alert = get_signal_info(df, tf)
                 row[tf] = status
                 if price > 0: lp = price
-                if alert: send_wechat(f"UT信号: {base} {tf}", f"信号: {alert}\n价格: {price}\n多空比: {ls_ratio}")
+                if alert: send_wechat(f"UT: {base} {tf}", f"信号: {alert}\n价格: {price}\n多空比: {ls}")
             except: row[tf] = "N/A"
         row["现价"] = f"{lp:.4f}"
         results.append(row)
 
-    yf_map = {"15m":"15m","30m":"30m","1h":"60m","4h":"60m","1d":"1d"}
     for sym in custom_stocks:
-        row = {"资产": sym, "来源": "Yahoo", "多空比": "--"}
+        row = {"资产": sym, "持仓多空比": "--"}
         lp = 0
         for tf in selected_intervals:
             try:
-                data = yf.download(sym, period="5d" if "m" in tf else "60d", interval=yf_map[tf], progress=False)
-                if data.empty: row[tf] = "休市"; continue
-                data.index = data.index.tz_localize(None).tz_localize(pytz.utc) # 统一雅虎时间
+                data = yf.download(sym, period="5d", interval="15m" if "m" in tf else "1d", progress=False)
                 df = calculate_ut_bot(data.copy())
-                df.columns = df.columns.get_level_values(0) if isinstance(df.columns, pd.MultiIndex) else df.columns
                 status, price, _ = get_signal_info(df, tf)
                 row[tf] = status
                 if price > 0: lp = price
@@ -147,30 +131,39 @@ def fetch_data():
         results.append(row)
     return pd.DataFrame(results)
 
-# --- 5. 页面展示 ---
-st.markdown("## 🛡️ UT Bot 科学看板")
-c1, c2 = st.columns([2, 1])
+# --- 5. 页面渲染 ---
+st.markdown("### 🛡️ UT Bot 科学看板 (无滚动条直选版)")
 now = get_now_beijing()
-c1.write(f"🕒 北京时间: {now.strftime('%H:%M:%S')}")
+st.write(f"🕒 更新时间: {now.strftime('%H:%M:%S')} | 多空占比衡量市场冷热，多空比衡量主力意图")
 
-if 'data_cache' not in st.session_state or st.sidebar.button("🔄 同步行情"):
-    st.session_state.data_cache = fetch_data()
+if 'cache' not in st.session_state or st.sidebar.button("🔄 同步"):
+    st.session_state.cache = fetch_data()
 
-df = st.session_state.data_cache
+df = st.session_state.cache
 if not df.empty:
-    all_s = df[selected_intervals].values.flatten()
-    # 这里已修正变量名错误
-    bulls = sum(1 for x in all_s if "多" in str(x) or "BUY" in str(x))
-    total = len([x for x in all_s if x not in ["N/A", "休市"]])
-    ratio = bulls/total if total > 0 else 0
-    st.progress(ratio, text=f"市场多头占比: {ratio:.1%}")
+    # 进度条
+    all_v = df[selected_intervals].values.flatten()
+    bulls = sum(1 for x in all_v if "多" in str(x) or "BUY" in str(x))
+    total = len([x for x in all_v if x not in ["N/A", "休市"]])
+    st.progress(bulls/total if total > 0 else 0, text=f"全市场走牛比例: {bulls/total:.1%}")
 
-    def style_c(val):
-        if 'BUY' in str(val): return 'background-color: #00ff0033; color: #00ff00; font-weight: bold'
-        if 'SELL' in str(val): return 'background-color: #ff000033; color: #ff0000; font-weight: bold'
-        if '🟢' in str(val): return 'color: #28a745'
-        if '🔴' in str(val): return 'color: #dc3545'
+    # 样式美化
+    def color_df(v):
+        if 'BUY' in str(v): return 'color: #00ff00; font-weight: bold; background-color: #004400'
+        if 'SELL' in str(v): return 'color: #ff4444; font-weight: bold; background-color: #440000'
+        if '🟢' in str(v): return 'color: #00ff00'
+        if '🔴' in str(v): return 'color: #ff4444'
+        # 多空比逻辑：散户多(>1)显红，散户空(<1)显绿
+        if isinstance(v, float):
+            if v > 1.1: return 'color: #ff4444'
+            if v < 0.9: return 'color: #00ff00'
         return ''
-    st.dataframe(df.style.applymap(style_c, subset=selected_intervals), use_container_width=True)
 
-st.sidebar.write(f"💡 自动刷新模式: 1分钟/次")
+    # 使用 st.table 代替 st.dataframe，解决滚动条问题
+    st.table(df.style.applymap(color_df))
+
+st.sidebar.markdown("""
+**多空比 (LS Ratio) 指南：**
+- **数值 > 1.2**：散户疯狂做多，主力可能反向收割 (看空信号 ⚠️)
+- **数值 < 0.8**：散户集体看空，主力可能拉升 (看多信号 ✅)
+""")

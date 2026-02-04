@@ -1,96 +1,102 @@
-import ccxt
 import pandas as pd
+import numpy as np
 import pandas_ta as ta
+import yfinance as yf
+import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # --- 配置区 ---
-ASSETS = ['SUI/USDT', 'SOL/USDT', 'ETH/USDT', 'DOGE/USDT', 'BNB/USDT'] # 您关注的币种
-TIMEFRAME = '4h'  # 4小时级别
-PROB_THRESHOLD = 70.0  # 概率门槛
-EXCHANGE = ccxt.binance()
+SEND_KEY = '你的Server酱SendKey' # 替换为你的Key
+SYMBOLS = ["BTC-USD", "ETH-USD", "SOL-USD", "NVDA", "AAPL"]
+INTERVALS = {
+    "30m": "30m",
+    "1h": "60m",
+    "4h": "720m", # yfinance 4h 有时不稳定，可用 60m 聚合或 1h
+    "1d": "1d"
+}
 
-def fetch_data(symbol, limit=200):
-    """获取K线数据"""
-    bars = EXCHANGE.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=limit)
-    df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+# --- 消息推送函数 ---
+def send_wechat(title, content):
+    url = f"https://sctapi.ftqq.com/{SEND_KEY}.send"
+    data = {"title": title, "desp": content}
+    try:
+        requests.post(url, data=data)
+    except Exception as e:
+        print(f"推送失败: {e}")
 
-def calculate_gemini_score(df):
-    """计算5大指标得分 (1-5分)"""
-    score = 0
-    # 1. 趋势得分: EMA12 > EMA34
-    ema12 = ta.ema(df['close'], length=12)
-    ema34 = ta.ema(df['close'], length=34)
-    if ema12.iloc[-1] > ema34.iloc[-1] and df['close'].iloc[-1] > ema12.iloc[-1]:
-        score += 1
-        
-    # 2. 动能得分: MACD Hist 连续两根增长
-    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    hist = macd['MACDh_12_26_9']
-    if hist.iloc[-1] > hist.iloc[-2] and hist.iloc[-1] > 0:
-        score += 1
-        
-    # 3. 强弱得分: RSI 处于 45-68 强势非过热区
-    rsi = ta.rsi(df['close'], length=10)
-    if 45 < rsi.iloc[-1] < 68:
-        score += 1
-        
-    # 4. 成交量得分: 当前成交量 > 10周期均量
-    vol_sma = ta.sma(df['volume'], length=10)
-    if df['volume'].iloc[-1] > vol_sma.iloc[-1]:
-        score += 1
-        
-    # 5. 支撑得分: 价格在布林带中轨上方
-    bbands = ta.bbands(df['close'], length=20, std=2)
-    if df['close'].iloc[-1] > bbands['BBM_20_2.0'].iloc[-1]:
-        score += 1
-        
-    return score
-
-def calculate_7d_probability(df):
-    """
-    计算7日上涨概率: 
-    回测过去100个4H周期中，出现当前得分形态后，7天(42根4H线)后上涨的次数
-    """
-    lookback = 100
-    win_count = 0
-    # 7天对应 42 根 4H K线
-    future_window = 42 
+# --- 核心计算逻辑 ---
+def get_signal(symbol, interval):
+    # 根据周期调整下载范围
+    period = "7d" if "m" in interval else "100d"
+    df = yf.download(symbol, period=period, interval=interval, progress=False)
+    if len(df) < 20: return None
     
-    for i in range(len(df) - future_window - 5, len(df) - future_window):
-        if df['close'].iloc[i + future_window] > df['close'].iloc[i]:
-            win_count += 1
-            
-    # 简化模拟：基于近期胜率统计
-    prob = (win_count / 5) * 100 # 此处为演示逻辑，实战中会扫描更深的历史数据
-    return round(prob, 2)
-
-def main_scanner():
-    print(f"\n--- 2026 动力学扫描启动 ({datetime.now().strftime('%H:%M:%S')}) ---")
-    print(f"{'币种':<10} | {'7日概率':<10} | {'得分':<6} | {'建议动作'}")
-    print("-" * 50)
+    df = df.copy()
     
-    for symbol in ASSETS:
-        try:
-            df = fetch_data(symbol)
-            score = calculate_gemini_score(df)
-            prob = calculate_7d_probability(df)
+    # 1. UT Bot 逻辑
+    key_value = 1
+    atr_period = 10
+    df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
+    n_loss = key_value * df['atr']
+    
+    src = df['Close']
+    trail_stop = np.zeros(len(df))
+    for i in range(1, len(df)):
+        p_stop = trail_stop[i-1]
+        if src.iloc[i] > p_stop and src.iloc[i-1] > p_stop:
+            trail_stop[i] = max(p_stop, src.iloc[i] - n_loss.iloc[i])
+        elif src.iloc[i] < p_stop and src.iloc[i-1] < p_stop:
+            trail_stop[i] = min(p_stop, src.iloc[i] + n_loss.iloc[i])
+        else:
+            trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p_stop else src.iloc[i] + n_loss.iloc[i]
+    
+    # 2. 成交量过滤逻辑 (当前成交量 > 过去10个周期均值的1.5倍)
+    df['vol_ma'] = df['Volume'].rolling(window=10).mean()
+    is_vol_surge = df['Volume'].iloc[-1] > (df['vol_ma'].iloc[-1] * 1.5)
+    
+    # 3. 信号判定
+    curr_price = src.iloc[-1]
+    prev_price = src.iloc[-2]
+    curr_stop = trail_stop[-1]
+    prev_stop = trail_stop[-2]
+    
+    signal = None
+    if curr_price > curr_stop and prev_price <= prev_stop:
+        # 买入信号 + 检查成交量
+        vol_status = "放量确认 ✅" if is_vol_surge else "缩量博弈 ⚠️"
+        signal = f"🚀 BUY ({vol_status})"
+    elif curr_price < curr_stop and prev_price >= prev_stop:
+        signal = "📉 SELL"
+        
+    return signal, curr_price
+
+# --- 主循环监测 ---
+def monitor():
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 开启多周期扫描...")
+    
+    for symbol in SYMBOLS:
+        for label, interval in INTERVALS.items():
+            result = get_signal(symbol, interval)
+            if not result: continue
             
-            # 执行您的逻辑：70%概率 + 2-3分建仓
-            if prob >= PROB_THRESHOLD and (score == 2 or score == 3):
-                action = "🔥 符合条件：建仓"
-            elif score != calculate_gemini_score(df.iloc[:-1]): # 分数变动
-                action = "⚠️ 分数变动：卖出"
-            else:
-                action = "---"
+            signal, price = result
+            if signal:
+                msg_title = f"{signal}: {symbol} ({label})"
+                msg_content = (
+                    f"币种: {symbol}\n"
+                    f"周期: {label}\n"
+                    f"当前价格: {price:.2f}\n"
+                    f"时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"注: UT Bot 穿越触发。"
+                )
+                print(f"找到信号! {msg_title}")
+                send_wechat(msg_title, msg_content)
                 
-            print(f"{symbol:<10} | {prob:>8}% | {score:>5}/5 | {action}")
-            
-        except Exception as e:
-            print(f"扫描 {symbol} 失败: {e}")
+    print("扫描结束，等待下一轮。")
 
 if __name__ == "__main__":
-    # 每4小时运行一次，或手动运行
-    main_scanner()
+    # 建议每 15 或 30 分钟运行一次
+    while True:
+        monitor()
+        time.sleep(1800) # 每 30 分钟扫描一次

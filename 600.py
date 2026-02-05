@@ -12,11 +12,11 @@ import streamlit.components.v1 as components
 # 配置
 st.set_page_config(page_title="UT Bot 加密看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
-st_autorefresh(interval=60 * 1000, key="refresh_1min")
+st_autorefresh(interval=60 * 1000, key="refresh_1min")  # 1分钟刷新
 
 # 侧边栏
 st.sidebar.header("🛡️ 设置")
-sensitivity = st.sidebar.slider("敏感度", 0.1, 5.0, 1.0, 0.1)
+sensitivity = st.sidebar.slider("敏感度 (Key Value)", 0.1, 5.0, 1.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
@@ -28,9 +28,10 @@ alert_min = st.sidebar.number_input("新信号报警阈值（分钟）", 1, 60, 
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# UT Bot 计算
+# UT Bot 计算核心
 def calculate_ut_bot(df):
-    if df.empty or len(df) < 20: return pd.DataFrame()
+    if df.empty or len(df) < 20:
+        return pd.DataFrame()
     df.columns = [str(c).capitalize() for c in df.columns]
     df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
     df = df.dropna(subset=['atr']).copy()
@@ -50,9 +51,10 @@ def calculate_ut_bot(df):
     df['sell'] = (df['Close'] < df['trail_stop']) & (df['Close'].shift(1) >= df['trail_stop'].shift(1))
     return df
 
-# 信号判断 + 报警准备
+# 获取信号 + 报警准备
 def get_sig(df):
-    if df.empty: return "N/A", None, None
+    if df.empty:
+        return "N/A", None, None
     curr_p = float(df.iloc[-1]['Close'])
     buys = df[df['buy']]
     sells = df[df['sell']]
@@ -61,7 +63,8 @@ def get_sig(df):
     
     now = datetime.now(pytz.utc)
     def to_utc(ts):
-        if ts is None: return None
+        if ts is None:
+            return None
         return ts if ts.tzinfo else pytz.utc.localize(ts)
     
     lb_u, ls_u, now_u = to_utc(lb), to_utc(ls), to_utc(now)
@@ -78,7 +81,7 @@ def get_sig(df):
         sig, alert_d = "维持", None
     return sig, curr_p, alert_d
 
-# 币安多空比
+# 币安多空比（5分钟最新）
 def get_ls(ccy):
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={ccy.upper()}USDT&period=5m&limit=1"
@@ -91,9 +94,10 @@ def get_ls(ccy):
         pass
     return "N/A"
 
-# 发送微信
+# 发送微信消息
 def send_alert(key, title, body):
-    if not key: return
+    if not key:
+        return
     try:
         if key.startswith("http"):  # 企业微信 webhook
             requests.post(key, json={"msgtype": "text", "text": {"content": f"{title}\n{body}"}}, timeout=5)
@@ -102,43 +106,53 @@ def send_alert(key, title, body):
     except:
         pass
 
-# HTML 表格渲染（方案2核心）
+# HTML 表格渲染（修复 AttributeError 版本）
 def render_table(df):
-    def cell_style(v):
-        s = str(v)
-        if 'BUY' in s or '🟢' in s: return 'color:#0f0; font-weight:bold; background:#00440033;'
-        if 'SELL' in s or '🔴' in s: return 'color:#f44; font-weight:bold; background:#44000033;'
-        if '多空比' in v.name and '🟢' in s: return 'color:#0f8;'
-        if '多空比' in v.name and '🔴' in s: return 'color:#f66;'
+    def cell_style(col_name, value):
+        s = str(value) if pd.notna(value) else ""
+        if 'BUY' in s or '🟢' in s:
+            return 'color:#0f0; font-weight:bold; background:#00440033;'
+        if 'SELL' in s or '🔴' in s:
+            return 'color:#f44; font-weight:bold; background:#44000033;'
+        # 多空比列特殊颜色（基于列名）
+        if '多空比' in col_name:
+            if '🟢' in s:
+                return 'color:#0f8; font-weight:bold;'
+            if '🔴' in s:
+                return 'color:#f66; font-weight:bold;'
         return ''
     
-    html = '<table style="width:100%; border-collapse:collapse; font-family:monospace;">'
+    html = '<table style="width:100%; border-collapse:collapse; font-family:monospace; font-size:0.95em;">'
     html += '<tr style="background:#222; color:#fff;">' + ''.join(f'<th style="padding:8px; border:1px solid #444;">{c}</th>' for c in df.columns) + '</tr>'
     
     for _, row in df.iterrows():
-        cells = ''.join(f'<td style="padding:8px; border:1px solid #444; {cell_style(row[c])}">{row[c]}</td>' for c in df.columns)
+        cells = ''.join(
+            f'<td style="padding:8px; border:1px solid #444; {cell_style(c, row[c])}">{row[c]}</td>'
+            for c in df.columns
+        )
         html += f'<tr>{cells}</tr>'
     html += '</table>'
     st.markdown(html, unsafe_allow_html=True)
 
 # 主界面
-st.title("UT Bot 加密货币信号看板（1分钟刷新）")
+st.title("UT Bot 加密货币信号看板（1分钟自动刷新）")
 
-# 倒计时
+# 倒计时组件
 components.html("""
-<div style="font-size:1.3em; color:#aaa; margin:1em 0;">
+<div style="font-size:1.3em; color:#aaa; margin:1em 0; text-align:center;">
   下次刷新倒计时: <span id="cd">60</span> 秒
 </div>
 <script>
-let s=60; const t=document.getElementById('cd');
+let s=60;
+const t=document.getElementById('cd');
 setInterval(()=>{s--; t.textContent=s; if(s<=0)s=60;},1000);
 </script>
 """, height=80)
 
-with st.spinner("加载数据..."):
+with st.spinner("正在加载最新数据..."):
     ex = ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
     rows = []
-    contracts = {"TAO", "XAG", "XAU"}
+    contracts = {"TAO", "XAG", "XAU"}  # 永续合约符号
     
     for base in selected_cryptos:
         sym = f"{base}/USDT:USDT" if base in contracts else f"{base}/USDT"
@@ -148,7 +162,7 @@ with st.spinner("加载数据..."):
         for tf in intervals:
             try:
                 bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=150)
-                if not bars: 
+                if not bars:
                     row[tf] = "无"
                     continue
                 df_ohlcv = pd.DataFrame(bars, columns=['timestamp','open','high','low','close','volume'])
@@ -158,17 +172,20 @@ with st.spinner("加载数据..."):
                 row[tf] = sig
                 if p is not None and p > 0:
                     price = p
+                # 微信报警
                 if dur is not None and weixin_key:
                     title = f"[{base} {tf}] 新信号"
-                    body = f"{sig}\n价格: {p:.4f}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
+                    body = f"信号: {sig}\n价格: {p:.4f}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
                     send_alert(weixin_key, title, body)
-            except:
+            except Exception as e:
                 row[tf] = "err"
+                # 可选：st.error(f"{base} {tf} 出错: {str(e)}")  # 调试时打开
         
-        row["现价"] = f"{price:.4f}" if price else "N/A"
+        row["现价"] = f"{price:.4f}" if price is not None else "N/A"
         rows.append(row)
     
     result_df = pd.DataFrame(rows)
     render_table(result_df)
 
-st.caption(f"更新时间: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+st.info("· 1分钟自动刷新 · 新 BUY/SELL 信号（10分钟内）推送微信（需配置 key）· XAG/XAU/TAO 使用永续合约数据")

@@ -14,7 +14,7 @@ st.set_page_config(page_title="UT Bot + RSI/EMA 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 st_autorefresh(interval=600 * 1000, key="refresh_10min")  # 10分钟自动刷新
 
-# 侧边栏
+# 侧边栏 - WxPusher 配置
 st.sidebar.header("🛡️ 设置")
 sensitivity = st.sidebar.slider("UT Bot 敏感度", 0.1, 5.0, 1.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
@@ -22,13 +22,14 @@ atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 selected_cryptos = st.sidebar.multiselect("币种", CRYPTO_LIST, default=CRYPTO_LIST)
 
-st.sidebar.header("🚨 微信报警（仅1h级别）")
-weixin_key = st.sidebar.text_input("Server酱 SendKey 或 企业微信 webhook URL", type="password")
+st.sidebar.header("🚨 WxPusher 微信报警（仅1h级别）")
+app_token = st.sidebar.text_input("WxPusher appToken", type="password", value="AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH")
+user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM")
 alert_min = st.sidebar.number_input("新信号报警阈值（分钟）", 1, 60, 10)
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# 计算指标
+# 计算指标（UT Bot + RSI + EMA）
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
@@ -67,7 +68,7 @@ def calculate_indicators(df):
     
     return df
 
-# 获取信号 + 指标（分离趋势状态）
+# 获取信号
 def get_sig(df, tf):
     if df.empty:
         return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
@@ -75,7 +76,6 @@ def get_sig(df, tf):
     curr_p = float(df.iloc[-1]['Close'])
     rsi_val = f"{df.iloc[-1]['rsi']:.1f}" if pd.notna(df.iloc[-1]['rsi']) else "N/A"
     
-    # EMA20/50 整体趋势
     trend = "N/A"
     if pd.notna(df.iloc[-1]['ema20']) and pd.notna(df.iloc[-1]['ema50']):
         if curr_p > df.iloc[-1]['ema20'] > df.iloc[-1]['ema50']:
@@ -112,6 +112,27 @@ def get_sig(df, tf):
     
     return sig, curr_p, alert_d, rsi_val, ema_cross, trend
 
+# WxPusher 发送函数
+def send_wx_pusher(app_token, uid, title, body):
+    if not app_token or not uid:
+        return
+    try:
+        payload = {
+            "appToken": app_token,
+            "content": f"{title}\n{body}",
+            "summary": title[:100],  # 摘要限100字
+            "uids": [uid]
+        }
+        response = requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
+        if response.status_code == 200:
+            res_json = response.json()
+            if res_json.get("code") == 1000:
+                st.toast("WxPusher 推送成功", icon="✅")  # Streamlit 提示
+            else:
+                st.toast(f"推送失败: {res_json.get('msg')}", icon="⚠️")
+    except Exception as e:
+        st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
+
 # 多空比
 def get_ls(base):
     try:
@@ -125,18 +146,7 @@ def get_ls(base):
         pass
     return "N/A"
 
-# 发送微信
-def send_alert(key, title, body):
-    if not key: return
-    try:
-        if key.startswith("http"):
-            requests.post(key, json={"msgtype": "text", "text": {"content": f"{title}\n{body}"}}, timeout=5)
-        else:
-            requests.post(f"https://sctapi.ftqq.com/{key}.send", data={"title": title, "desp": body}, timeout=5)
-    except:
-        pass
-
-# HTML 表格 - 新布局：趋势单独一列，其他三项三行细线分隔
+# HTML 表格渲染（保持你之前的布局）
 def render_table(df):
     def cell_style_trend(value):
         s = str(value)
@@ -158,17 +168,13 @@ def render_table(df):
         return ''
 
     html = '<table style="width:100%; border-collapse:collapse; font-family:monospace; font-size:0.95em;">'
-    html += '<tr style="background:#222; color:#fff;">'
-    for c in df.columns:
-        html += f'<th style="padding:8px; border:1px solid #444;">{c}</th>'
-    html += '</tr>'
+    html += '<tr style="background:#222; color:#fff;">' + ''.join(f'<th style="padding:8px; border:1px solid #444;">{c}</th>' for c in df.columns) + '</tr>'
     
     for _, row in df.iterrows():
         html += '<tr>'
         for c in df.columns:
             val = row[c]
-            if c in intervals:  # 时间框架列用新布局
-                # 假设格式已改为 "信号 | RSI:xx | EMA:xx" 但我们重新组织
+            if c in intervals:
                 parts = str(val).split(' | ')
                 sig_part = parts[0] if len(parts) > 0 else ""
                 rsi_part = parts[1] if len(parts) > 1 else ""
@@ -231,23 +237,24 @@ with st.spinner("加载最新数据..."):
                 df_ohlcv.set_index('timestamp', inplace=True)
                 processed_df = calculate_indicators(df_ohlcv)
                 sig, p, dur, rsi, ema_cross, trend = get_sig(processed_df, tf)
-                row[tf] = f"{sig} | {rsi} | EMA:{ema_cross}"
+                row[tf] = f"{sig} | RSI:{rsi} | EMA:{ema_cross}"
                 if p is not None and p > 0:
                     price = p
                 
-                if tf == "1h" and dur is not None and weixin_key:
+                # WxPusher 报警 - 仅1h
+                if tf == "1h" and dur is not None and app_token and user_uid:
                     title = f"[{base} 1H] 新信号"
                     body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\nEMA金叉/死叉: {ema_cross}\n趋势: {trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
-                    send_alert(weixin_key, title, body)
+                    send_wx_pusher(app_token, user_uid, title, body)
             except:
                 row[tf] = "err"
         
         row["现价"] = f"{price:.4f}" if price is not None else "N/A"
-        row["趋势"] = trend  # 新增独立趋势列（可选，如果你想分离）
+        row["趋势"] = trend
         rows.append(row)
     
     result_df = pd.DataFrame(rows)
     render_table(result_df)
 
 st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· 趋势状态独立列 · 时间框架内三行细线分隔（信号/RSI/EMA）· 手动刷新按钮 · 10分钟自动")
+st.info("· WxPusher 已集成 · 填 appToken 和 UID 后保存 · 仅1h BUY/SELL 信号推送微信 · 10分钟自动刷新")

@@ -28,13 +28,12 @@ alert_min = st.sidebar.number_input("新信号报警阈值（分钟）", 1, 60, 
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# 计算所有指标
+# 计算指标
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
     df.columns = [str(c).capitalize() for c in df.columns]
     
-    # UT Bot
     df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
     df = df.dropna(subset=['atr']).copy()
     n_loss = sensitivity * df['atr']
@@ -52,14 +51,12 @@ def calculate_indicators(df):
     df['buy'] = (df['Close'] > df['trail_stop']) & (df['Close'].shift(1) <= df['trail_stop'].shift(1))
     df['sell'] = (df['Close'] < df['trail_stop']) & (df['Close'].shift(1) >= df['trail_stop'].shift(1))
     
-    # RSI + EMA
     df['rsi'] = ta.rsi(df['Close'], length=14)
     df['ema5'] = ta.ema(df['Close'], length=5)
     df['ema13'] = ta.ema(df['Close'], length=13)
     df['ema20'] = ta.ema(df['Close'], length=20)
     df['ema50'] = ta.ema(df['Close'], length=50)
     
-    # EMA5-13 金叉/死叉
     df['ema_cross'] = np.where(
         (df['ema5'] > df['ema13']) & (df['ema5'].shift(1) <= df['ema13'].shift(1)), "金叉 🟢",
         np.where(
@@ -70,22 +67,23 @@ def calculate_indicators(df):
     
     return df
 
-# 获取信号 + 指标状态
+# 获取信号 + 指标（分离趋势状态）
 def get_sig(df, tf):
     if df.empty:
-        return "N/A", None, None, "N/A", "N/A", "N/A"
+        return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
+    
     curr_p = float(df.iloc[-1]['Close'])
     rsi_val = f"{df.iloc[-1]['rsi']:.1f}" if pd.notna(df.iloc[-1]['rsi']) else "N/A"
     
-    # EMA20/50 排列
-    ema_trend = "N/A"
+    # EMA20/50 整体趋势
+    trend = "N/A"
     if pd.notna(df.iloc[-1]['ema20']) and pd.notna(df.iloc[-1]['ema50']):
         if curr_p > df.iloc[-1]['ema20'] > df.iloc[-1]['ema50']:
-            ema_trend = "多头 🟢"
+            trend = "多头 🟢"
         elif curr_p < df.iloc[-1]['ema20'] < df.iloc[-1]['ema50']:
-            ema_trend = "空头 🔴"
+            trend = "空头 🔴"
         else:
-            ema_trend = "震荡 ⚪"
+            trend = "震荡 ⚪"
     
     ema_cross = df.iloc[-1]['ema_cross'] if pd.notna(df.iloc[-1]['ema_cross']) else "N/A"
     
@@ -112,9 +110,9 @@ def get_sig(df, tf):
         sig = f"📉 SELL({dur_s}m)" if dur_s <= 30 else "空 🔴"
         if dur_s <= alert_min: alert_d = dur_s
     
-    return sig, curr_p, alert_d, rsi_val, ema_trend, ema_cross
+    return sig, curr_p, alert_d, rsi_val, ema_cross, trend
 
-# 多空比（只用 Binance 公开接口 + 错误处理）
+# 多空比
 def get_ls(base):
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
@@ -123,11 +121,11 @@ def get_ls(base):
             ratio = float(r[0]['longShortRatio'])
             emoji = "🟢" if ratio > 1.2 else "🔴" if ratio < 0.8 else "⚪"
             return f"{ratio:.2f} {emoji}"
-    except Exception as e:
-        return f"N/A (Err: {str(e)[:20]})"
+    except:
+        pass
     return "N/A"
 
-# 发送微信（仅1h）
+# 发送微信
 def send_alert(key, title, body):
     if not key: return
     try:
@@ -138,37 +136,61 @@ def send_alert(key, title, body):
     except:
         pass
 
-# HTML 表格渲染
+# HTML 表格 - 新布局：趋势单独一列，其他三项三行细线分隔
 def render_table(df):
-    def cell_style(col_name, value):
-        s = str(value) if pd.notna(value) else ""
-        if 'BUY' in s or '🟢' in s:
-            return 'color:#0f0; font-weight:bold; background:#00440033;'
-        if 'SELL' in s or '🔴' in s:
-            return 'color:#f44; font-weight:bold; background:#44000033;'
-        if '多空比' in col_name:
-            if '🟢' in s: return 'color:#0f8; font-weight:bold;'
-            if '🔴' in s: return 'color:#f66; font-weight:bold;'
-        if 'RSI' in col_name:
+    def cell_style_trend(value):
+        s = str(value)
+        if '多头' in s or '🟢' in s: return 'color:#0f0; font-weight:bold; background:#00440033; text-align:center;'
+        if '空头' in s or '🔴' in s: return 'color:#f44; font-weight:bold; background:#44000033; text-align:center;'
+        return 'text-align:center;'
+
+    def cell_style_other(value):
+        s = str(value)
+        if 'BUY' in s or '金叉' in s or '🟢' in s: return 'color:#0f0; font-weight:bold;'
+        if 'SELL' in s or '死叉' in s or '🔴' in s: return 'color:#f44; font-weight:bold;'
+        if 'RSI' in s:
             try:
-                v = float(s)
-                if v > 70: return 'color:#ff0; background:#44000033;'
-                if v < 30: return 'color:#0ff; background:#00440033;'
+                v = float(s.split(':')[1])
+                if v > 70: return 'color:#ff0;'
+                if v < 30: return 'color:#0ff;'
             except:
                 pass
-        if '金叉' in s: return 'color:#0f0; font-weight:bold;'
-        if '死叉' in s: return 'color:#f44; font-weight:bold;'
         return ''
-    
+
     html = '<table style="width:100%; border-collapse:collapse; font-family:monospace; font-size:0.95em;">'
-    html += '<tr style="background:#222; color:#fff;">' + ''.join(f'<th style="padding:8px; border:1px solid #444;">{c}</th>' for c in df.columns) + '</tr>'
+    html += '<tr style="background:#222; color:#fff;">'
+    for c in df.columns:
+        html += f'<th style="padding:8px; border:1px solid #444;">{c}</th>'
+    html += '</tr>'
     
     for _, row in df.iterrows():
-        cells = ''.join(
-            f'<td style="padding:8px; border:1px solid #444; {cell_style(c, row[c])}">{row[c]}</td>'
-            for c in df.columns
-        )
-        html += f'<tr>{cells}</tr>'
+        html += '<tr>'
+        for c in df.columns:
+            val = row[c]
+            if c in intervals:  # 时间框架列用新布局
+                # 假设格式已改为 "信号 | RSI:xx | EMA:xx" 但我们重新组织
+                parts = str(val).split(' | ')
+                sig_part = parts[0] if len(parts) > 0 else ""
+                rsi_part = parts[1] if len(parts) > 1 else ""
+                ema_part = ' | '.join(parts[2:]) if len(parts) > 2 else ""
+                
+                content = f'''
+                <div style="border:1px solid #555; padding:4px; min-height:80px; display:flex; flex-direction:column; justify-content:space-between;">
+                    <div style="border-bottom:1px solid #444; padding-bottom:4px; {cell_style_other(sig_part)}">{sig_part or "—"}</div>
+                    <div style="border-bottom:1px solid #444; padding:4px 0; {cell_style_other(rsi_part)}">{rsi_part or "—"}</div>
+                    <div style="padding-top:4px; {cell_style_other(ema_part)}">{ema_part or "—"}</div>
+                </div>
+                '''
+                html += f'<td style="padding:4px; border:1px solid #444; vertical-align:top;">{content}</td>'
+            elif c == "多空比(5m)":
+                style = cell_style_trend(val)
+                html += f'<td style="padding:8px; border:1px solid #444; {style}">{val}</td>'
+            elif c == "趋势":
+                style = cell_style_trend(val)
+                html += f'<td style="padding:8px; border:1px solid #444; {style}">{val}</td>'
+            else:
+                html += f'<td style="padding:8px; border:1px solid #444;">{val}</td>'
+        html += '</tr>'
     html += '</table>'
     st.markdown(html, unsafe_allow_html=True)
 
@@ -176,7 +198,7 @@ def render_table(df):
 st.title("UT Bot + RSI/EMA/金叉看板（10分钟自动刷新）")
 
 if st.button("🔄 立即刷新数据"):
-    st.rerun()  # 手动触发 rerun，相当于立即刷新
+    st.rerun()
 
 components.html("""
 <div style="font-size:1.3em; color:#aaa; margin:1em 0; text-align:center;">
@@ -208,24 +230,24 @@ with st.spinner("加载最新数据..."):
                 df_ohlcv['timestamp'] = pd.to_datetime(df_ohlcv['timestamp'], unit='ms')
                 df_ohlcv.set_index('timestamp', inplace=True)
                 processed_df = calculate_indicators(df_ohlcv)
-                sig, p, dur, rsi, ema_trend, ema_cross = get_sig(processed_df, tf)
-                row[tf] = f"{sig} | RSI:{rsi} | EMA:{ema_cross} ({ema_trend})"
+                sig, p, dur, rsi, ema_cross, trend = get_sig(processed_df, tf)
+                row[tf] = f"{sig} | {rsi} | EMA:{ema_cross}"
                 if p is not None and p > 0:
                     price = p
                 
-                # 仅1h报警
                 if tf == "1h" and dur is not None and weixin_key:
                     title = f"[{base} 1H] 新信号"
-                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\nEMA金叉/死叉: {ema_cross}\nEMA趋势: {ema_trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
+                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\nEMA金叉/死叉: {ema_cross}\n趋势: {trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
                     send_alert(weixin_key, title, body)
             except:
                 row[tf] = "err"
         
         row["现价"] = f"{price:.4f}" if price is not None else "N/A"
+        row["趋势"] = trend  # 新增独立趋势列（可选，如果你想分离）
         rows.append(row)
     
     result_df = pd.DataFrame(rows)
     render_table(result_df)
 
 st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· 10分钟自动刷新 · 手动按钮立即刷新 · 多空比仅Binance（公开稳定） · EMA5-13金叉/死叉已加 · 仅1h信号报警")
+st.info("· 趋势状态独立列 · 时间框架内三行细线分隔（信号/RSI/EMA）· 手动刷新按钮 · 10分钟自动")

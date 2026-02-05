@@ -10,9 +10,9 @@ from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
 # 配置
-st.set_page_config(page_title="UT Bot + RSI/EMA 加密看板", layout="wide")
+st.set_page_config(page_title="UT Bot + RSI/EMA 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
-st_autorefresh(interval=60 * 1000, key="refresh_1min")  # 1分钟刷新
+st_autorefresh(interval=600 * 1000, key="refresh_10min")  # 10分钟自动刷新
 
 # 侧边栏
 st.sidebar.header("🛡️ 设置")
@@ -28,7 +28,7 @@ alert_min = st.sidebar.number_input("新信号报警阈值（分钟）", 1, 60, 
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# UT Bot + RSI/EMA 计算
+# 计算所有指标
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
@@ -52,29 +52,42 @@ def calculate_indicators(df):
     df['buy'] = (df['Close'] > df['trail_stop']) & (df['Close'].shift(1) <= df['trail_stop'].shift(1))
     df['sell'] = (df['Close'] < df['trail_stop']) & (df['Close'].shift(1) >= df['trail_stop'].shift(1))
     
-    # RSI & EMA
+    # RSI + EMA
     df['rsi'] = ta.rsi(df['Close'], length=14)
+    df['ema5'] = ta.ema(df['Close'], length=5)
+    df['ema13'] = ta.ema(df['Close'], length=13)
     df['ema20'] = ta.ema(df['Close'], length=20)
     df['ema50'] = ta.ema(df['Close'], length=50)
     
+    # EMA5-13 金叉/死叉
+    df['ema_cross'] = np.where(
+        (df['ema5'] > df['ema13']) & (df['ema5'].shift(1) <= df['ema13'].shift(1)), "金叉 🟢",
+        np.where(
+            (df['ema5'] < df['ema13']) & (df['ema5'].shift(1) >= df['ema13'].shift(1)), "死叉 🔴",
+            "无交叉"
+        )
+    )
+    
     return df
 
-# 获取信号 + EMA状态 + 报警准备
+# 获取信号 + 指标状态
 def get_sig(df, tf):
     if df.empty:
-        return "N/A", None, None, "N/A", "N/A"
+        return "N/A", None, None, "N/A", "N/A", "N/A"
     curr_p = float(df.iloc[-1]['Close'])
     rsi_val = f"{df.iloc[-1]['rsi']:.1f}" if pd.notna(df.iloc[-1]['rsi']) else "N/A"
     
-    # EMA 排列状态
-    ema_status = "N/A"
+    # EMA20/50 排列
+    ema_trend = "N/A"
     if pd.notna(df.iloc[-1]['ema20']) and pd.notna(df.iloc[-1]['ema50']):
         if curr_p > df.iloc[-1]['ema20'] > df.iloc[-1]['ema50']:
-            ema_status = "多头排列 🟢"
+            ema_trend = "多头 🟢"
         elif curr_p < df.iloc[-1]['ema20'] < df.iloc[-1]['ema50']:
-            ema_status = "空头排列 🔴"
+            ema_trend = "空头 🔴"
         else:
-            ema_status = "震荡 ⚪"
+            ema_trend = "震荡 ⚪"
+    
+    ema_cross = df.iloc[-1]['ema_cross'] if pd.notna(df.iloc[-1]['ema_cross']) else "N/A"
     
     buys = df[df['buy']]
     sells = df[df['sell']]
@@ -94,36 +107,27 @@ def get_sig(df, tf):
     alert_d = None
     if lb_u and (not ls_u or lb_u > ls_u):
         sig = f"🚀 BUY({dur_b}m)" if dur_b <= 30 else "多 🟢"
-        if dur_b <= alert_min:
-            alert_d = dur_b
+        if dur_b <= alert_min: alert_d = dur_b
     elif ls_u and (not lb_u or ls_u > lb_u):
         sig = f"📉 SELL({dur_s}m)" if dur_s <= 30 else "空 🔴"
-        if dur_s <= alert_min:
-            alert_d = dur_s
+        if dur_s <= alert_min: alert_d = dur_s
     
-    return sig, curr_p, alert_d, rsi_val, ema_status
+    return sig, curr_p, alert_d, rsi_val, ema_trend, ema_cross
 
-# 多空比（多交易所聚合，简化用 Binance 主 + 模拟补充）
-def get_ls_multi(base):
-    ratios = []
+# 多空比（只用 Binance 公开接口 + 错误处理）
+def get_ls(base):
     try:
-        # Binance
-        url_b = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
-        r_b = requests.get(url_b, timeout=3).json()
-        if r_b and 'longShortRatio' in r_b[0]:
-            ratio_b = float(r_b[0]['longShortRatio'])
-            ratios.append(f"Bin:{ratio_b:.2f}{'🟢' if ratio_b>1.2 else '🔴' if ratio_b<0.8 else ''}")
-    except:
-        pass
-    
-    # Gate/OKX 补充（实际用 CoinGlass 聚合页抓取或 Bybit API，这里模拟/占位）
-    # 如果有 API key，可换成真实请求；当前用 N/A 占位或固定补充
-    ratios.append("Gate:N/A")  # Gate 无免费公开 endpoint，可用 Coinglass
-    ratios.append("OKX:N/A")   # 同上
-    
-    return " | ".join(ratios) if ratios else "N/A"
+        url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
+        r = requests.get(url, timeout=5).json()
+        if r and isinstance(r, list) and 'longShortRatio' in r[0]:
+            ratio = float(r[0]['longShortRatio'])
+            emoji = "🟢" if ratio > 1.2 else "🔴" if ratio < 0.8 else "⚪"
+            return f"{ratio:.2f} {emoji}"
+    except Exception as e:
+        return f"N/A (Err: {str(e)[:20]})"
+    return "N/A"
 
-# 发送微信（仅1h触发）
+# 发送微信（仅1h）
 def send_alert(key, title, body):
     if not key: return
     try:
@@ -146,9 +150,14 @@ def render_table(df):
             if '🟢' in s: return 'color:#0f8; font-weight:bold;'
             if '🔴' in s: return 'color:#f66; font-weight:bold;'
         if 'RSI' in col_name:
-            v = float(s) if s != "N/A" else 50
-            if v > 70: return 'color:#ff0; background:#44000033;'  # 超买
-            if v < 30: return 'color:#0ff; background:#00440033;'  # 超卖
+            try:
+                v = float(s)
+                if v > 70: return 'color:#ff0; background:#44000033;'
+                if v < 30: return 'color:#0ff; background:#00440033;'
+            except:
+                pass
+        if '金叉' in s: return 'color:#0f0; font-weight:bold;'
+        if '死叉' in s: return 'color:#f44; font-weight:bold;'
         return ''
     
     html = '<table style="width:100%; border-collapse:collapse; font-family:monospace; font-size:0.95em;">'
@@ -164,31 +173,34 @@ def render_table(df):
     st.markdown(html, unsafe_allow_html=True)
 
 # 主界面
-st.title("UT Bot + RSI/EMA 多空比看板（1分钟刷新）")
+st.title("UT Bot + RSI/EMA/金叉看板（10分钟自动刷新）")
+
+if st.button("🔄 立即刷新数据"):
+    st.rerun()  # 手动触发 rerun，相当于立即刷新
 
 components.html("""
 <div style="font-size:1.3em; color:#aaa; margin:1em 0; text-align:center;">
-  下次刷新倒计时: <span id="cd">60</span> 秒
+  下次自动刷新倒计时: <span id="cd">600</span> 秒
 </div>
 <script>
-let s=60; const t=document.getElementById('cd');
-setInterval(()=>{s--; t.textContent=s; if(s<=0)s=60;},1000);
+let s=600; const t=document.getElementById('cd');
+setInterval(()=>{s--; t.textContent=s; if(s<=0)s=600;},1000);
 </script>
 """, height=80)
 
-with st.spinner("加载数据..."):
+with st.spinner("加载最新数据..."):
     ex = ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
     rows = []
     contracts = {"TAO", "XAG", "XAU"}
     
     for base in selected_cryptos:
         sym = f"{base}/USDT:USDT" if base in contracts else f"{base}/USDT"
-        row = {"资产": base, "多空比(聚合)": get_ls_multi(base)}
+        row = {"资产": base, "多空比(5m)": get_ls(base)}
         price = None
         
         for tf in intervals:
             try:
-                bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=200)  # 多取点给 EMA50
+                bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=200)
                 if not bars:
                     row[tf] = "无"
                     continue
@@ -196,15 +208,15 @@ with st.spinner("加载数据..."):
                 df_ohlcv['timestamp'] = pd.to_datetime(df_ohlcv['timestamp'], unit='ms')
                 df_ohlcv.set_index('timestamp', inplace=True)
                 processed_df = calculate_indicators(df_ohlcv)
-                sig, p, dur, rsi, ema_st = get_sig(processed_df, tf)
-                row[tf] = f"{sig} | RSI:{rsi} | {ema_st}"
+                sig, p, dur, rsi, ema_trend, ema_cross = get_sig(processed_df, tf)
+                row[tf] = f"{sig} | RSI:{rsi} | EMA:{ema_cross} ({ema_trend})"
                 if p is not None and p > 0:
                     price = p
                 
-                # 仅 1h 级别报警
+                # 仅1h报警
                 if tf == "1h" and dur is not None and weixin_key:
                     title = f"[{base} 1H] 新信号"
-                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\nEMA: {ema_st}\n距今: {dur}分钟前\n多空比: {row['多空比(聚合)']}"
+                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\nEMA金叉/死叉: {ema_cross}\nEMA趋势: {ema_trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
                     send_alert(weixin_key, title, body)
             except:
                 row[tf] = "err"
@@ -215,5 +227,5 @@ with st.spinner("加载数据..."):
     result_df = pd.DataFrame(rows)
     render_table(result_df)
 
-st.caption(f"更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· 1分钟刷新 · 仅1h BUY/SELL 信号报警 · 多空比聚合（Bin主+Gate/OKX补充） · RSI超买>70黄 超卖<30青")
+st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+st.info("· 10分钟自动刷新 · 手动按钮立即刷新 · 多空比仅Binance（公开稳定） · EMA5-13金叉/死叉已加 · 仅1h信号报警")

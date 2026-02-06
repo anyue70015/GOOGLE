@@ -10,11 +10,11 @@ from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
 # 配置
-st.set_page_config(page_title="UT Bot + RSI/EMA/MACD 看板", layout="wide")
+st.set_page_config(page_title="UT Bot 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
-st_autorefresh(interval=300 * 1000, key="refresh_5min")  # 修改2：5分钟自动刷新
+st_autorefresh(interval=300 * 1000, key="refresh_5min")  # 5分钟刷新
 
-# 侧边栏 - WxPusher 配置
+# 侧边栏
 st.sidebar.header("🛡️ 设置")
 sensitivity = st.sidebar.slider("UT Bot 敏感度", 0.1, 5.0, 1.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
@@ -22,14 +22,14 @@ atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 selected_cryptos = st.sidebar.multiselect("币种", CRYPTO_LIST, default=CRYPTO_LIST)
 
-st.sidebar.header("🚨 WxPusher 微信报警（仅1h级别）")
+st.sidebar.header("🚨 WxPusher 微信报警（仅1h）")
 app_token = st.sidebar.text_input("WxPusher appToken", type="password", value="AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH")
 user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM")
-alert_min = st.sidebar.number_input("新信号报警阈值（分钟）", 1, 60, 10)
+alert_min = st.sidebar.number_input("新信号阈值（分钟）", 1, 60, 10)
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# 计算指标（新增 MACD 金叉/死叉）
+# 计算指标
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
@@ -58,7 +58,6 @@ def calculate_indicators(df):
     df['ema20'] = ta.ema(df['Close'], length=20)
     df['ema50'] = ta.ema(df['Close'], length=50)
     
-    # EMA5-13 交叉
     df['ema_cross'] = np.where(
         (df['ema5'] > df['ema13']) & (df['ema5'].shift(1) <= df['ema13'].shift(1)), "金叉 🟢",
         np.where(
@@ -67,7 +66,6 @@ def calculate_indicators(df):
         )
     )
     
-    # 新增 MACD(12,26,9) 金叉/死叉
     macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
     df['macd_dif'] = macd['MACD_12_26_9']
     df['macd_dea'] = macd['MACDs_12_26_9']
@@ -81,7 +79,7 @@ def calculate_indicators(df):
     
     return df
 
-# 获取信号（修改3：BUY和SELL都设置alert_d，确保SELL也推送）
+# 获取信号
 def get_sig(df, tf):
     if df.empty:
         return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
@@ -122,11 +120,11 @@ def get_sig(df, tf):
         if dur_b <= alert_min: alert_d = dur_b
     elif ls_u and (not lb_u or ls_u > lb_u):
         sig = f"📉 SELL({dur_s}m)" if dur_s <= 30 else "空 🔴"
-        if dur_s <= alert_min: alert_d = dur_s   # SELL也设置alert_d
+        if dur_s <= alert_min: alert_d = dur_s
     
     return sig, curr_p, alert_d, rsi_val, f"{ema_cross} | MACD:{macd_cross}", trend
 
-# WxPusher 发送函数（不变）
+# WxPusher 发送
 def send_wx_pusher(app_token, uid, title, body):
     if not app_token or not uid:
         return
@@ -141,13 +139,13 @@ def send_wx_pusher(app_token, uid, title, body):
         if response.status_code == 200:
             res_json = response.json()
             if res_json.get("code") == 1000:
-                st.toast("WxPusher 推送成功", icon="✅")
+                st.toast("推送成功", icon="✅")
             else:
                 st.toast(f"推送失败: {res_json.get('msg')}", icon="⚠️")
     except Exception as e:
         st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
 
-# 多空比（不变）
+# 多空比
 def get_ls(base):
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
@@ -160,7 +158,7 @@ def get_ls(base):
         pass
     return "N/A"
 
-# HTML 表格渲染（修改1：高度减少40%，min-height 80→48，padding/font微调）
+# 渲染表格（高度极致压缩）
 def render_table(df):
     def cell_style_trend(value):
         s = str(value)
@@ -181,8 +179,8 @@ def render_table(df):
                 pass
         return ''
 
-    html = '<table style="width:100%; border-collapse:collapse; font-family:monospace; font-size:0.95em;">'
-    html += '<tr style="background:#222; color:#fff;">' + ''.join(f'<th style="padding:8px; border:1px solid #444;">{c}</th>' for c in df.columns) + '</tr>'
+    html = '<table style="width:100%; border-collapse:collapse; font-family:monospace; font-size:0.9em;">'
+    html += '<tr style="background:#222; color:#fff;">' + ''.join(f'<th style="padding:6px; border:1px solid #444; font-size:0.95em;">{c}</th>' for c in df.columns) + '</tr>'
     
     for _, row in df.iterrows():
         html += '<tr>'
@@ -195,42 +193,47 @@ def render_table(df):
                 ema_macd_part = ' | '.join(parts[2:]) if len(parts) > 2 else ""
                 
                 content = f'''
-                <div style="border:1px solid #555; padding:3px; min-height:48px; display:flex; flex-direction:column; justify-content:space-between; font-size:0.9em;">
-                    <div style="border-bottom:1px solid #444; padding-bottom:2px; {cell_style_other(sig_part)}">{sig_part or "—"}</div>
-                    <div style="border-bottom:1px solid #444; padding:2px 0; {cell_style_other(rsi_part)}">{rsi_part or "—"}</div>
-                    <div style="padding-top:2px; {cell_style_other(ema_macd_part)}">{ema_macd_part or "—"}</div>
+                <div style="border:1px solid #555; padding:2px; min-height:36px; display:flex; flex-direction:column; justify-content:space-between; font-size:0.85em; line-height:1.2;">
+                    <div style="border-bottom:1px solid #444; padding-bottom:1px; {cell_style_other(sig_part)}">{sig_part or "—"}</div>
+                    <div style="border-bottom:1px solid #444; padding:1px 0; {cell_style_other(rsi_part)}">{rsi_part or "—"}</div>
+                    <div style="padding-top:1px; {cell_style_other(ema_macd_part)}">{ema_macd_part or "—"}</div>
                 </div>
                 '''
-                html += f'<td style="padding:4px; border:1px solid #444; vertical-align:top;">{content}</td>'
+                html += f'<td style="padding:3px; border:1px solid #444; vertical-align:top;">{content}</td>'
             elif c == "多空比(5m)":
                 style = cell_style_trend(val)
-                html += f'<td style="padding:8px; border:1px solid #444; {style}">{val}</td>'
+                html += f'<td style="padding:6px; border:1px solid #444; {style}">{val}</td>'
             elif c == "趋势":
                 style = cell_style_trend(val)
-                html += f'<td style="padding:8px; border:1px solid #444; {style}">{val}</td>'
+                html += f'<td style="padding:6px; border:1px solid #444; {style}">{val}</td>'
             else:
-                html += f'<td style="padding:8px; border:1px solid #444;">{val}</td>'
+                html += f'<td style="padding:6px; border:1px solid #444;">{val}</td>'
         html += '</tr>'
     html += '</table>'
     st.markdown(html, unsafe_allow_html=True)
 
-# 主界面
-st.title("UT Bot + RSI/EMA/MACD 看板（5分钟自动刷新）")
+# 主界面 - 极致压缩标题 + 倒计时
+st.markdown(
+    "<h4 style='text-align:center; margin:0.2em 0 0.1em 0; padding:0; font-size:1.4em; color:#ddd;'>"
+    "UT Bot + RSI/EMA/MACD 看板 (5min刷新)"
+    "</h4>",
+    unsafe_allow_html=True
+)
 
-if st.button("🔄 立即刷新数据"):
+if st.button("刷新", key="refresh_btn"):
     st.rerun()
 
 components.html("""
-<div style="font-size:1.3em; color:#aaa; margin:1em 0; text-align:center;">
-  下次自动刷新倒计时: <span id="cd">300</span> 秒
+<div style="font-size:1.1em; color:#888; margin:0.1em 0; text-align:center; line-height:1.1;">
+  下次: <span id="cd" style="font-weight:bold;">300</span> s
 </div>
 <script>
 let s=300; const t=document.getElementById('cd');
 setInterval(()=>{s--; t.textContent=s; if(s<=0)s=300;},1000);
 </script>
-""", height=80)
+""", height=30)
 
-with st.spinner("加载最新数据..."):
+with st.spinner("加载中..."):
     ex = ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
     rows = []
     contracts = {"TAO", "XAG", "XAU"}
@@ -255,15 +258,15 @@ with st.spinner("加载最新数据..."):
                 if p is not None and p > 0:
                     price = p
                 
-                # WxPusher 报警 - 仅1h，BUY/SELL都推
+                # 报警 - BUY/SELL 都推
                 if tf == "1h" and dur is not None and app_token and user_uid:
                     if "BUY" in sig:
-                        title = f"[{base} 1H] 新 BUY 信号！"
+                        title = f"[{base} 1H] BUY 信号"
                     elif "SELL" in sig:
-                        title = f"[{base} 1H] 新 SELL 信号！"
+                        title = f"[{base} 1H] SELL 信号"
                     else:
-                        title = f"[{base} 1H] 新信号"
-                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\n{ema_macd}\n趋势: {trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
+                        title = f"[{base} 1H] 信号"
+                    body = f"{sig}\n价: {p:.4f}\nRSI: {rsi}\n{ema_macd}\n趋势: {trend}\n距今: {dur}min\n多空: {row['多空比(5m)']}"
                     send_wx_pusher(app_token, user_uid, title, body)
             except:
                 row[tf] = "err"
@@ -275,5 +278,5 @@ with st.spinner("加载最新数据..."):
     result_df = pd.DataFrame(rows)
     render_table(result_df)
 
-st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· WxPusher 已集成 · BUY/SELL 都推送 · 5分钟自动刷新 · MACD 金叉/死叉已显示")
+st.caption(f"更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+st.info("· BUY/SELL 均推送 · 5min刷新 · MACD已显示", icon="ℹ️")

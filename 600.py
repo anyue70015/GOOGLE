@@ -10,9 +10,9 @@ from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
 # 配置
-st.set_page_config(page_title="UT Bot + RSI/EMA 看板", layout="wide")
+st.set_page_config(page_title="UT Bot + RSI/EMA/MACD 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
-st_autorefresh(interval=600 * 1000, key="refresh_10min")  # 10分钟自动刷新
+st_autorefresh(interval=300 * 1000, key="refresh_5min")  # 修改2：5分钟自动刷新
 
 # 侧边栏 - WxPusher 配置
 st.sidebar.header("🛡️ 设置")
@@ -29,7 +29,7 @@ alert_min = st.sidebar.number_input("新信号报警阈值（分钟）", 1, 60, 
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# 计算指标（UT Bot + RSI + EMA）
+# 计算指标（新增 MACD 金叉/死叉）
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
@@ -58,6 +58,7 @@ def calculate_indicators(df):
     df['ema20'] = ta.ema(df['Close'], length=20)
     df['ema50'] = ta.ema(df['Close'], length=50)
     
+    # EMA5-13 交叉
     df['ema_cross'] = np.where(
         (df['ema5'] > df['ema13']) & (df['ema5'].shift(1) <= df['ema13'].shift(1)), "金叉 🟢",
         np.where(
@@ -66,9 +67,21 @@ def calculate_indicators(df):
         )
     )
     
+    # 新增 MACD(12,26,9) 金叉/死叉
+    macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
+    df['macd_dif'] = macd['MACD_12_26_9']
+    df['macd_dea'] = macd['MACDs_12_26_9']
+    df['macd_cross'] = np.where(
+        (df['macd_dif'] > df['macd_dea']) & (df['macd_dif'].shift(1) <= df['macd_dea'].shift(1)), "MACD金叉 🟢",
+        np.where(
+            (df['macd_dif'] < df['macd_dea']) & (df['macd_dif'].shift(1) >= df['macd_dea'].shift(1)), "MACD死叉 🔴",
+            "无"
+        )
+    )
+    
     return df
 
-# 获取信号
+# 获取信号（修改3：BUY和SELL都设置alert_d，确保SELL也推送）
 def get_sig(df, tf):
     if df.empty:
         return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
@@ -86,6 +99,7 @@ def get_sig(df, tf):
             trend = "震荡 ⚪"
     
     ema_cross = df.iloc[-1]['ema_cross'] if pd.notna(df.iloc[-1]['ema_cross']) else "N/A"
+    macd_cross = df.iloc[-1]['macd_cross'] if pd.notna(df.iloc[-1]['macd_cross']) else "无"
     
     buys = df[df['buy']]
     sells = df[df['sell']]
@@ -108,11 +122,11 @@ def get_sig(df, tf):
         if dur_b <= alert_min: alert_d = dur_b
     elif ls_u and (not lb_u or ls_u > lb_u):
         sig = f"📉 SELL({dur_s}m)" if dur_s <= 30 else "空 🔴"
-        if dur_s <= alert_min: alert_d = dur_s
+        if dur_s <= alert_min: alert_d = dur_s   # SELL也设置alert_d
     
-    return sig, curr_p, alert_d, rsi_val, ema_cross, trend
+    return sig, curr_p, alert_d, rsi_val, f"{ema_cross} | MACD:{macd_cross}", trend
 
-# WxPusher 发送函数
+# WxPusher 发送函数（不变）
 def send_wx_pusher(app_token, uid, title, body):
     if not app_token or not uid:
         return
@@ -120,20 +134,20 @@ def send_wx_pusher(app_token, uid, title, body):
         payload = {
             "appToken": app_token,
             "content": f"{title}\n{body}",
-            "summary": title[:100],  # 摘要限100字
+            "summary": title[:100],
             "uids": [uid]
         }
         response = requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
         if response.status_code == 200:
             res_json = response.json()
             if res_json.get("code") == 1000:
-                st.toast("WxPusher 推送成功", icon="✅")  # Streamlit 提示
+                st.toast("WxPusher 推送成功", icon="✅")
             else:
                 st.toast(f"推送失败: {res_json.get('msg')}", icon="⚠️")
     except Exception as e:
         st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
 
-# 多空比
+# 多空比（不变）
 def get_ls(base):
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
@@ -146,7 +160,7 @@ def get_ls(base):
         pass
     return "N/A"
 
-# HTML 表格渲染（保持你之前的布局）
+# HTML 表格渲染（修改1：高度减少40%，min-height 80→48，padding/font微调）
 def render_table(df):
     def cell_style_trend(value):
         s = str(value)
@@ -178,13 +192,13 @@ def render_table(df):
                 parts = str(val).split(' | ')
                 sig_part = parts[0] if len(parts) > 0 else ""
                 rsi_part = parts[1] if len(parts) > 1 else ""
-                ema_part = ' | '.join(parts[2:]) if len(parts) > 2 else ""
+                ema_macd_part = ' | '.join(parts[2:]) if len(parts) > 2 else ""
                 
                 content = f'''
-                <div style="border:1px solid #555; padding:4px; min-height:80px; display:flex; flex-direction:column; justify-content:space-between;">
-                    <div style="border-bottom:1px solid #444; padding-bottom:4px; {cell_style_other(sig_part)}">{sig_part or "—"}</div>
-                    <div style="border-bottom:1px solid #444; padding:4px 0; {cell_style_other(rsi_part)}">{rsi_part or "—"}</div>
-                    <div style="padding-top:4px; {cell_style_other(ema_part)}">{ema_part or "—"}</div>
+                <div style="border:1px solid #555; padding:3px; min-height:48px; display:flex; flex-direction:column; justify-content:space-between; font-size:0.9em;">
+                    <div style="border-bottom:1px solid #444; padding-bottom:2px; {cell_style_other(sig_part)}">{sig_part or "—"}</div>
+                    <div style="border-bottom:1px solid #444; padding:2px 0; {cell_style_other(rsi_part)}">{rsi_part or "—"}</div>
+                    <div style="padding-top:2px; {cell_style_other(ema_macd_part)}">{ema_macd_part or "—"}</div>
                 </div>
                 '''
                 html += f'<td style="padding:4px; border:1px solid #444; vertical-align:top;">{content}</td>'
@@ -201,18 +215,18 @@ def render_table(df):
     st.markdown(html, unsafe_allow_html=True)
 
 # 主界面
-st.title("UT Bot + RSI/EMA/金叉看板（10分钟自动刷新）")
+st.title("UT Bot + RSI/EMA/MACD 看板（5分钟自动刷新）")
 
 if st.button("🔄 立即刷新数据"):
     st.rerun()
 
 components.html("""
 <div style="font-size:1.3em; color:#aaa; margin:1em 0; text-align:center;">
-  下次自动刷新倒计时: <span id="cd">600</span> 秒
+  下次自动刷新倒计时: <span id="cd">300</span> 秒
 </div>
 <script>
-let s=600; const t=document.getElementById('cd');
-setInterval(()=>{s--; t.textContent=s; if(s<=0)s=600;},1000);
+let s=300; const t=document.getElementById('cd');
+setInterval(()=>{s--; t.textContent=s; if(s<=0)s=300;},1000);
 </script>
 """, height=80)
 
@@ -236,15 +250,20 @@ with st.spinner("加载最新数据..."):
                 df_ohlcv['timestamp'] = pd.to_datetime(df_ohlcv['timestamp'], unit='ms')
                 df_ohlcv.set_index('timestamp', inplace=True)
                 processed_df = calculate_indicators(df_ohlcv)
-                sig, p, dur, rsi, ema_cross, trend = get_sig(processed_df, tf)
-                row[tf] = f"{sig} | RSI:{rsi} | EMA:{ema_cross}"
+                sig, p, dur, rsi, ema_macd, trend = get_sig(processed_df, tf)
+                row[tf] = f"{sig} | RSI:{rsi} | {ema_macd}"
                 if p is not None and p > 0:
                     price = p
                 
-                # WxPusher 报警 - 仅1h
+                # WxPusher 报警 - 仅1h，BUY/SELL都推
                 if tf == "1h" and dur is not None and app_token and user_uid:
-                    title = f"[{base} 1H] 新信号"
-                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\nEMA金叉/死叉: {ema_cross}\n趋势: {trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
+                    if "BUY" in sig:
+                        title = f"[{base} 1H] 新 BUY 信号！"
+                    elif "SELL" in sig:
+                        title = f"[{base} 1H] 新 SELL 信号！"
+                    else:
+                        title = f"[{base} 1H] 新信号"
+                    body = f"信号: {sig}\n价格: {p:.4f}\nRSI: {rsi}\n{ema_macd}\n趋势: {trend}\n距今: {dur}分钟前\n多空比: {row['多空比(5m)']}"
                     send_wx_pusher(app_token, user_uid, title, body)
             except:
                 row[tf] = "err"
@@ -257,4 +276,4 @@ with st.spinner("加载最新数据..."):
     render_table(result_df)
 
 st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· WxPusher 已集成 · 填 appToken 和 UID 后保存 · 仅1h BUY/SELL 信号推送微信 · 10分钟自动刷新")
+st.info("· WxPusher 已集成 · BUY/SELL 都推送 · 5分钟自动刷新 · MACD 金叉/死叉已显示")

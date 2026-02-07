@@ -8,126 +8,97 @@ from datetime import datetime
 import pytz
 from streamlit_autorefresh import st_autorefresh
 
-# ==================== 1. 配置与参数 ====================
-st.set_page_config(page_title="UT Bot 监控 - 修复版", layout="wide")
+# ==================== 1. 基础配置 (集成你的 Token) ====================
+st.set_page_config(page_title="UT Bot 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 st_autorefresh(interval=300 * 1000, key="refresh_5min") 
 
-# 自动集成你的 Token
-DEFAULT_APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH"
-DEFAULT_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
+# 直接写死你的 Token
+APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH"
+UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
 
 if 'last_alerts' not in st.session_state:
     st.session_state.last_alerts = {}
 
 # ==================== 2. 功能函数 ====================
-def send_wx_pusher(title, body):
+def send_wx(title, body):
     try:
-        payload = {
-            "appToken": DEFAULT_APP_TOKEN,
-            "content": f"{title}\n{body}",
-            "uids": [DEFAULT_UID]
-        }
-        requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
-    except:
-        pass
+        url = "https://wxpusher.zjiecode.com/api/send/message"
+        data = {"appToken": APP_TOKEN, "content": f"{title}\n{body}", "uids": [UID]}
+        requests.post(url, json=data, timeout=5)
+    except: pass
 
 def calculate_indicators(df, sensitivity, atr_period):
-    try:
-        if df.empty or len(df) < 20: return pd.DataFrame()
-        df.columns = [str(c).capitalize() for c in df.columns]
-        df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
-        df = df.dropna(subset=['atr']).copy()
-        n_loss = sensitivity * df['atr']
-        src = df['Close']
-        trail_stop = np.zeros(len(df))
-        for i in range(1, len(df)):
-            p = trail_stop[i-1]
-            if src.iloc[i] > p and src.iloc[i-1] > p:
-                trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
-            elif src.iloc[i] < p and src.iloc[i-1] < p:
-                trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
-            else:
-                trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
-        df['trail_stop'] = trail_stop
-        df['buy'] = (df['Close'] > df['trail_stop']) & (df['Close'].shift(1) <= df['trail_stop'].shift(1))
-        df['sell'] = (df['Close'] < df['trail_stop']) & (df['Close'].shift(1) >= df['trail_stop'].shift(1))
-        df['rsi'] = ta.rsi(df['Close'], length=14)
-        return df
-    except:
-        return pd.DataFrame()
+    # 这里保持你最初的计算代码
+    df.columns = [str(c).capitalize() for c in df.columns]
+    df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
+    df = df.dropna(subset=['atr']).copy()
+    n_loss = sensitivity * df['atr']
+    src = df['Close']
+    trail_stop = np.zeros(len(df))
+    for i in range(1, len(df)):
+        p = trail_stop[i-1]
+        if src.iloc[i] > p and src.iloc[i-1] > p:
+            trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
+        elif src.iloc[i] < p and src.iloc[i-1] < p:
+            trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
+        else:
+            trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
+    df['trail_stop'] = trail_stop
+    df['buy'] = (df['Close'] > df['trail_stop']) & (df['Close'].shift(1) <= df['trail_stop'].shift(1))
+    df['sell'] = (df['Close'] < df['trail_stop']) & (df['Close'].shift(1) >= df['trail_stop'].shift(1))
+    df['rsi'] = ta.rsi(df['Close'], length=14)
+    return df
 
-def get_sig_details(df):
-    if df.empty: return "N/A", 0, "N/A", "N/A"
-    curr_p = float(df.iloc[-1]['Close'])
-    rsi_val = f"{df.iloc[-1]['rsi']:.1f}" if 'rsi' in df.columns else "N/A"
-    
-    buys = df[df['buy']]
-    sells = df[df['sell']]
-    bt = buys.index[-1] if not buys.empty else None
-    st_t = sells.index[-1] if not sells.empty else None
-    
-    if bt and (not st_t or bt > st_t): s = "BUY 🟢"
-    elif st_t and (not bt or st_t > bt): s = "SELL 🔴"
-    else: s = "HOLD ⚪"
-    return s, curr_p, rsi_val, df.index[-1].strftime('%H:%M')
-
-# ==================== 3. 主界面 ====================
-st.sidebar.header("🛡️ 策略设置")
-sensitivity = st.sidebar.slider("敏感度", 0.1, 5.0, 1.0, 0.1)
-atr_period = st.sidebar.slider("ATR周期", 1, 30, 10)
-
+# ==================== 3. 主逻辑 ====================
+ex = ccxt.okx({'enableRateLimit': True})
+# TAO, XAG, XAU 是合约
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
-selected_cryptos = st.sidebar.multiselect("品种", CRYPTO_LIST, default=CRYPTO_LIST)
-intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+intervals = ["5m", "15m", "30m", "1h", "4h"]
 
-st.title("UT Bot 实时看板")
-st.write(f"下次刷新时间: {datetime.now(BEIJING_TZ).strftime('%H:%M:%S')} (每5分钟)")
-
-ex = ccxt.okx({'enableRateLimit': True, 'timeout': 15000})
-contracts = {"TAO", "XAG", "XAU"}
-
-# 构造表格数据
-table_rows = []
-
-progress_bar = st.progress(0)
-for idx, base in enumerate(selected_cryptos):
-    sym = f"{base}/USDT:USDT" if base in contracts else f"{base}/USDT"
-    row_data = {"资产": base}
-    final_price = 0
+rows = []
+for base in CRYPTO_LIST:
+    # 回归你最初的 Symbol 拼接逻辑
+    if base in ["TAO", "XAG", "XAU"]:
+        sym = f"{base}/USDT:USDT"
+    else:
+        sym = f"{base}/USDT"
+    
+    row = {"资产": base}
+    current_price = 0
     
     for tf in intervals:
         try:
-            bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=60)
-            df_raw = pd.DataFrame(bars, columns=['ts','o','h','l','c','v'])
-            df_raw['ts'] = pd.to_datetime(df_raw['ts'], unit='ms')
-            df_raw.set_index('ts', inplace=True)
+            bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
+            df = calculate_indicators(pd.DataFrame(bars, columns=['ts','o','h','l','c','v']), 1.0, 10)
             
-            df = calculate_indicators(df_raw, sensitivity, atr_period)
-            sig, p, rsi, ktime = get_sig_details(df)
+            # 获取最新状态
+            last_row = df.iloc[-1]
+            ktime = last_row.name # 或 df.index[-1]
             
-            row_data[tf] = f"{sig} (RSI:{rsi})"
-            final_price = p
+            # 确定信号
+            buys = df[df['buy']]
+            sells = df[df['sell']]
+            last_b = buys.index[-1] if not buys.empty else 0
+            last_s = sells.index[-1] if not sells.empty else 0
             
-            # 报警触发
+            sig = "BUY 🟢" if last_b > last_s else "SELL 🔴"
+            row[tf] = f"{sig} (RSI:{last_row['rsi']:.1f})"
+            current_price = last_row['Close']
+            
+            # --- 报警触发逻辑 ---
             if tf in ["30m", "1h"]:
                 key = (base, tf)
+                # 状态锁：对比信号颜色和K线时间
                 last_alert = st.session_state.last_alerts.get(key, {"sig": None, "time": None})
-                if sig != last_alert["sig"] and ktime != last_alert["time"] and "HOLD" not in sig:
-                    send_wx_pusher(f"🚨 {base} {tf} {sig}", f"价格: {p}\n时间: {ktime}")
+                if sig != last_alert["sig"]:
+                    send_wx(f"🚨 {base} {tf} 变号！", f"最新: {sig}\n价格: {current_price}")
                     st.session_state.last_alerts[key] = {"sig": sig, "time": ktime}
-        except Exception as e:
-            row_data[tf] = "ERR"
-    
-    row_data["当前价格"] = final_price
-    table_rows.append(row_data)
-    progress_bar.progress((idx + 1) / len(selected_cryptos))
+        except:
+            row[tf] = "ERR"
+            
+    # 价格放在最后一列
+    row["实时价格"] = current_price
+    rows.append(row)
 
-# 使用 Streamlit 原生 Dataframe 显示，防止 HTML 冲突
-if table_rows:
-    display_df = pd.DataFrame(table_rows)
-    st.dataframe(display_df, use_container_width=True)
-else:
-    st.warning("暂无数据，请检查网络连接或 API 状态")
-
-st.info("注：XAG, XAU 为合约数据，其余为现货。")
+st.table(pd.DataFrame(rows))

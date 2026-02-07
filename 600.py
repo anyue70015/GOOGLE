@@ -9,17 +9,20 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
-# ========== 保持你原来的配置 ==========
+# 配置
 st.set_page_config(page_title="UT Bot 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
-st_autorefresh(interval=300 * 1000, key="refresh_5min")
+st_autorefresh(interval=300 * 1000, key="refresh_5min")  # 5分钟刷新
 
-# ========== 保持你原来的侧边栏 ==========
+# 状态初始化：记录每个币种+周期的最后推送的K线时间
+if 'last_alerts' not in st.session_state:
+    st.session_state.last_alerts = {}  # key: (base, tf), value: 'YYYY-MM-DD HH:MM'
+
+# 侧边栏
 st.sidebar.header("🛡️ 设置")
 sensitivity = st.sidebar.slider("UT Bot 敏感度", 0.1, 5.0, 1.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 
-# ========== 保持你原来的币种列表 ==========
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 selected_cryptos = st.sidebar.multiselect("币种", CRYPTO_LIST, default=CRYPTO_LIST)
 
@@ -30,7 +33,7 @@ alert_min = st.sidebar.number_input("新信号阈值（分钟）", 1, 60, 10)
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# ========== 保持你原来的 calculate_indicators 函数 ==========
+# 计算指标（原样不变）
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
@@ -80,10 +83,10 @@ def calculate_indicators(df):
     
     return df
 
-# ========== 修复的关键部分：get_sig 函数 ==========
+# 获取信号（原样不变）
 def get_sig(df, tf):
     if df.empty:
-        return "N/A", None, None, "N/A", "N/A", "N/A"
+        return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
     
     curr_p = float(df.iloc[-1]['Close'])
     rsi_val = f"{df.iloc[-1]['rsi']:.1f}" if pd.notna(df.iloc[-1]['rsi']) else "N/A"
@@ -107,38 +110,44 @@ def get_sig(df, tf):
     
     now_u = datetime.now(pytz.utc)
     
-    # ========== 修复：简化时间处理逻辑 ==========
-    def get_minutes_since(event_time):
-        if event_time is None:
-            return 999
-        
-        # 统一转换为带时区的datetime对象
-        if isinstance(event_time, pd.Timestamp):
-            # 直接使用timestamp数值进行计算，避免时区比较问题
-            event_timestamp = event_time.timestamp()
-            now_timestamp = now_u.timestamp()
-            delta_seconds = now_timestamp - event_timestamp
-            return int(delta_seconds / 60) if delta_seconds >= 0 else 999
-        
-        return 999
+    def force_utc(ts):
+        if ts is None:
+            return None
+        if isinstance(ts, pd.Timestamp):
+            ts = ts.to_pydatetime()
+        if ts.tzinfo is None:
+            return pytz.utc.localize(ts)
+        return ts.astimezone(pytz.utc)
     
-    dur_b = get_minutes_since(lb)
-    dur_s = get_minutes_since(ls)
+    lb_u = force_utc(lb)
+    ls_u = force_utc(ls)
+    
+    dur_b = 999
+    if lb_u:
+        delta_b = now_u - lb_u
+        if delta_b.total_seconds() >= 0:
+            dur_b = int(delta_b.total_seconds() / 60)
+    
+    dur_s = 999
+    if ls_u:
+        delta_s = now_u - ls_u
+        if delta_s.total_seconds() >= 0:
+            dur_s = int(delta_s.total_seconds() / 60)
     
     sig = "维持"
     alert_d = None
-    if lb is not None and (ls is None or dur_b <= dur_s):
+    if lb_u and (not ls_u or lb_u > ls_u):
         sig = f"🚀 BUY({dur_b}m)" if dur_b <= 30 else "多 🟢"
         if dur_b <= alert_min:
             alert_d = dur_b
-    elif ls is not None and (lb is None or dur_s < dur_b):
+    elif ls_u and (not lb_u or ls_u > lb_u):
         sig = f"📉 SELL({dur_s}m)" if dur_s <= 30 else "空 🔴"
         if dur_s <= alert_min:
             alert_d = dur_s
     
     return sig, curr_p, alert_d, rsi_val, f"{ema_cross} | MACD:{macd_cross}", trend
 
-# ========== 保持你原来的 WxPusher 函数 ==========
+# WxPusher 发送（原样不变）
 def send_wx_pusher(app_token, uid, title, body):
     if not app_token or not uid:
         return
@@ -159,7 +168,7 @@ def send_wx_pusher(app_token, uid, title, body):
     except Exception as e:
         st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
 
-# ========== 保持你原来的多空比函数 ==========
+# 多空比（原样不变）
 def get_ls(base):
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
@@ -172,7 +181,7 @@ def get_ls(base):
         pass
     return "N/A"
 
-# ========== 保持你原来的表格渲染函数 ==========
+# 渲染表格（原样不变）
 def render_table(df):
     def cell_style_trend(value):
         s = str(value)
@@ -226,7 +235,7 @@ def render_table(df):
     html += '</table>'
     st.markdown(html, unsafe_allow_html=True)
 
-# ========== 保持你原来的主界面 ==========
+# 主界面 - 原样不变
 st.markdown(
     "<h4 style='text-align:center; margin:0.2em 0 0.1em 0; padding:0; font-size:1.4em; color:#ddd;'>"
     "UT Bot + RSI/EMA/MACD 看板 (5min刷新)"
@@ -247,7 +256,6 @@ setInterval(()=>{s--; t.textContent=s; if(s<=0)s=300;},1000);
 </script>
 """, height=30)
 
-# ========== 保持你原来的数据获取逻辑 ==========
 with st.spinner("加载中..."):
     ex = ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
     rows = []
@@ -273,19 +281,41 @@ with st.spinner("加载中..."):
                 if p is not None and p > 0:
                     price = p
                 
-                # 报警逻辑（保持你原来的30m和1h推送）
+                # 报警 - 30m & 1h + 宽松5分钟 + 防重复
                 if tf in ["30m", "1h"] and dur is not None and app_token and user_uid:
-                    period_label = "30m" if tf == "30m" else "1H"
-                    if "BUY" in sig:
-                        title = f"[{base} {period_label}] BUY 信号"
-                    elif "SELL" in sig:
-                        title = f"[{base} {period_label}] SELL 信号"
-                    else:
-                        continue  # 只推送买卖信号
+                    key = (base, tf)
+                    last_kline_time = st.session_state.last_alerts.get(key, None)
+                    current_kline_time = processed_df.index[-1].strftime('%Y-%m-%d %H:%M')
                     
-                    body = f"{sig}\n价: {p:.4f if p else 'N/A'}\nRSI: {rsi}\n{ema_macd}\n趋势: {trend}\n距今: {dur}min\n多空: {row['多空比(5m)']}"
-                    send_wx_pusher(app_token, user_uid, title, body)
+                    # 宽松条件：dur <= alert_min + 5 且 K线时间不同（新信号或新K线）
+                    should_alert = (
+                        dur <= alert_min + 5 and
+                        (last_kline_time is None or last_kline_time != current_kline_time)
+                    )
                     
+                    if should_alert:
+                        period_label = "30m" if tf == "30m" else "1H"
+                        if "BUY" in sig:
+                            title = f"[{base} {period_label}] BUY 信号"
+                        elif "SELL" in sig:
+                            title = f"[{base} {period_label}] SELL 信号"
+                        else:
+                            title = f"[{base} {period_label}] 信号变动"
+                            
+                        body = (
+                            f"{sig}\n"
+                            f"价: {p:.4f if p else 'N/A'}\n"
+                            f"RSI: {rsi}\n"
+                            f"{ema_macd}\n"
+                            f"趋势: {trend}\n"
+                            f"距今: {dur}min\n"
+                            f"多空: {row['多空比(5m)']}"
+                        )
+                        send_wx_pusher(app_token, user_uid, title, body)
+                        
+                        # 更新最后推送的K线时间
+                        st.session_state.last_alerts[key] = current_kline_time
+                        
             except Exception as e:
                 row[tf] = f"err: {str(e)[:30]}"
         
@@ -297,4 +327,4 @@ with st.spinner("加载中..."):
     render_table(result_df)
 
 st.caption(f"更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· 30m & 1h BUY/SELL 均推送 · 5min刷新 · MACD已显示", icon="ℹ️")
+st.info("· 30m & 1h BUY/SELL 均推送 · 宽松5min防漏 · 防重复 · 5min刷新 · MACD已显示", icon="ℹ️")

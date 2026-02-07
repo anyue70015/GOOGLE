@@ -9,12 +9,33 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
+# 函数定义放在最前面
+def send_wx_pusher(app_token, uid, title, body):
+    if not app_token or not uid:
+        return
+    try:
+        payload = {
+            "appToken": app_token,
+            "content": f"{title}\n{body}",
+            "summary": title[:100],
+            "uids": [uid]
+        }
+        response = requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
+        if response.status_code == 200:
+            res_json = response.json()
+            if res_json.get("code") == 1000:
+                st.toast("推送成功", icon="✅")
+            else:
+                st.toast(f"推送失败: {res_json.get('msg')}", icon="⚠️")
+    except Exception as e:
+        st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
+
 # 配置
 st.set_page_config(page_title="UT Bot 看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 st_autorefresh(interval=300 * 1000, key="refresh_5min")  # 5分钟刷新
 
-# 状态初始化：记录每个币种+周期的最后推送的K线时间
+# 状态初始化
 if 'last_alerts' not in st.session_state:
     st.session_state.last_alerts = {}  # key: (base, tf), value: 'YYYY-MM-DD HH:MM'
 
@@ -27,25 +48,24 @@ CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAV
 selected_cryptos = st.sidebar.multiselect("币种", CRYPTO_LIST, default=CRYPTO_LIST)
 
 st.sidebar.header("🚨 WxPusher 微信报警（30m & 1h）")
-app_token = st.sidebar.text_input("WxPusher appToken", type="password", value="")
-user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="")
+app_token = st.sidebar.text_input("WxPusher appToken", type="password", value="AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH")
+user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM")
 alert_min = st.sidebar.number_input("新信号阈值（分钟）", 1, 60, 10)
 
-# 调试工具：手动测试 + 强制测试
+# 测试按钮
 if st.sidebar.button("立即发送测试微信"):
     if app_token and user_uid:
         test_title = "【手动测试】UT Bot 看板"
-        test_body = f"时间: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n通道正常！"
+        test_body = f"时间: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}\n通道测试"
         send_wx_pusher(app_token, user_uid, test_title, test_body)
-        st.sidebar.success("测试已发送，请查微信")
+        st.sidebar.success("测试消息已发送，请检查微信")
     else:
-        st.sidebar.error("填写 token/UID")
+        st.sidebar.error("token/UID 为空")
 
-force_test_alert = st.sidebar.checkbox("强制每刷新发测试报警（30m/1h每个币）", value=False)
+force_test_alert = st.sidebar.checkbox("强制每刷新发送测试报警（30m/1h每个币）", value=False)
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# 计算指标（原样）
 def calculate_indicators(df):
     if df.empty or len(df) < 50:
         return pd.DataFrame()
@@ -95,7 +115,6 @@ def calculate_indicators(df):
     
     return df
 
-# 获取信号（原样）
 def get_sig(df, tf):
     if df.empty:
         return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
@@ -159,28 +178,6 @@ def get_sig(df, tf):
     
     return sig, curr_p, alert_d, rsi_val, f"{ema_cross} | MACD:{macd_cross}", trend
 
-# WxPusher 发送（原样）
-def send_wx_pusher(app_token, uid, title, body):
-    if not app_token or not uid:
-        return
-    try:
-        payload = {
-            "appToken": app_token,
-            "content": f"{title}\n{body}",
-            "summary": title[:100],
-            "uids": [uid]
-        }
-        response = requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
-        if response.status_code == 200:
-            res_json = response.json()
-            if res_json.get("code") == 1000:
-                st.toast("推送成功", icon="✅")
-            else:
-                st.toast(f"推送失败: {res_json.get('msg')}", icon="⚠️")
-    except Exception as e:
-        st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
-
-# 多空比（原样）
 def get_ls(base):
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
@@ -193,7 +190,6 @@ def get_ls(base):
         pass
     return "N/A"
 
-# 渲染表格（原样）
 def render_table(df):
     def cell_style_trend(value):
         s = str(value)
@@ -293,24 +289,16 @@ with st.spinner("加载中..."):
                 if p is not None and p > 0:
                     price = p
                 
-                # 报警 - 30m & 1h + 调试输出
-                if tf in ["30m", "1h"] and dur is not None and app_token and user_uid:
+                # 报警 + 调试
+                if tf in ["30m", "1h"] and app_token and user_uid:
                     key = (base, tf)
                     last_kline_time = st.session_state.last_alerts.get(key, None)
                     current_kline_time = processed_df.index[-1].strftime('%Y-%m-%d %H:%M') if not processed_df.empty else "无"
                     
-                    # 调试输出
-                    debug_str = f"【{base} {tf}】 dur={dur} | last_kline={last_kline_time or 'None'} | curr_kline={current_kline_time} | should={dur <= alert_min + 5 and (last_kline_time is None or last_kline_time != current_kline_time)}"
-                    st.write(debug_str)
+                    should = dur is not None and dur <= alert_min + 5 and (last_kline_time is None or last_kline_time != current_kline_time)
+                    st.write(f"【{base} {tf}】 dur={dur} | last={last_kline_time or 'None'} | curr={current_kline_time} | should_alert={should}")
                     
-                    # 强制测试覆盖
-                    should_alert = force_test_alert
-                    
-                    if not should_alert:
-                        should_alert = (
-                            dur <= alert_min + 5 and
-                            (last_kline_time is None or last_kline_time != current_kline_time)
-                        )
+                    should_alert = force_test_alert or should
                     
                     if should_alert:
                         period_label = "30m" if tf == "30m" else "1H"
@@ -337,7 +325,6 @@ with st.spinner("加载中..."):
             except Exception as e:
                 row[tf] = f"err: {str(e)[:30]}"
         
-        # 现价安全处理（防格式错误）
         row["现价"] = f"{float(price):.4f}" if price is not None and isinstance(price, (int, float)) else "N/A"
         row["趋势"] = trend
         rows.append(row)
@@ -346,4 +333,4 @@ with st.spinner("加载中..."):
     render_table(result_df)
 
 st.caption(f"更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· 30m & 1h BUY/SELL 均推送 · 宽松5min防漏 · 防重复 · 5min刷新 · MACD已显示 · 检查网页 dur 值", icon="ℹ️")
+st.info("· 看网页上的 dur 和 should_alert 判断是否触发 · 如果 should_alert=False 且 dur 小，告诉我值，我帮调阈值", icon="ℹ️")

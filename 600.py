@@ -22,7 +22,7 @@ atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 selected_cryptos = st.sidebar.multiselect("币种", CRYPTO_LIST, default=CRYPTO_LIST)
 
-st.sidebar.header("🚨 WxPusher 微信报警（仅1h）")
+st.sidebar.header("🚨 WxPusher 微信报警（30m & 1h）")
 app_token = st.sidebar.text_input("WxPusher appToken", type="password", value="AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH")
 user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM")
 alert_min = st.sidebar.number_input("新信号阈值（分钟）", 1, 60, 10)
@@ -79,7 +79,7 @@ def calculate_indicators(df):
     
     return df
 
-# 获取信号
+# 获取信号（已修复时区问题）
 def get_sig(df, tf):
     if df.empty:
         return "N/A", None, None, "N/A", "N/A", "N/A", "N/A"
@@ -104,23 +104,42 @@ def get_sig(df, tf):
     lb = buys.index[-1] if not buys.empty else None
     ls = sells.index[-1] if not sells.empty else None
     
-    now = datetime.now(pytz.utc)
-    def to_utc(ts):
-        if ts is None: return None
-        return ts if ts.tzinfo else pytz.utc.localize(ts)
+    now_u = datetime.now(pytz.utc)
     
-    lb_u, ls_u, now_u = to_utc(lb), to_utc(ls), to_utc(now)
-    dur_b = int((now_u - lb_u).total_seconds() / 60) if lb_u else 999
-    dur_s = int((now_u - ls_u).total_seconds() / 60) if ls_u else 999
+    def force_utc(ts):
+        if ts is None:
+            return None
+        if isinstance(ts, pd.Timestamp):
+            ts = ts.to_pydatetime()
+        if ts.tzinfo is None:
+            return pytz.utc.localize(ts)
+        return ts.astimezone(pytz.utc)
+    
+    lb_u = force_utc(lb)
+    ls_u = force_utc(ls)
+    
+    dur_b = 999
+    if lb_u:
+        delta_b = now_u - lb_u
+        if delta_b.total_seconds() >= 0:
+            dur_b = int(delta_b.total_seconds() / 60)
+    
+    dur_s = 999
+    if ls_u:
+        delta_s = now_u - ls_u
+        if delta_s.total_seconds() >= 0:
+            dur_s = int(delta_s.total_seconds() / 60)
     
     sig = "维持"
     alert_d = None
     if lb_u and (not ls_u or lb_u > ls_u):
         sig = f"🚀 BUY({dur_b}m)" if dur_b <= 30 else "多 🟢"
-        if dur_b <= alert_min: alert_d = dur_b
+        if dur_b <= alert_min:
+            alert_d = dur_b
     elif ls_u and (not lb_u or ls_u > lb_u):
         sig = f"📉 SELL({dur_s}m)" if dur_s <= 30 else "空 🔴"
-        if dur_s <= alert_min: alert_d = dur_s
+        if dur_s <= alert_min:
+            alert_d = dur_s
     
     return sig, curr_p, alert_d, rsi_val, f"{ema_cross} | MACD:{macd_cross}", trend
 
@@ -258,18 +277,19 @@ with st.spinner("加载中..."):
                 if p is not None and p > 0:
                     price = p
                 
-                # 报警 - BUY/SELL 都推
-                if tf == "1h" and dur is not None and app_token and user_uid:
+                # 报警 - 现在支持 30m 和 1h 周期
+                if tf in ["30m", "1h"] and dur is not None and app_token and user_uid:
+                    period_label = "30m" if tf == "30m" else "1H"
                     if "BUY" in sig:
-                        title = f"[{base} 1H] BUY 信号"
+                        title = f"[{base} {period_label}] BUY 信号"
                     elif "SELL" in sig:
-                        title = f"[{base} 1H] SELL 信号"
+                        title = f"[{base} {period_label}] SELL 信号"
                     else:
-                        title = f"[{base} 1H] 信号"
-                    body = f"{sig}\n价: {p:.4f}\nRSI: {rsi}\n{ema_macd}\n趋势: {trend}\n距今: {dur}min\n多空: {row['多空比(5m)']}"
+                        title = f"[{base} {period_label}] 信号"
+                    body = f"{sig}\n价: {p:.4f if p else 'N/A'}\nRSI: {rsi}\n{ema_macd}\n趋势: {trend}\n距今: {dur}min\n多空: {row['多空比(5m)']}"
                     send_wx_pusher(app_token, user_uid, title, body)
-            except:
-                row[tf] = "err"
+            except Exception as e:
+                row[tf] = f"err: {str(e)[:30]}"
         
         row["现价"] = f"{price:.4f}" if price is not None else "N/A"
         row["趋势"] = trend
@@ -279,4 +299,4 @@ with st.spinner("加载中..."):
     render_table(result_df)
 
 st.caption(f"更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-st.info("· BUY/SELL 均推送 · 5min刷新 · MACD已显示", icon="ℹ️")
+st.info("· 30m & 1h BUY/SELL 均推送 · 5min刷新 · MACD已显示", icon="ℹ️")

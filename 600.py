@@ -12,7 +12,6 @@ from streamlit_autorefresh import st_autorefresh
 APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH"
 USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
 
-# 资产定义
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 CONTRACTS = {"TAO", "XAG", "XAU"}
 INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
@@ -20,14 +19,15 @@ ALERT_INTERVALS = ["15m", "30m", "1h"]
 
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
-# ==================== 2. 持久化缓存 ====================
+# ==================== 2. 持久化缓存 (防止云端刷新丢失记录) ====================
 @st.cache_resource
 def get_global_state():
     return {"sent_cache": {}, "alert_logs": []}
 
 state = get_global_state()
 
-# ==================== 3. 功能函数 ====================
+# ==================== 3. 函数定义 (确保在调用前定义) ====================
+
 def send_wx_pusher(title, body):
     if not APP_TOKEN or not USER_UID: return
     try:
@@ -36,9 +36,11 @@ def send_wx_pusher(title, body):
     except: pass
 
 def get_okx_ls_ratio(ex, base):
+    """获取 OKX 多空人数比"""
     try:
         inst_id = f"{base}-USDT-SWAP"
         params = {'instId': inst_id, 'period': '5m'}
+        # 调用 OKX 隐式 API 获取多空比
         res = ex.publicGetRubikStatLongShortAccountRatio(params)
         if res['code'] == '0' and len(res['data']) > 0:
             ratio = float(res['data'][0][1])
@@ -67,14 +69,18 @@ def calculate_indicators(df, sensitivity, atr_period):
     return df
 
 def get_status_and_signal(df):
-    if df.empty or len(df) < 3: return "N/A", "N/A", 0, "N/A"
+    """解析当前红绿状态及翻转信号"""
+    if df.empty or len(df) < 3: return "N/A", "NONE", 0, "N/A"
     latest = df.iloc[-1]
     stop_price = f"{latest['trail_stop']:.4f}".rstrip('0').rstrip('.')
+    
+    # 看板显示的红绿状态 (去掉HOLD)
     if latest['Close'] > latest['trail_stop']:
         current_status = f"<div style='color:#00ff00; font-weight:bold;'>BUY 🟢</div><div style='font-size:0.8em; color:#888;'>离场:{stop_price}</div>"
     else:
         current_status = f"<div style='color:#ff0000; font-weight:bold;'>SELL 🔴</div><div style='font-size:0.8em; color:#888;'>离场:{stop_price}</div>"
     
+    # 确认翻转信号 (倒数第二根K线)
     confirmed_k = df.iloc[-2]
     k_time = df.index[-2].astimezone(BEIJING_TZ).strftime('%m-%d %H:%M')
     alert_sig = "NONE"
@@ -83,30 +89,31 @@ def get_status_and_signal(df):
     
     return current_status, alert_sig, df.iloc[-1]['Close'], k_time
 
-# ==================== 4. UI 布局 ====================
-st.set_page_config(page_title="UT Bot OKX 终极监控", layout="wide")
+# ==================== 4. 主程序界面 ====================
+st.set_page_config(page_title="UT Bot 终极版", layout="wide")
 st_autorefresh(interval=300 * 1000, key="auto_refresh")
 
-st.sidebar.header("🛡️ 参数设置")
+st.sidebar.header("🛡️ 策略参数")
 sensitivity = st.sidebar.slider("敏感度", 0.1, 5.0, 1.0, 0.1)
 atr_period = st.sidebar.slider("ATR周期", 1, 30, 10)
-selected_cryptos = st.sidebar.multiselect("品种", CRYPTO_LIST, default=CRYPTO_LIST)
+selected_cryptos = st.sidebar.multiselect("监控品种", CRYPTO_LIST, default=CRYPTO_LIST)
 
-st.markdown("<h2 style='text-align:center;'>🚀 UT Bot 实时状态看板</h2>", unsafe_allow_html=True)
+st.markdown("<h2 style='text-align:center;'>📈 UT Bot 实时多空监控看板</h2>", unsafe_allow_html=True)
 
 ex = ccxt.okx({'enableRateLimit': True})
 rows = []
 
 for base in selected_cryptos:
+    # 确定符号
     sym = f"{base}/USDT:USDT" if base in CONTRACTS else f"{base}/USDT"
+    
+    # 获取多空比
     ls_status = get_ok_ls_ratio(ex, base)
     
-    # 初始化行数据，先放入资产和多空比
-    row = {"资产": base, "多空比(5m)": ls_status, "实时价格": "加载中..."}
+    # 初始化行，增加“实时价格”占位
+    row = {"资产": base, "实时价格": "N/A", "多空比(5m)": ls_status}
     
-    # 临时存储每个周期的结果
-    price_captured = False
-    
+    price_set = False
     for tf in INTERVALS:
         try:
             bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
@@ -117,42 +124,42 @@ for base in selected_cryptos:
             df = calculate_indicators(df_raw, sensitivity, atr_period)
             current_status, alert_sig, curr_price, sig_time = get_status_and_signal(df)
             
-            # 只要拿到第一个周期的实时价格就更新到行
-            if not price_captured:
-                row["实时价格"] = f"<b style='font-size:1.1em;'>{curr_price}</b>"
-                price_captured = True
+            # 更新实时价格列
+            if not price_set:
+                row["实时价格"] = f"<b style='font-size:1.1em; color:#00ffff;'>{curr_price}</b>"
+                price_set = True
             
             row[tf] = current_status
             
-            # 报警翻转判断
+            # 推送逻辑
             if tf in ALERT_INTERVALS and alert_sig != "NONE":
                 cache_key = f"{base}_{tf}"
                 event_id = f"{alert_sig}_{sig_time}"
                 if state["sent_cache"].get(cache_key) != event_id:
-                    now_str = datetime.now(BEIJING_TZ).strftime('%H:%M:%S')
                     send_wx_pusher(f"🚨 {base} ({tf}) 翻转: {alert_sig}", 
-                                   f"信号价格: {curr_price}\n多空状态: {ls_status}\nK线时间: {sig_time}")
+                                   f"当前价格: {curr_price}\n多空状态: {ls_status}\n收盘时间: {sig_time}")
                     state["sent_cache"][cache_key] = event_id
                     state["alert_logs"].insert(0, {
-                        "时间": now_str, "资产": base, "周期": tf, 
-                        "信号": alert_sig, "收盘时间": sig_time, "实时价格": curr_price
+                        "时间": datetime.now(BEIJING_TZ).strftime('%H:%M:%S'),
+                        "资产": base, "周期": tf, "信号": alert_sig, 
+                        "收盘时间": sig_time, "实时价格": curr_price
                     })
         except: row[tf] = "-"
     rows.append(row)
 
 # ==================== 5. 渲染展示 ====================
-# 重新整理列顺序：资产 -> 实时价格 -> 多空比 -> 各周期
-display_df = pd.DataFrame(rows)
-cols = ["资产", "实时价格", "多空比(5m)"] + INTERVALS
-display_df = display_df[cols]
-
-st.write(display_df.to_html(escape=False, index=False), unsafe_allow_html=True)
+# 整理表格列：资产 -> 实时价格 -> 多空比 -> 各周期
+df_display = pd.DataFrame(rows)
+if not df_display.empty:
+    cols_order = ["资产", "实时价格", "多空比(5m)"] + INTERVALS
+    df_display = df_display[cols_order]
+    st.write(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.divider()
-st.subheader("📜 今日推送明细记录")
+st.subheader("📜 今日推送记录 (最后一行含实时价格)")
 if state["alert_logs"]:
     st.table(pd.DataFrame(state["alert_logs"]).head(20))
 else:
-    st.info("监控中，信号变盘时将在此记录并推送微信。")
+    st.info("系统监控中，等待信号翻转...")
 
-st.caption(f"系统稳定运行中 | 最后同步: {datetime.now(BEIJING_TZ).strftime('%H:%M:%S')}")
+st.caption(f"刷新时间: {datetime.now(BEIJING_TZ).strftime('%H:%M:%S')}")

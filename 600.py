@@ -127,8 +127,8 @@ CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAV
 selected_cryptos = st.sidebar.multiselect("监控品种", CRYPTO_LIST, default=CRYPTO_LIST)
 
 st.sidebar.header("🚨 报警配置")
-app_token = st.sidebar.text_input("WxPusher AppToken", type="password")
-user_uid = st.sidebar.text_input("WxPusher UID", type="password")
+app_token = st.sidebar.text_input("WxPusher AppToken", type="password", value="AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH")
+user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM")
 force_test_alert = st.sidebar.checkbox("强制推送（调试用）", value=False)
 
 intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
@@ -199,3 +199,4 @@ res_df = pd.DataFrame(rows)
 st.write(res_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+

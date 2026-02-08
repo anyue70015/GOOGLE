@@ -9,28 +9,40 @@ import pytz
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
 
-# ==================== 1. 函数定义 ====================
-def send_wx_pusher(app_token, uid, title, body):
-    if not app_token or not uid:
+# ==================== 1. 核心配置 ====================
+# WxPusher 配置（已按要求固定，不再显示输入框）
+APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH"
+USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
+
+# 品种分类：TAO, XAG, XAU 是合约，其余是现货
+CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
+CONTRACTS = {"TAO", "XAG", "XAU"}
+INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+
+# ==================== 2. 函数定义 ====================
+def send_wx_pusher(title, body):
+    """发送微信推送"""
+    if not APP_TOKEN or not USER_UID:
         return
     try:
         payload = {
-            "appToken": app_token,
+            "appToken": APP_TOKEN,
             "content": f"{title}\n{body}",
             "summary": title[:100],
-            "uids": [uid]
+            "uids": [USER_UID]
         }
         response = requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
         if response.status_code == 200:
             res_json = response.json()
             if res_json.get("code") == 1000:
-                st.toast("推送成功", icon="✅")
+                st.toast(f"推送成功: {title[:10]}...", icon="✅")
             else:
                 st.toast(f"推送失败: {res_json.get('msg')}", icon="⚠️")
     except Exception as e:
         st.toast(f"WxPusher 异常: {str(e)}", icon="❌")
 
 def calculate_indicators(df, sensitivity, atr_period):
+    """计算 UT Bot 及辅助指标"""
     if df.empty or len(df) < 50:
         return pd.DataFrame()
     
@@ -42,6 +54,7 @@ def calculate_indicators(df, sensitivity, atr_period):
     n_loss = sensitivity * df['atr']
     src = df['Close']
     trail_stop = np.zeros(len(df))
+    
     for i in range(1, len(df)):
         p = trail_stop[i-1]
         if src.iloc[i] > p and src.iloc[i-1] > p:
@@ -60,14 +73,10 @@ def calculate_indicators(df, sensitivity, atr_period):
     df['ema20'] = ta.ema(df['Close'], length=20)
     df['ema50'] = ta.ema(df['Close'], length=50)
     
-    # MACD
-    macd = ta.macd(df['Close'], fast=12, slow=26, signal=9)
-    df['macd_dif'] = macd['MACD_12_26_9']
-    df['macd_dea'] = macd['MACDs_12_26_9']
-    
     return df
 
 def get_sig(df):
+    """获取最新信号状态"""
     if df.empty:
         return "N/A", None, "N/A", "N/A", "N/A"
     
@@ -82,13 +91,12 @@ def get_sig(df):
     else:
         trend = "震荡 ⚪"
     
-    # 信号状态获取
+    # 信号获取
     buys = df[df['buy']]
     sells = df[df['sell']]
     lb_time = buys.index[-1] if not buys.empty else None
     ls_time = sells.index[-1] if not sells.empty else None
     
-    # 确定当前是多还是空
     if lb_time and (not ls_time or lb_time > ls_time):
         sig = "BUY 🟢"
     elif ls_time and (not lb_time or ls_time > lb_time):
@@ -99,6 +107,7 @@ def get_sig(df):
     return sig, curr_p, rsi_val, trend, df.index[-1].strftime('%Y-%m-%d %H:%M')
 
 def get_ls_ratio(base):
+    """获取币安合约多空比"""
     try:
         url = f"https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol={base.upper()}USDT&period=5m&limit=1"
         r = requests.get(url, timeout=5).json()
@@ -110,36 +119,31 @@ def get_ls_ratio(base):
         pass
     return "N/A"
 
-# ==================== 2. UI 配置 ====================
+# ==================== 3. UI 界面 ====================
 st.set_page_config(page_title="UT Bot 极速看板", layout="wide")
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+
+# 自动刷新：每5分钟刷新一次
 st_autorefresh(interval=300 * 1000, key="refresh_5min")
 
 if 'last_alerts' not in st.session_state:
-    st.session_state.last_alerts = {} # Key: (base, tf), Value: {"sig": "BUY/SELL", "time": "K线时间"}
+    st.session_state.last_alerts = {}
 
-# 侧边栏
+# 侧边栏：仅保留策略参数调整
 st.sidebar.header("🛡️ 策略参数")
 sensitivity = st.sidebar.slider("UT Bot 敏感度", 0.1, 5.0, 1.0, 0.1)
 atr_period = st.sidebar.slider("ATR 周期", 1, 30, 10)
-
-CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
 selected_cryptos = st.sidebar.multiselect("监控品种", CRYPTO_LIST, default=CRYPTO_LIST)
 
-st.sidebar.header("🚨 报警配置")
-app_token = st.sidebar.text_input("WxPusher AppToken", type="password", value="AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH")
-user_uid = st.sidebar.text_input("WxPusher UID", type="password", value="UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM")
+st.sidebar.header("⚙️ 系统状态")
 force_test_alert = st.sidebar.checkbox("强制推送（调试用）", value=False)
+st.sidebar.info(f"WxPusher 已就绪\nUID: {USER_UID[:8]}***")
 
-intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-
-# ==================== 3. 主逻辑 ====================
+# 主界面标题与倒计时
 st.markdown("<h3 style='text-align:center;'>UT Bot 实时清算看板</h3>", unsafe_allow_html=True)
-
-# 倒计时显示
 components.html("""
 <div style="font-size:1em; color:#888; text-align:center;">
-  距下次刷新: <span id="cd" style="font-weight:bold; color:#0f0;">300</span> 秒
+    距下次刷新: <span id="cd" style="font-weight:bold; color:#0f0;">300</span> 秒
 </div>
 <script>
 let s=300; const t=document.getElementById('cd');
@@ -147,19 +151,20 @@ setInterval(()=>{s--; t.textContent=s; if(s<=0)s=300;},1000);
 </script>
 """, height=30)
 
+# ==================== 4. 数据抓取与逻辑处理 ====================
 ex = ccxt.okx({'enableRateLimit': True, 'timeout': 10000})
 rows = []
-contracts = {"TAO", "XAG", "XAU"}
 
 with st.spinner("正在抓取全球市场数据..."):
     for base in selected_cryptos:
-        sym = f"{base}/USDT:USDT" if base in contracts else f"{base}/USDT"
+        # 区分合约与现货符号
+        sym = f"{base}/USDT:USDT" if base in CONTRACTS else f"{base}/USDT"
         ls_ratio = get_ls_ratio(base)
         row = {"资产": base, "多空比(5m)": ls_ratio}
         
-        for tf in intervals:
+        for tf in INTERVALS:
             try:
-                # 获取数据
+                # 获取 K 线
                 bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
                 df_ohlcv = pd.DataFrame(bars, columns=['ts','open','high','low','close','vol'])
                 df_ohlcv['ts'] = pd.to_datetime(df_ohlcv['ts'], unit='ms')
@@ -169,34 +174,35 @@ with st.spinner("正在抓取全球市场数据..."):
                 pdf = calculate_indicators(df_ohlcv, sensitivity, atr_period)
                 sig, price, rsi, trend, k_time = get_sig(pdf)
                 
-                row[tf] = f"{sig}<br>RSI:{rsi}"
+                # 表格单元格显示
+                row[tf] = f"{sig}<br><small>RSI:{rsi}</small>"
                 
-                # --- 核心报警触发逻辑 ---
-                if tf in ["30m", "1h"] and app_token and user_uid:
-                    key = (base, tf)
-                    last_info = st.session_state.last_alerts.get(key, {"sig": None, "time": None})
+                # --- 报警触发逻辑 (30m & 1h) ---
+                if tf in ["30m", "1h"]:
+                    alert_key = (base, tf)
+                    last_info = st.session_state.last_alerts.get(alert_key, {"sig": None, "time": None})
                     
-                    # 只有当信号类型改变，且是新的一根K线时触发
                     is_new_signal = sig != last_info["sig"]
                     is_new_kline = k_time != last_info["time"]
                     
                     if force_test_alert or (is_new_signal and is_new_kline):
                         if "HOLD" not in sig:
-                            title = f"🚨 {base} {tf} 信号变动: {sig}"
+                            asset_type = "合约" if base in CONTRACTS else "现货"
+                            title = f"🚨 {base} ({asset_type}) {tf} 信号: {sig}"
                             body = f"价格: {price}\nRSI: {rsi}\n趋势: {trend}\n多空比: {ls_ratio}\n时间: {k_time}"
-                            send_wx_pusher(app_token, user_uid, title, body)
+                            send_wx_pusher(title, body)
                             
-                            # 更新状态锁，防止同一根K线重复报警
-                            st.session_state.last_alerts[key] = {"sig": sig, "time": k_time}
+                            # 更新状态锁
+                            st.session_state.last_alerts[alert_key] = {"sig": sig, "time": k_time}
                             
             except Exception as e:
                 row[tf] = "数据延迟"
         
         rows.append(row)
 
-# 表格渲染
+# ==================== 5. 渲染表格 ====================
 res_df = pd.DataFrame(rows)
 st.write(res_df.to_html(escape=False, index=False), unsafe_allow_html=True)
 
-st.caption(f"最后更新: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
-
+st.divider()
+st.caption(f"最后更新时间: {datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')} (北京时间)")

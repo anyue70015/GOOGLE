@@ -202,7 +202,7 @@ if rows:
     st.write(disp_df[["资产", "实时价格"] + INTERVALS].to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.divider()
-st.subheader("📜 推送日志 - 近24小时（按币种 → 周期归类）")
+st.subheader("📜 推送日志 - 近24小时（按币种 → 周期独立归类 & 下载）")
 
 if state["alert_logs"]:
     log_df = pd.DataFrame(state["alert_logs"])
@@ -211,14 +211,15 @@ if state["alert_logs"]:
     available_cols = [col for col in required_cols if col in log_df.columns]
     log_df = log_df[available_cols].copy()
     
-    # 时间解析（兼容 HH:MM:SS 或完整日期）
+    # 时间解析（兼容两种格式）
     try:
         log_df['时间_dt'] = pd.to_datetime(log_df['时间'], format='%Y-%m-%d %H:%M:%S', errors='raise')
     except:
         today = datetime.now(BEIJING_TZ).date()
         log_df['时间_dt'] = pd.to_datetime(
             log_df['时间'].apply(lambda x: f"{today} {x}"),
-            format='%Y-%m-%d %H:%M:%S', errors='coerce'
+            format='%Y-%m-%d %H:%M:%S',
+            errors='coerce'
         )
     
     log_df['时间_dt'] = log_df['时间_dt'].dt.tz_localize(BEIJING_TZ, ambiguous='NaT', nonexistent='NaT')
@@ -231,18 +232,27 @@ if state["alert_logs"]:
         st.info("近24小时内暂无推送记录")
     else:
         recent_df = recent_df.sort_values("时间_dt", ascending=False).reset_index(drop=True)
-        st.caption(f"共 {len(recent_df)} 条 | 时间范围：{threshold.strftime('%m-%d %H:%M')} → {now_beijing.strftime('%m-%d %H:%M')}")
+        st.caption(f"共 {len(recent_df)} 条信号 | 时间范围：{threshold.strftime('%m-%d %H:%M')} → {now_beijing.strftime('%m-%d %H:%M')}")
         
+        # 外层：按币种
         assets = sorted(recent_df["资产"].unique())
         
         for asset in assets:
             asset_df = recent_df[recent_df["资产"] == asset]
-            with st.expander(f"📈 {asset} （{len(asset_df)} 条）", expanded=(len(assets) <= 5)):
-                periods = sorted(asset_df["周期"].unique(), reverse=True)  # 大周期优先
+            
+            with st.expander(f"📈 {asset} （{len(asset_df)} 条信号）", expanded=(len(assets) <= 5)):
+                # 内层：按周期（每个周期独立表格 + 下载按钮）
+                periods = sorted(asset_df["周期"].unique(), reverse=True)  # 1h > 30m > 15m
+                
                 for period in periods:
-                    period_df = asset_df[asset_df["周期"] == period]
+                    period_df = asset_df[asset_df["周期"] == period].copy()
+                    
+                    # 小标题 + 条数
                     st.markdown(f"**{period}** （{len(period_df)} 条）")
+                    
+                    # 显示表格
                     display_cols = [c for c in ["时间", "信号", "动作", "盈亏", "能量", "OBV", "共振", "信号价格", "信号时间", "最新价格"] if c in period_df.columns]
+                    
                     st.dataframe(
                         period_df[display_cols],
                         use_container_width=True,
@@ -254,21 +264,48 @@ if state["alert_logs"]:
                             "最新价格": st.column_config.NumberColumn("最新价格", format="%.4f")
                         }
                     )
-                    st.markdown("---")
+                    
+                    # 每个周期单独的下载按钮
+                    if not period_df.empty:
+                        csv_period = period_df.drop(columns=['时间_dt', '资产', '周期'], errors='ignore').to_csv(index=False).encode('utf-8-sig')
+                        file_name = f"{asset}_{period}_24h_{now_beijing.strftime('%Y%m%d_%H%M')}.csv"
+                        
+                        st.download_button(
+                            label=f"下载 {asset} {period} （CSV）",
+                            data=csv_period,
+                            file_name=file_name,
+                            mime="text/csv",
+                            key=f"dl_{asset}_{period}"  # 避免key冲突
+                        )
+                    
+                    st.markdown("---")  # 分隔线
         
-        st.markdown("### 下载近24小时日志")
-        csv_data = recent_df.drop(columns=['时间_dt'], errors='ignore').to_csv(index=False).encode('utf-8-sig')
-        st.download_button("下载 CSV", csv_data, f"utbot_24h_{now_beijing.strftime('%Y%m%d_%H%M')}.csv", "text/csv")
+        # 全局下载（可选，全部近24小时）
+        st.markdown("### 全部近24小时下载")
+        csv_all = recent_df.drop(columns=['时间_dt'], errors='ignore').to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="下载全部（CSV）",
+            data=csv_all,
+            file_name=f"utbot_all_24h_{now_beijing.strftime('%Y%m%d_%H%M')}.csv",
+            mime="text/csv",
+            key="dl_all_csv"
+        )
         
+        # Excel 全局下载（可选）
         try:
             from io import BytesIO
             output = BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                recent_df.drop(columns=['时间_dt'], errors='ignore').to_excel(writer, index=False, sheet_name="近24小时")
+                recent_df.drop(columns=['时间_dt'], errors='ignore').to_excel(writer, index=False, sheet_name="全部")
             output.seek(0)
-            st.download_button("下载 Excel", output, f"utbot_24h_{now_beijing.strftime('%Y%m%d_%H%M')}.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                label="下载全部（Excel）",
+                data=output,
+                file_name=f"utbot_all_24h_{now_beijing.strftime('%Y%m%d_%H%M')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_all_excel"
+            )
         except:
-            st.caption("Excel 下载需 openpyxl 支持，若不可用请用 CSV")
+            pass
 else:
     st.info("暂无推送日志")

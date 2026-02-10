@@ -3,28 +3,27 @@ import yfinance as yf
 import numpy as np
 import pandas as pd
 import time
-import random
 from datetime import datetime, timedelta
 
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="短线扫描器-深度汇总版", layout="wide")
 st.title("📈 股票短线扫描 (新增 PF7 > 3.5 批量打包)")
 
-# --- 动态结束日期：取今天（追求最新信号） ---
+# --- 动态结束日期：取明天（关键改动，让 yfinance 更容易返回今天数据） ---
 today = datetime.now().date()
-end_dt = today
-END_DATE_STR = end_dt.strftime("%Y-%m-%d")
+tomorrow = today + timedelta(days=1)
+END_DATE_STR = tomorrow.strftime("%Y-%m-%d")
 
 # 侧边栏选择回测周期
 timeframe = st.sidebar.selectbox("回测周期", ["6个月", "1年", "2年"], index=1)  # 默认1年
 
 # 根据选择设置天数
 if timeframe == "6个月":
-    start_dt = end_dt - timedelta(days=180)
+    start_dt = today - timedelta(days=180)
 elif timeframe == "1年":
-    start_dt = end_dt - timedelta(days=365)
+    start_dt = today - timedelta(days=365)
 else:  # 2年
-    start_dt = end_dt - timedelta(days=730)
+    start_dt = today - timedelta(days=730)
 
 START_DATE = start_dt.strftime("%Y-%m-%d")
 
@@ -65,64 +64,63 @@ def obv_np(close, volume):
     return np.cumsum(np.sign(np.diff(close, prepend=close[0])) * volume)
 
 def backtest_with_stats(close: np.ndarray, score: np.ndarray, steps: int = 7):
-    """
-    优化版回测函数：
-    - 样本过短返回 nan, nan, 0
-    - 使用 np.inf 处理无负收益情况
-    - 加 trade_count 返回，用于判断PF可信度
-    - 加 rets nan/inf 安全处理
-    """
     if len(close) <= steps + 1:
-        return np.nan, np.nan, 0  # 样本太短
-
+        return np.nan, np.nan, 0
     idx = np.where(score[:-steps] >= 3)[0]
     trade_count = len(idx)
     if trade_count == 0:
-        return 0.5, 0.0, 0  # 无信号
-
+        return 0.5, 0.0, 0
     rets = close[idx + steps] / close[idx] - 1
-    rets = np.nan_to_num(rets, nan=0.0, posinf=0.0, neginf=0.0)  # 安全处理
-
+    rets = np.nan_to_num(rets, nan=0.0, posinf=0.0, neginf=0.0)
     win_rate = np.mean(rets > 0) if len(rets) > 0 else 0.5
-
     pos_ret = np.sum(rets[rets > 0])
     neg_ret = np.abs(np.sum(rets[rets <= 0]))
-
     if neg_ret < 1e-8:
         pf = np.inf if pos_ret > 0 else 0.0
     else:
         pf = pos_ret / neg_ret
-
     return win_rate, pf, trade_count
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def compute_stock_comprehensive(symbol):
     try:
         df = yf.Ticker(symbol).history(start=START_DATE, end=END_DATE_STR, interval="1d")
+        
+        # 调试：看实际拿到的最后一天（可注释掉）
+        # if not df.empty:
+        #     st.write(f"{symbol} 实际最后日期: {df.index[-1].date()}")
+        
         if df.empty or len(df) < 50: return None
-        close, high, low, volume = df['Close'].values, df['High'].values, df['Low'].values, df['Volume'].values
-        dates = df.index.strftime("%Y-%m-%d").values
+        
+        close   = df['Close'].values
+        high    = df['High'].values
+        low     = df['Low'].values
+        volume  = df['Volume'].values
+        dates   = df.index.strftime("%Y-%m-%d").values
 
         macd_hist = (ema_np(close, 12) - ema_np(close, 26)) - ema_np((ema_np(close, 12) - ema_np(close, 26)), 9)
-        score_arr = (macd_hist > 0).astype(int) + \
-                    (volume > rolling_mean_np(volume, 20) * 1.1).astype(int) + \
-                    (rsi_np(close) >= 60).astype(int) + \
-                    (atr_np(high, low, close) > rolling_mean_np(atr_np(high, low, close), 20) * 1.1).astype(int) + \
-                    (obv_np(close, volume) > rolling_mean_np(obv_np(close, volume), 20) * 1.05).astype(int)
+        
+        score_arr = (
+            (macd_hist > 0).astype(int) +
+            (volume > rolling_mean_np(volume, 20) * 1.1).astype(int) +
+            (rsi_np(close) >= 60).astype(int) +
+            (atr_np(high, low, close) > rolling_mean_np(atr_np(high, low, close), 20) * 1.1).astype(int) +
+            (obv_np(close, volume) > rolling_mean_np(obv_np(close, volume), 20) * 1.05).astype(int)
+        )
 
-        # 当前最新一天信号（使用 [-1]）
+        # 当前最新一天的5个因子 bool 值（得分缘由）
         sig_macd = macd_hist[-1] > 0
-        sig_vol = volume[-1] > rolling_mean_np(volume, 20)[-1] * 1.1
-        sig_rsi = rsi_np(close)[-1] >= 60
-        sig_atr = atr_np(high, low, close)[-1] > rolling_mean_np(atr_np(high, low, close), 20)[-1] * 1.1
-        sig_obv = obv_np(close, volume)[-1] > rolling_mean_np(obv_np(close, volume), 20)[-1] * 1.05
+        sig_vol  = volume[-1] > rolling_mean_np(volume, 20)[-1] * 1.1
+        sig_rsi  = rsi_np(close)[-1] >= 60
+        sig_atr  = atr_np(high, low, close)[-1] > rolling_mean_np(atr_np(high, low, close), 20)[-1] * 1.1
+        sig_obv  = obv_np(close, volume)[-1] > rolling_mean_np(obv_np(close, volume), 20)[-1] * 1.05
 
         score = sum([sig_macd, sig_vol, sig_rsi, sig_atr, sig_obv])
 
-        # 整体回测：使用[:-1]，排除最后一天信号（无前视偏差）
+        # 整体回测（[:-1] 避免前视偏差）
         f_prob, f_pf, trade_count = backtest_with_stats(close[:-1], score_arr[:-1], 7)
 
-        # 逐日细节（保持原滚动方式，用于稳定性观察）
+        # 逐日细节（近40天滚动回测）
         detail_len = min(40, len(close))
         details = []
         for i in range(len(close) - detail_len, len(close)):
@@ -146,44 +144,77 @@ def compute_stock_comprehensive(symbol):
             "price": close[-1], 
             "chg": f"{last_chg:+.2f}%",
             "score": score, 
+            "signals": {  # 新增：得分缘由
+                "MACD": sig_macd,
+                "放量": sig_vol,
+                "RSI": sig_rsi,
+                "ATR": sig_atr,
+                "OBV": sig_obv
+            },
             "details": details[::-1],
-            "trade_count": trade_count  # 新增，可用于后续过滤
+            "trade_count": trade_count
         }
-    except: return None
+    except Exception as e:
+        # st.write(f"Error on {symbol}: {e}")  # 调试时打开
+        return None
 
 # ==================== UI 展示 ====================
-if 'results' not in st.session_state: st.session_state.results = []
+if 'results' not in st.session_state:
+    st.session_state.results = []
+
 with st.sidebar:
     file = st.file_uploader("上传代码 TXT", type=["txt"])
-    if st.button("清空结果"): st.session_state.results = []
+    if st.button("清空结果"):
+        st.session_state.results = []
 
 if file:
     tickers = list(dict.fromkeys([t.strip().upper() for t in file.read().decode().split() if t.strip()]))
     if st.button("开始分析"):
-        for s in tickers:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        for idx, s in enumerate(tickers):
+            status_text.text(f"正在分析 {s} ({idx+1}/{len(tickers)})")
             res = compute_stock_comprehensive(s)
-            if res and res not in st.session_state.results: 
+            if res and res not in st.session_state.results:
                 st.session_state.results.append(res)
+            progress_bar.progress((idx + 1) / len(tickers))
+        status_text.text("分析完成！")
 
 if st.session_state.results:
     df_main = pd.DataFrame(st.session_state.results).sort_values("pf7", ascending=False)
     
-    # 处理 pf7 显示（inf / nan）
+    # 处理 PF7 显示
     df_main['pf7_display'] = df_main['pf7'].apply(
         lambda x: "∞" if np.isinf(x) else (f"{x:.2f}" if np.isfinite(x) else "N/A")
     )
     
-    st.subheader("🏆 年度排行榜")
-    st.dataframe(df_main[["symbol", "pf7_display", "prob7", "score", "price", "chg"]], use_container_width=True)
+    # 新增：显示得分缘由
+    def get_trigger_str(signals):
+        triggered = [k for k, v in signals.items() if v]
+        return " + ".join(triggered) if triggered else "无"
+    
+    df_main['今日触发'] = df_main['signals'].apply(get_trigger_str)
+    
+    st.subheader("🏆 年度排行榜（今日得分缘由已显示）")
+    st.dataframe(
+        df_main[["symbol", "pf7_display", "prob7", "score", "今日触发", "price", "chg", "trade_count"]].rename(columns={
+            "pf7_display": "PF7",
+            "prob7": "胜率",
+            "score": "今日得分",
+            "trade_count": "交易样本数"
+        }),
+        use_container_width=True
+    )
 
-    # --- 汇总下载 1: 年度排行 ---
-    summary_txt = f"{'代码':<10} {'PF7':<10} {'胜率':<10} {'得分':<10} {'价格':<10} {'涨幅':<10}\r\n"
-    summary_txt += "-"*65 + "\r\n"
+    # --- 汇总下载 1: 年度排行（包含今日触发） ---
+    summary_txt = f"{'代码':<10} {'PF7':<10} {'胜率':<10} {'得分':<10} {'今日触发':<30} {'价格':<10} {'涨幅':<10}\r\n"
+    summary_txt += "-"*100 + "\r\n"
     for _, r in df_main.iterrows():
         pf_str = "∞" if np.isinf(r['pf7']) else (f"{r['pf7']:.2f}" if np.isfinite(r['pf7']) else "N/A")
-        summary_txt += f"{r['symbol']:<10} {pf_str:<10} {r['prob7']*100:<10.1f}% {r['score']:<10} {r['price']:<10.2f} {r['chg']:<10}\r\n"
-    
-    # --- 汇总下载 2: PF7 > 3.5 优质票 40日明细打包 ---
+        trigger_str = get_trigger_str(r['signals'])
+        summary_txt += f"{r['symbol']:<10} {pf_str:<10} {r['prob7']*100:<10.1f}% {r['score']:<10} {trigger_str:<30} {r['price']:<10.2f} {r['chg']:<10}\r\n"
+
+    # --- 优质票打包（也加今日触发） ---
     premium_txt = "=== PF7 > 3.5 优质股票近40日明细汇总报告 ===\r\n\r\n"
     premium_stocks = [r for r in st.session_state.results if np.isfinite(r['pf7']) and r['pf7'] > 3.5]
     premium_stocks = sorted(premium_stocks, key=lambda x: x['pf7'], reverse=True)
@@ -191,7 +222,8 @@ if st.session_state.results:
     if premium_stocks:
         for p_stock in premium_stocks:
             pf_str = "∞" if np.isinf(p_stock['pf7']) else f"{p_stock['pf7']:.2f}"
-            premium_txt += f"【股票代码: {p_stock['symbol']} | 年度PF7: {pf_str}】\r\n"
+            trigger_str = get_trigger_str(p_stock['signals'])
+            premium_txt += f"【{p_stock['symbol']} | 年度PF7: {pf_str} | 今日得分: {p_stock['score']} | 触发: {trigger_str}】\r\n"
             premium_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
             premium_txt += "-"*65 + "\r\n"
             for d in p_stock['details']:
@@ -208,13 +240,14 @@ if st.session_state.results:
 
     st.divider()
     
-    # --- 单个股票逐日明细展示 ---
-    selected = st.selectbox("选择股票查看 40 日明细 (同步排序)", options=df_main["symbol"].tolist())
+    # 单票明细
+    selected = st.selectbox("选择股票查看 40 日明细", options=df_main["symbol"].tolist())
     if selected:
         res_data = next(r for r in st.session_state.results if r['symbol'] == selected)
         df_detail = pd.DataFrame(res_data['details'])
         
         detail_txt = f"股票: {selected} 最近 40 日明细\r\n"
+        detail_txt += f"今日得分: {res_data['score']} | 触发: {get_trigger_str(res_data['signals'])}\r\n\r\n"
         detail_txt += f"{'日期':<12} {'价格':<10} {'涨跌':<10} {'得分':<8} {'胜率':<10} {'PF7':<10}\r\n"
         detail_txt += "-"*65 + "\r\n"
         for _, d in df_detail.iterrows():

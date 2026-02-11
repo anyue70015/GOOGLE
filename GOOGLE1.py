@@ -1,101 +1,79 @@
-import ccxt
+import streamlit as st
 import pandas as pd
+import ccxt
 import time
-from datetime import datetime, timedelta
-import pytz
 
-# 初始化交易所 (使用 OKX)
-ex = ccxt.okx({'enableRateLimit': True})
-BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+# 设置 Streamlit 页面配置
+st.set_page_config(page_title="Top 80 汰弱留强监控", layout="wide")
 
-def fetch_top_80_symbols():
-    """自动获取市值前 80 名 (以成交量作为活跃度代理)"""
-    markets = ex.fetch_tickers()
-    # 过滤出 USDT 交易对，并按成交量降序排列
-    sorted_markets = sorted(markets.items(), 
-                            key=lambda x: x[1].get('quoteVolume', 0), 
-                            reverse=True)
-    # 取前 100 名 (为了容纳一些非 USDT 对)
-    top_100 = sorted_markets[:100]
-    
-    # 精确过滤出前 80 个活跃的 USDT 对
-    active_usdt_list = []
-    for s in top_100:
-        if '/USDT' in s[0]:
-            active_usdt_list.append(s[0])
-            if len(active_usdt_list) == 80: break
-    return active_usdt_list
+st.title("🚀 Top 80 币种：200日均线 (200MA) 实时强度扫描")
+st.write("如果你要回本，必须把钱从【❄️ 趋势之下】换到【🔥 趋势之上】。")
 
-def check_momentum(sym):
-    """扫描特定币种的动量和均线状态"""
-    try:
-        # 获取日线数据以计算 200MA
-        daily_bars = ex.fetch_ohlcv(sym, timeframe='1d', limit=205)
-        df_daily = pd.DataFrame(daily_bars, columns=['ts','o','h','l','c','v'])
-        ma200 = df_daily['c'].rolling(window=200).mean().iloc[-1]
-        
-        # 获取 5 分钟线，监控 8:00 - 8:30 动量
-        bars = ex.fetch_ohlcv(sym, timeframe='5m', limit=288) # 足够抓取今天的数据
-        df = pd.DataFrame(bars, columns=['ts','o','h','l','c','v'])
-        df['time'] = pd.to_datetime(df['ts'], unit='ms').dt.tz_localize('UTC').dt.tz_convert(BEIJING_TZ)
-        
-        # 过滤出 8:00 - 8:30 的数据
-        morning_data = df[(df['time'].dt.hour == 8) & (df['time'].dt.minute < 30)]
-        if morning_data.empty or len(morning_data) < 2: return None
-        
-        p_start = morning_data.iloc[0]['o']
-        p_end = morning_data.iloc[-1]['c']
-        change = (p_end - p_start) / p_start * 100
-        
-        # 成交量爆发计算 (对比前4小时平均成交量)
-        ref_data = df[df['time'].dt.hour < 8].tail(48) # 前4小时数据
-        avg_v = ref_data['v'].mean() * 6 # 换算成30分钟量
-        v_morning = morning_data['v'].sum()
-        v_ratio = v_morning / avg_v if avg_v > 0 else 0
-        
-        # 当前均线状态
-        current_price = df['c'].iloc[-1]
-        above_ma200 = current_price > ma200
-        
-        return {
-            "symbol": sym,
-            "change": change,
-            "v_ratio": v_ratio,
-            "above_ma200": above_ma200,
-            "current_price": current_price
-        }
-    except Exception as e:
-        print(f"Error checking {sym}: {e}")
-        return None
+# 初始化交易所
+ex = ccxt.okx()
 
-def run_scanner():
-    print("🚀 正在获取 Top 80 市值币种...")
-    symbols = fetch_top_80_symbols()
-    print(f"✅ 已锁定 {len(symbols)} 个目标币种。")
+@st.cache_data(ttl=300) # 缓存5分钟，避免频繁请求被封IP
+def get_market_data():
+    # 1. 获取前80名成交量的币种
+    tickers = ex.fetch_tickers()
+    top_80 = sorted(tickers.items(), key=lambda x: x[1].get('quoteVolume', 0), reverse=True)[:80]
     
     results = []
-    for sym in symbols:
-        data = check_momentum(sym)
-        if data:
-            results.append(data)
-        time.sleep(0.1) # 频率限制
-        
-    # 按放量幅度和涨幅综合排序
-    df_results = pd.DataFrame(results)
-    if df_results.empty: return
-    
-    # 这里定义我们的“真命天子”筛选规则
-    df_results['score'] = df_results['change'] * df_results['v_ratio']
-    top_picks = df_results.sort_values(by='score', ascending=False)
-    
-    # 打印前 5 个最强信号
-    print("\n🏆 今日 8:30 动量狙击榜 (Top 5):")
-    print(top_picks[['symbol', 'change', 'v_ratio', 'above_ma200', 'current_price']].head(5).to_string(index=False))
-    
-    # 这里是触发微信推送的逻辑位置
-    # send_wx_alert(top_picks.iloc[0]) 
+    bar = st.progress(0)
+    for i, (sym_pair, data) in enumerate(top_80):
+        if '/USDT' not in sym_pair: continue
+        try:
+            # 2. 获取日线算 200MA
+            daily = ex.fetch_ohlcv(sym_pair, timeframe='1d', limit=205)
+            df_daily = pd.DataFrame(daily, columns=['ts','o','h','l','c','v'])
+            ma200 = df_daily['c'].rolling(window=200).mean().iloc[-1]
+            current_price = df_daily['c'].iloc[-1]
+            
+            # 3. 计算偏离度和涨跌幅
+            dist_ma200 = (current_price - ma200) / ma200 * 100
+            change_24h = data.get('percentage', 0)
+            
+            results.append({
+                "币种": sym_pair,
+                "当前价格": current_price,
+                "200MA": round(ma200, 4),
+                "偏离200MA (%)": round(dist_ma200, 2),
+                "24h涨跌 (%)": round(change_24h, 2),
+                "状态": "🔥 趋势之上" if current_price > ma200 else "❄️ 趋势之下"
+            })
+            bar.progress((i + 1) / len(top_80))
+        except:
+            continue
+    return pd.DataFrame(results)
 
-# 模拟运行
-if __name__ == "__main__":
-    # 在云端服务器，可以用 crontab 设置在每天 08:31 运行此脚本
-    run_scanner()
+# 运行扫描
+if st.button('🔄 立即刷新数据'):
+    st.cache_data.clear()
+
+try:
+    df = get_market_data()
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("💎 真命天子 (200MA 之上)")
+        st.info("这些是真正的强势趋势币，回本的希望在这里。")
+        strong_df = df[df['状态'] == "🔥 趋势之上"].sort_values(by="偏离200MA (%)", ascending=False)
+        st.dataframe(strong_df.style.applymap(lambda x: 'color: #00ff00' if isinstance(x, float) and x > 0 else '', subset=['24h涨跌 (%)']))
+
+    with col2:
+        st.subheader("💀 僵尸资产 (200MA 之下)")
+        st.warning("如果你的币在这里，且正在阴跌，说明它没有主力维护。")
+        weak_df = df[df['状态'] == "❄️ 趋势之下"].sort_values(by="24h涨跌 (%)", ascending=False)
+        st.dataframe(weak_df)
+
+    st.markdown("---")
+    st.write("### 💡 换仓策略说明")
+    st.markdown("""
+    1. **汰弱**：检查你手上的币是否在右侧【僵尸资产】列表中，且偏离 200MA 极远（比如 -30% 以下）。
+    2. **留强**：在 08:00 - 08:30，如果左侧【真命天子】列表中的某个币突然出现**巨量拉升**，那就是最佳换仓机会。
+    3. **纪律**：只在 200MA 之上的币种里寻找动量，不要试图去左侧接飞刀。
+    """)
+
+except Exception as e:
+    st.error(f"获取数据失败，请稍后再试或检查网络。错误详情: {e}")

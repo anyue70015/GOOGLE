@@ -15,17 +15,13 @@ USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
 LOG_FILE = "trade_resonance_master.csv"
 
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
-CONTRACTS = {"TAO", "XAG", "XAU"}
+CONTRACTS = {"TAO", "XAG", "XAU"} # 合约名单
 
-# 你要求的两组共振
 RESONANCE_GROUPS = {
     "Group1_短线(5-15-60)": ["5m", "15m", "1h"],
     "Group2_趋势(15-60-240)": ["15m", "1h", "4h"]
 }
-
-# 监控的大周期列表 (不管共振，出信号就发)
 MAJOR_LEVELS = ["1h", "4h", "1d"]
-
 INTERVALS = ["5m", "15m", "1h", "4h", "1d"]
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
@@ -66,7 +62,7 @@ def calculate_ut_bot(df, sensitivity, atr_period):
     return df
 
 # ==================== 3. 主程序 ====================
-st.set_page_config(page_title="UT Bot 两组共振+大周期全控版", layout="wide")
+st.set_page_config(page_title="UT Bot 两组共振+大周期版", layout="wide")
 
 if "alert_logs" not in st.session_state:
     st.session_state.alert_logs = load_logs()
@@ -77,7 +73,7 @@ ex = ccxt.okx({'enableRateLimit': True})
 sens = st.sidebar.slider("敏感度", 0.1, 5.0, 1.2)
 atrp = st.sidebar.slider("ATR周期", 1, 30, 10)
 
-# 数据抓取
+# 数据抓取逻辑保持不动
 all_data = {}
 for base in CRYPTO_LIST:
     sym = f"{base}-USDT-SWAP" if base in CONTRACTS else f"{base}/USDT"
@@ -99,72 +95,73 @@ for base in CRYPTO_LIST:
     price_now = p_15m.iloc[-1]['Close'] if not p_15m.empty else "N/A"
     row = {"资产": base, "实时价格": f"<b>{price_now}</b>"}
 
-    # --- 逻辑 A: 两组共振监控 (5/15/60m) ---
+    # 1. 两组共振 (5/15/60m)
     for g_name, g_tfs in RESONANCE_GROUPS.items():
-        states = []
-        is_data_ok = True
-        for tf in g_tfs:
-            df = all_data[base].get(tf, pd.DataFrame())
-            if not df.empty: states.append(df.iloc[-1]['pos'])
-            else: is_data_ok = False; break
-        
-        is_res = is_data_ok and len(set(states)) == 1
+        states = [all_data[base][tf].iloc[-1]['pos'] for tf in g_tfs if not all_data[base][tf].empty]
+        is_res = len(states) == 3 and len(set(states)) == 1
         res_dir = states[0] if is_res else "None"
         color = "#00ff00" if res_dir == "BUY" else "#ff0000" if res_dir == "SELL" else "#888"
         row[g_name] = f"<span style='color:{color};font-weight:bold;'>{res_dir}</span>"
         
-        # 共振才发信息
         if is_res:
-            has_new_sig = any([all_data[base][tf].iloc[-1]['sig_change'] for tf in g_tfs if not all_data[base][tf].empty])
-            if has_new_sig:
+            if any([all_data[base][tf].iloc[-1]['sig_change'] for tf in g_tfs if not all_data[base][tf].empty]):
                 cache_key = f"{base}_{g_name}_{now_str[:16]}"
                 if cache_key not in st.session_state.sent_cache:
                     log_entry = {"时间": now_str, "资产": base, "类型": g_name, "方向": res_dir, "价格": price_now}
                     st.session_state.alert_logs.insert(0, log_entry)
                     save_log_to_disk(log_entry)
-                    send_wx(f"🔗共振报警({g_name})", f"资产: {base}\n方向: {res_dir}\n价格: {price_now}")
+                    send_wx(f"🔗共振({g_name})", f"{base} {res_dir} @{price_now}")
                     st.session_state.sent_cache.add(cache_key)
 
-    # --- 逻辑 B: 大周期单周期监控 (1h以上不管共振都发) ---
+    # 2. 大周期单发 (1h以上不管共振)
     for tf in MAJOR_LEVELS:
         df = all_data[base].get(tf, pd.DataFrame())
-        if not df.empty:
-            curr = df.iloc[-1]
-            if curr['sig_change']:
-                cache_key = f"{base}_{tf}_{now_str[:16]}"
-                if cache_key not in st.session_state.sent_cache:
-                    log_entry = {"时间": now_str, "资产": base, "类型": f"大周期_{tf}", "方向": curr['pos'], "价格": price_now}
-                    st.session_state.alert_logs.insert(0, log_entry)
-                    save_log_to_disk(log_entry)
-                    send_wx(f"📢大周期报警({tf})", f"资产: {base}\n方向: {curr['pos']}\n价格: {price_now}")
-                    st.session_state.sent_cache.add(cache_key)
-    
+        if not df.empty and df.iloc[-1]['sig_change']:
+            cache_key = f"{base}_{tf}_{now_str[:16]}"
+            if cache_key not in st.session_state.sent_cache:
+                log_entry = {"时间": now_str, "资产": base, "类型": f"大周期_{tf}", "方向": df.iloc[-1]['pos'], "价格": price_now}
+                st.session_state.alert_logs.insert(0, log_entry)
+                save_log_to_disk(log_entry)
+                send_wx(f"📢大周期({tf})", f"{base} {df.iloc[-1]['pos']} @{price_now}")
+                st.session_state.sent_cache.add(cache_key)
     rows.append(row)
 
-# ==================== 4. 渲染界面 ====================
+# ==================== 4. 渲染界面 (保持看板，日志改分列) ====================
 st.markdown("<h3 style='text-align:center;'>🚀 UT Bot 多重过滤共振系统</h3>", unsafe_allow_html=True)
 st.write(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.divider()
-st.subheader("📜 分类日志 (永久保存)")
+st.subheader("📜 历史信号实时监控 (左:Group1 | 中:Group2 | 右:大周期)")
+
 if st.session_state.alert_logs:
     df_logs = pd.DataFrame(st.session_state.alert_logs)
-    t1, t2, t3 = st.tabs(["Group1 信号", "Group2 信号", "大周期 信号"])
     
-    with t1:
-        d = df_logs[df_logs["类型"].str.contains("Group1")]; st.dataframe(d, use_container_width=True, hide_index=True)
-    with t2:
-        d = df_logs[df_logs["类型"].str.contains("Group2")]; st.dataframe(d, use_container_width=True, hide_index=True)
-    with t3:
-        d = df_logs[df_logs["类型"].str.contains("大周期")]; st.dataframe(d, use_container_width=True, hide_index=True)
+    # 核心修改：使用 columns 将日志分为三列展示
+    col1, col2, col3 = st.columns(3)
     
-    # 按币种下载逻辑
-    st.write("### 📥 按资产下载历史记录")
-    asset_to_dl = st.selectbox("选择资产下载 CSV", CRYPTO_LIST)
-    dl_df = df_logs[df_logs["资产"] == asset_to_dl]
-    st.download_button(f"下载 {asset_to_dl} 历史数据", dl_df.to_csv(index=False).encode('utf-8-sig'), f"{asset_to_dl}_full_log.csv")
-else:
-    st.info("等待信号中...")
+    with col1:
+        st.markdown("#### 🟢 Group1 (5-15-60)")
+        g1_logs = df_logs[df_logs["类型"].str.contains("Group1")]
+        st.dataframe(g1_logs[["时间", "资产", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g1_logs.empty:
+            st.download_button("导出 G1", g1_logs.to_csv(index=False).encode('utf-8-sig'), "G1.csv")
 
+    with col2:
+        st.markdown("#### 🔵 Group2 (15-60-240)")
+        g2_logs = df_logs[df_logs["类型"].str.contains("Group2")]
+        st.dataframe(g2_logs[["时间", "资产", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g2_logs.empty:
+            st.download_button("导出 G2", g2_logs.to_csv(index=False).encode('utf-8-sig'), "G2.csv")
+
+    with col3:
+        st.markdown("#### 🟠 大周期单信号 (1h+)")
+        major_logs = df_logs[df_logs["类型"].str.contains("大周期")]
+        st.dataframe(major_logs[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not major_logs.empty:
+            st.download_button("导出 大周期", major_logs.to_csv(index=False).encode('utf-8-sig'), "Major.csv")
+else:
+    st.info("监控中，等待信号产生...")
+
+st.sidebar.caption(f"最后更新: {now_str}")
 time.sleep(300)
 st.rerun()

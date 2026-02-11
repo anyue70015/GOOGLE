@@ -4,18 +4,14 @@ import ccxt
 import time
 from datetime import datetime
 
-st.set_page_config(page_title="8:00 汰弱留强", layout="wide")
+st.set_page_config(page_title="8:00 汰弱留强-Gate版", layout="wide")
 
-# --- 1. 资产配置：根据你的要求区分合约与现货 ---
-# 如果 API 拿不到名单，我们就用这个保底名单
-SYMBOLS_TO_MONITOR = [
-    'TAO/USDT', 'XAG/USDT', 'XAU/USDT', # 你的合约重点
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'SUI/USDT', 
-    'ORDI/USDT', 'STX/USDT', 'WIF/USDT', 'PEPE/USDT', 'FET/USDT'
-]
+# 1. 资产定义
+CONTRACTS = ['TAO/USDT', 'XAG/USDT', 'XAU/USDT']
+STABLES = ['USDT', 'USDC', 'DAI', 'FDUSD', 'TUSD', 'EUR']
 
-# 初始化交易所 - 尝试用币安，因为它对云端 IP 最友好
-ex = ccxt.binance({'enableRateLimit': True})
+# 使用 Gate.io，因为它对美国云端 IP 限制较少
+ex = ccxt.gateio({'enableRateLimit': True})
 
 def get_ma200_info(sym):
     try:
@@ -28,40 +24,39 @@ def get_ma200_info(sym):
         status = "🔥 趋势之上" if price > ma200 else "❄️ 趋势之下"
         dist = (price - ma200) / ma200 * 100
         return dist, status
-    except:
-        return 0, "接口限制"
+    except Exception:
+        return 0, "接口限速"
 
-st.title("🛡️ 8:00 汰弱留强看板 (高可用版)")
-st.info("如果 OKX 连不上，系统将自动使用币安行情数据。")
+st.title("🛡️ 8:00 汰弱留强看板 (Gate.io 链路)")
+st.write(f"当前时间: {datetime.now().strftime('%H:%M:%S')}")
 
-# --- 核心逻辑 ---
+# 自动刷新
+from streamlit_autorefresh import st_autorefresh
+st_autorefresh(interval=45000, key="gate_refresh")
+
 placeholder = st.empty()
 results = []
 
-# 1. 尝试获取活跃名单
+# 2. 获取名单
 try:
-    tickers = ex.fetch_tickers()
-    # 过滤成交量前 60 的 USDT 交易对
-    top_tickers = sorted(
-        [t for t in tickers.items() if '/USDT' in t[0] and 'UP/' not in t[0] and 'DOWN/' not in t[0]], 
-        key=lambda x: x[1].get('quoteVolume', 0), 
-        reverse=True
-    )[:60]
-    target_symbols = [t[0] for t in top_tickers]
+    with st.spinner('正在从 Gate.io 同步行情...'):
+        tickers = ex.fetch_tickers()
+    # 筛选成交量大的 USDT 对
+    valid_tickers = [t for t in tickers.items() if '/USDT' in t[0] and not any(s in t[0] for s in STABLES)]
+    top_list = sorted(valid_tickers, key=lambda x: x[1].get('quoteVolume', 0), reverse=True)[:60]
+    target_symbols = [t[0] for t in top_list]
     
-    # 确保你的重点币种一定在名单里
-    for s in SYMBOLS_TO_MONITOR:
+    # 强制把你的重点币种塞进去
+    for s in CONTRACTS:
         if s not in target_symbols:
             target_symbols.insert(0, s)
-            
 except Exception as e:
-    st.warning(f"全量行情获取失败，启动【硬编码保底名单】模式。原因: {e}")
-    target_symbols = SYMBOLS_TO_MONITOR
+    st.error(f"Gate.io 名单获取失败: {e}")
+    target_symbols = CONTRACTS # 最终保底
 
-# 2. 遍历扫描
+# 3. 逐个循环
 for i, sym in enumerate(target_symbols):
     try:
-        # 获取实时 Ticker
         ticker = ex.fetch_ticker(sym)
         price = ticker.get('last', 0)
         change = ticker.get('percentage', 0)
@@ -72,15 +67,15 @@ for i, sym in enumerate(target_symbols):
         v_now = bars_5m[-1][5] if bars_5m else 0
         v_ratio = v_now / (vol_24h / 288) if vol_24h > 0 else 0
         
-        # 200MA 状态
+        # 趋势
         dist, status = get_ma200_info(sym)
         
-        # 资产类型标注
-        is_contract = "合约" if any(x in sym for x in ['TAO', 'XAG', 'XAU']) else "现货"
+        # 标注
+        asset_label = "合约" if any(x in sym for x in ['TAO', 'XAG', 'XAU']) else "现货"
         
         results.append({
             "币种": sym,
-            "类型": is_contract,
+            "类型": asset_label,
             "5min量比": round(v_ratio, 2),
             "24h涨跌%": round(change, 2),
             "200MA状态": status,
@@ -91,19 +86,18 @@ for i, sym in enumerate(target_symbols):
         # 渲染
         df_display = pd.DataFrame(results).sort_values(by="5min量比", ascending=False)
         with placeholder.container():
-            def style_status(val):
-                color = 'red' if val == "🔥 趋势之上" else 'white'
-                return f'color: {color}'
+            def highlight(val):
+                return 'color: #ff4b4b; font-weight: bold' if val == "🔥 趋势之上" else ''
             
             st.dataframe(
-                df_display.style.applymap(style_status, subset=['200MA状态']),
+                df_display.style.applymap(highlight, subset=['200MA状态']),
                 use_container_width=True,
                 height=600
             )
-            st.caption(f"已扫描: {len(results)} / {len(target_symbols)}")
-            
-        time.sleep(0.1) # 频率控制
+            st.caption(f"已加载: {len(results)} / {len(target_symbols)}")
+        
+        time.sleep(0.2) # Gate.io 频率限制较严，慢即是稳
     except:
         continue
 
-st.success("✅ 扫描完成。")
+st.success("✅ 扫描完成")

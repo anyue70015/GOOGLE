@@ -12,26 +12,22 @@ import time
 # ==================== 1. 核心配置 ====================
 APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH"
 USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
-LOG_FILE = "trade_resonance_master.csv"
+LOG_FILE = "trade_resonance_master.csv"  # 永久保存文件名
 
 # 品种列表
 CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
-CONTRACTS = {"TAO", "XAG", "XAU"} # 定义哪些是合约
+CONTRACTS = {"TAO", "XAG", "XAU"} 
 
-# --- 看板与核心过滤周期 ---
-# 看板显示周期
+# 界面显示的全部周期
 DISPLAY_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
-# 共振过滤组
+# 触发微信推送的共振组
 RESONANCE_GROUPS = {
     "Group1_短线(5-15-60)": ["5m", "15m", "1h"],
     "Group2_趋势(15-60-240)": ["15m", "1h", "4h"]
 }
-# 大周期单独推送
+# 大周期单独推送列表（1h及以上出信号就发）
 MAJOR_LEVELS = ["1h", "4h", "1d"]
-
-# 确保所有需要的周期都被抓取
-ALL_NEEDED_INTERVALS = sorted(list(set(DISPLAY_INTERVALS + [tf for g in RESONANCE_GROUPS.values() for tf in g])))
 
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
@@ -72,8 +68,9 @@ def calculate_ut_bot(df, sensitivity, atr_period):
     return df
 
 # ==================== 3. 主程序 ====================
-st.set_page_config(page_title="UT Bot 多重过滤系统", layout="wide")
+st.set_page_config(page_title="UT Bot 多重看板+分列日志版", layout="wide")
 
+# 初始化日志与缓存
 if "alert_logs" not in st.session_state:
     st.session_state.alert_logs = load_logs()
 if "sent_cache" not in st.session_state:
@@ -83,12 +80,12 @@ ex = ccxt.okx({'enableRateLimit': True})
 sens = st.sidebar.slider("敏感度", 0.1, 5.0, 1.2)
 atrp = st.sidebar.slider("ATR周期", 1, 30, 10)
 
-# 数据抓取
+# 抓取数据
 all_data = {}
 for base in CRYPTO_LIST:
     sym = f"{base}-USDT-SWAP" if base in CONTRACTS else f"{base}/USDT"
     all_data[base] = {}
-    for tf in ALL_NEEDED_INTERVALS:
+    for tf in DISPLAY_INTERVALS:
         try:
             bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
             df = pd.DataFrame(bars, columns=['ts','open','high','low','close','volume'])
@@ -96,44 +93,39 @@ for base in CRYPTO_LIST:
             all_data[base][tf] = calculate_ut_bot(df, sens, atrp)
         except: all_data[base][tf] = pd.DataFrame()
 
-# 核心处理
+# 核心：生成看板行 + 信号逻辑
 rows = []
 now_str = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 for base in CRYPTO_LIST:
-    # 用于看板和日志的价格
     p_15m = all_data[base].get("15m", pd.DataFrame())
     price_now = p_15m.iloc[-1]['Close'] if not p_15m.empty else "N/A"
     
-    # 构造看板行
+    # --- 1. 构造顶部的看板行 (格局不变) ---
     row = {"资产": base, "实时价格": f"<b>{price_now}</b>"}
     for tf in DISPLAY_INTERVALS:
         df = all_data[base].get(tf, pd.DataFrame())
         if df.empty: row[tf] = "-"; continue
         curr = df.iloc[-1]
         color = "#00ff00" if curr['pos'] == "BUY" else "#ff0000"
-        row[tf] = f"<div style='color:{color};font-weight:bold;'>{curr['pos']} ⬤</div><div style='font-size:0.7em;color:#888;'>止损:{curr['ts']:.2f}</div>"
+        row[tf] = f"<div style='color:{color};font-weight:bold;'>{curr['pos']}</div><div style='font-size:0.75em;color:#888;'>Stop:{curr['ts']:.2f}</div>"
 
-    # --- 信号处理与共振监控 ---
-    # 1. 两组共振检查
+    # --- 2. 信号触发逻辑 ---
+    # A. 检查两组共振 (共振才发)
     for g_name, g_tfs in RESONANCE_GROUPS.items():
         states = [all_data[base][tf].iloc[-1]['pos'] for tf in g_tfs if not all_data[base][tf].empty]
         is_res = len(states) == 3 and len(set(states)) == 1
-        res_dir = states[0] if is_res else "None"
-        
-        # 共振才发信息
         if is_res:
-            has_new_sig = any([all_data[base][tf].iloc[-1]['sig_change'] for tf in g_tfs if not all_data[base][tf].empty])
-            if has_new_sig:
+            if any([all_data[base][tf].iloc[-1]['sig_change'] for tf in g_tfs if not all_data[base][tf].empty]):
                 cache_key = f"{base}_{g_name}_{now_str[:16]}"
                 if cache_key not in st.session_state.sent_cache:
-                    log_entry = {"时间": now_str, "资产": base, "类型": g_name, "方向": res_dir, "价格": price_now}
+                    log_entry = {"时间": now_str, "资产": base, "类型": g_name, "方向": states[0], "价格": price_now}
                     st.session_state.alert_logs.insert(0, log_entry)
                     save_log_to_disk(log_entry)
-                    send_wx(f"🔗共振({g_name})", f"{base} {res_dir} @{price_now}")
+                    send_wx(f"🔗共振({g_name})", f"{base} {states[0]} @{price_now}")
                     st.session_state.sent_cache.add(cache_key)
 
-    # 2. 大周期单发监控 (1h以上不管共振都发)
+    # B. 检查大周期 (1h+出信号即发)
     for tf in MAJOR_LEVELS:
         df = all_data[base].get(tf, pd.DataFrame())
         if not df.empty and df.iloc[-1]['sig_change']:
@@ -142,48 +134,48 @@ for base in CRYPTO_LIST:
                 log_entry = {"时间": now_str, "资产": base, "类型": f"大周期_{tf}", "方向": df.iloc[-1]['pos'], "价格": price_now}
                 st.session_state.alert_logs.insert(0, log_entry)
                 save_log_to_disk(log_entry)
-                send_wx(f"📢大周期({tf})", f"{base} {df.iloc[-1]['pos']} @{price_now}")
+                send_wx(f"📢大周期报警({tf})", f"{base} {df.iloc[-1]['pos']} @{price_now}")
                 st.session_state.sent_cache.add(cache_key)
     
     rows.append(row)
 
 # ==================== 4. 渲染界面 ====================
-st.markdown("<h3 style='text-align:center;'>🚀 UT Bot 多重过滤系统</h3>", unsafe_allow_html=True)
+st.markdown("<h3 style='text-align:center;'>🚀 UT Bot 多重过滤共振监控</h3>", unsafe_allow_html=True)
 
-# 看板表
+# 渲染顶部看板 (格局保持)
 st.write(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.divider()
-st.subheader("📜 历史信号实时监控")
+st.subheader("📜 分列历史日志 (左:Group1 | 中:Group2 | 右:大周期单发)")
 
 if st.session_state.alert_logs:
     df_logs = pd.DataFrame(st.session_state.alert_logs)
     
-    # 日志分列展示
+    # --- 重点：三列日志展示 ---
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        st.markdown("#### 🟢 Group1 (5-15-60)")
+        st.markdown("##### 🟢 Group1 (5-15-60)")
         g1_logs = df_logs[df_logs["类型"].str.contains("Group1")]
         st.dataframe(g1_logs[["时间", "资产", "方向", "价格"]], use_container_width=True, hide_index=True)
         if not g1_logs.empty:
-            st.download_button("导出 G1", g1_logs.to_csv(index=False).encode('utf-8-sig'), "G1.csv", key="dl_g1")
+            st.download_button("下载 G1 CSV", g1_logs.to_csv(index=False).encode('utf-8-sig'), "G1.csv", key="dl_g1")
 
     with col2:
-        st.markdown("#### 🔵 Group2 (15-60-240)")
+        st.markdown("##### 🔵 Group2 (15-60-240)")
         g2_logs = df_logs[df_logs["类型"].str.contains("Group2")]
         st.dataframe(g2_logs[["时间", "资产", "方向", "价格"]], use_container_width=True, hide_index=True)
         if not g2_logs.empty:
-            st.download_button("导出 G2", g2_logs.to_csv(index=False).encode('utf-8-sig'), "G2.csv", key="dl_g2")
+            st.download_button("下载 G2 CSV", g2_logs.to_csv(index=False).encode('utf-8-sig'), "G2.csv", key="dl_g2")
 
     with col3:
-        st.markdown("#### 🟠 大周期单信号 (1h+)")
+        st.markdown("##### 🟠 大周期单周期 (1h+)")
         major_logs = df_logs[df_logs["类型"].str.contains("大周期")]
         st.dataframe(major_logs[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
         if not major_logs.empty:
-            st.download_button("导出 大周期", major_logs.to_csv(index=False).encode('utf-8-sig'), "Major.csv", key="dl_major")
+            st.download_button("下载大周期 CSV", major_logs.to_csv(index=False).encode('utf-8-sig'), "Major.csv", key="dl_major")
 else:
-    st.info("监控中，等待信号产生...")
+    st.info("监控运行中，暂无触发信号...")
 
 st.sidebar.caption(f"最后刷新: {now_str}")
 time.sleep(300)

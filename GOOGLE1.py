@@ -4,100 +4,89 @@ import ccxt
 import time
 from datetime import datetime
 
-# --- 配置 ---
-st.set_page_config(page_title="8:00 换仓狙击", layout="wide")
-STABLECOINS = ['USDT', 'USDC', 'DAI', 'FDUSD', 'TUSD', 'USDE', 'USDG', 'PYUSD', 'EUR', 'USDS']
+# --- 基础配置 ---
+st.set_page_config(page_title="8:00 全盘狙击看板", layout="wide")
+STABLECOINS = ['USDT', 'USDC', 'DAI', 'FDUSD', 'TUSD', 'USDE', 'USDG', 'PYUSD', 'EUR', 'USDS', 'USDM']
 
 # 初始化交易所
 ex = ccxt.okx({'enableRateLimit': True})
 
-def get_ma200_safe(sym):
-    """安全获取200MA，失败返回0"""
+def get_ma200_info(sym):
+    """获取200MA信息"""
     try:
         daily = ex.fetch_ohlcv(sym, timeframe='1d', limit=200)
-        if len(daily) < 150: return 0
+        if len(daily) < 150: return 0, "数据不足"
         df = pd.DataFrame(daily, columns=['ts','o','h','l','c','v'])
-        return df['c'].mean()
+        ma200 = df['c'].mean()
+        price = df['c'].iloc[-1]
+        status = "🔥 趋势之上" if price > ma200 else "❄️ 趋势之下"
+        dist = (price - ma200) / ma200 * 100
+        return dist, status
     except:
-        return 0
+        return 0, "获取失败"
 
-# --- 侧边栏设置 ---
-st.sidebar.header("⚙️ 扫描设置")
-scan_count = st.sidebar.slider("扫描币种数量", 10, 80, 40) # 建议先开40个，速度最快
-
-# --- 主界面 ---
-st.title("🎯 8:00 汰弱留强系统")
-st.write(f"最后更新: {datetime.now().strftime('%H:%M:%S')}")
+st.title("🎯 Top 80 币种实时全量监控")
+st.write(f"当前北京时间: {datetime.now().strftime('%H:%M:%S')} (每 30s 自动刷新)")
 
 # 自动刷新
 from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=30000, key="fresher") # 云端建议 30秒 刷一次
+st_autorefresh(interval=30000, key="full_monitor")
 
-# 1. 获取行情快照 (这一步极快)
+# 1. 获取基础快照
 try:
     tickers = ex.fetch_tickers()
     valid_list = [s for s in tickers.items() if '/USDT' in s[0] and not any(sc in s[0] for sc in STABLECOINS)]
-    top_coins = sorted(valid_list, key=lambda x: x[1].get('quoteVolume', 0), reverse=True)[:scan_count]
+    top_coins = sorted(valid_list, key=lambda x: x[1].get('quoteVolume', 0), reverse=True)[:80]
 except Exception as e:
-    st.error(f"无法连接交易所: {e}")
+    st.error(f"连接失败: {e}")
     st.stop()
 
-# 2. 核心数据抓取 (带实时反馈)
+# 2. 循环抓取并直接显示
 results = []
-status_placeholder = st.empty()
-table_placeholder = st.empty()
+placeholder = st.empty()
 
 for i, (sym, data) in enumerate(top_coins):
-    status_placeholder.text(f"⚡ 正在分析 ({i+1}/{scan_count}): {sym}")
     try:
         price = data.get('last', 0)
         change = data.get('percentage', 0)
         vol_24h = data.get('quoteVolume', 0)
         
-        # 抓 5min 线算量比
+        # 抓 5min 量能
         bars_5m = ex.fetch_ohlcv(sym, timeframe='5m', limit=2)
         v_now = bars_5m[-1][5] if bars_5m else 0
-        avg_v_5min = vol_24h / 288
-        v_ratio = v_now / avg_v_5min if avg_v_5min > 0 else 0
+        v_ratio = v_now / (vol_24h / 288) if vol_24h > 0 else 0
         
-        # 只要量比有苗头，立刻算 200MA
-        ma200 = 0
-        if v_ratio > 1.0 or i < 10:
-            ma200 = get_ma200_safe(sym)
-        
-        dist_ma = ((price - ma200) / ma200 * 100) if ma200 > 0 else 0
-        status = "🔥 趋势之上" if (ma200 > 0 and price > ma200) else "❄️ 趋势之下"
+        # 抓 200MA 状态
+        dist, status = get_ma200_info(sym)
         
         results.append({
             "币种": sym,
             "5min量比": round(v_ratio, 2),
             "24h涨跌%": round(change, 2),
-            "偏离200MA%": round(dist_ma, 2),
-            "价格": price,
-            "状态": status
+            "200MA状态": status,
+            "偏离200MA%": round(dist, 2),
+            "当前价": price
         })
         
-        # 每抓 5 个币，刷新一次表格，让你不用等
-        if len(results) % 5 == 0:
-            with table_placeholder.container():
-                temp_df = pd.DataFrame(results)
-                st.dataframe(temp_df.sort_values(by='5min量比', ascending=False), use_container_width=True)
+        # 实时更新表格，让用户不用等
+        if len(results) % 3 == 0 or len(results) == len(top_coins):
+            df_display = pd.DataFrame(results).sort_values(by="5min量比", ascending=False)
+            with placeholder.container():
+                # 使用 Pandas Styler 进行着色：趋势之上的标红
+                def color_status(val):
+                    color = 'red' if val == "🔥 趋势之上" else 'white'
+                    return f'color: {color}'
                 
-    except Exception as e:
+                st.dataframe(
+                    df_display.style.applymap(color_status, subset=['200MA状态']),
+                    use_container_width=True,
+                    height=800
+                )
+        
+        # 稍微给点延时，防止被封
+        time.sleep(0.05)
+        
+    except:
         continue
 
-status_placeholder.success("✅ 全盘扫描完成")
-
-# 3. 最终信号展示
-final_df = pd.DataFrame(results)
-if not final_df.empty:
-    st.divider()
-    st.subheader("🚨 换仓信号建议")
-    # 只要满足：趋势向上 + 量能翻倍
-    signals = final_df[(final_df['5min量比'] > 2.0) & (final_df['状态'] == "🔥 趋势之上")]
-    
-    if not signals.empty:
-        st.error("发现爆发标的！符合汰弱留强逻辑：")
-        st.table(signals.sort_values(by='5min量比', ascending=False))
-    else:
-        st.info("暂无 200MA 之上的爆发信号。")
+st.success(f"✅ 已完成 {len(results)} 个活跃币种扫描")

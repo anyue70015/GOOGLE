@@ -60,18 +60,48 @@ def calculate_indicators(df, sensitivity, atr_period):
     return df
 
 # 计算胜率统计（基于日志）
-def calculate_win_rate(log_df):
-    if log_df.empty: return {"win_rate": 0, "total_trades": 0, "wins": 0, "losses": 0}
+def calculate_win_rate(log_df, action_col='动作', profit_col='盈亏'):
+    if log_df.empty:
+        return {"win_rate": "0.0%", "total_trades": 0, "wins": 0, "losses": 0}
     
-    closed_trades = log_df[(log_df['动作'].str.contains('平')) & (log_df['盈亏'] != '-')]
-    closed_trades['profit'] = closed_trades['盈亏'].str.rstrip('%').astype(float)
+    # 只处理有动作和盈亏的行，避免KeyError
+    if action_col not in log_df.columns or profit_col not in log_df.columns:
+        return {"win_rate": "N/A (无交易记录)", "total_trades": 0, "wins": 0, "losses": 0}
+    
+    # 过滤包含“平”的动作 + 有盈亏数字的记录
+    closed_mask = (
+        log_df[action_col].astype(str).str.contains('平', na=False) &
+        (log_df[profit_col] != '-') &
+        (log_df[profit_col] != '') &
+        log_df[profit_col].notna()
+    )
+    
+    closed_trades = log_df[closed_mask].copy()
+    
+    if closed_trades.empty:
+        return {"win_rate": "0.0% (无平仓记录)", "total_trades": 0, "wins": 0, "losses": 0}
+    
+    # 安全转换盈亏为float（处理可能存在的格式问题）
+    def safe_float(x):
+        try:
+            return float(str(x).rstrip('%'))
+        except:
+            return np.nan
+    
+    closed_trades['profit'] = closed_trades[profit_col].apply(safe_float)
+    closed_trades = closed_trades.dropna(subset=['profit'])
     
     wins = len(closed_trades[closed_trades['profit'] > 0])
     losses = len(closed_trades[closed_trades['profit'] <= 0])
     total = wins + losses
-    win_rate = (wins / total * 100) if total > 0 else 0
+    win_rate = (wins / total * 100) if total > 0 else 0.0
     
-    return {"win_rate": f"{win_rate:.1f}%", "total_trades": total, "wins": wins, "losses": losses}
+    return {
+        "win_rate": f"{win_rate:.1f}%",
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses
+    }
 
 # ==================== 3. 主程序 ====================
 st.set_page_config(page_title="UT Bot Pro 最终修正版", layout="wide")
@@ -269,7 +299,7 @@ for base in selected_cryptos:
                     
                     for group_name in RESONANCE_GROUPS:
                         log_entry[f"{group_name}_共振"] = sync_tags.get(group_name, "N/A")
-                        log_entry[f"{group_name}_动作"] = action_descs.get(group_name, "")
+                        log_entry[f"{group_name}_动作"] = action_descs.get(group_name, "无动作")
                         log_entry[f"{group_name}_盈亏"] = profit_strs.get(group_name, "-")
                     
                     state["alert_logs"].insert(0, log_entry)
@@ -317,12 +347,14 @@ if state["alert_logs"]:
         st.caption(f"共 {len(recent_df)} 条信号 | 时间范围：{threshold.strftime('%Y-%m-%d %H:%M')} → {now_beijing.strftime('%Y-%m-%d %H:%M')}")
         
         # 胜率统计（全局 + 每个组）
-        global_stats = calculate_win_rate(recent_df)
+        global_stats = calculate_win_rate(recent_df, action_col='动作', profit_col='盈亏')
         st.markdown(f"**全局胜率统计**：胜率 {global_stats['win_rate']} | 总交易 {global_stats['total_trades']} | 胜 {global_stats['wins']} | 负 {global_stats['losses']}")
         
         for group in RESONANCE_GROUPS:
-            group_df = recent_df[recent_df[f"{group}_盈亏"] != '-']
-            group_stats = calculate_win_rate(group_df.rename(columns={f"{group}_盈亏": "盈亏", f"{group}_动作": "动作"}))
+            group_action_col = f"{group}_动作"
+            group_profit_col = f"{group}_盈亏"
+            group_df = recent_df.copy()  # 不要rename，传列名参数
+            group_stats = calculate_win_rate(group_df, action_col=group_action_col, profit_col=group_profit_col)
             st.markdown(f"**{group} 胜率统计**：胜率 {group_stats['win_rate']} | 总交易 {group_stats['total_trades']} | 胜 {group_stats['wins']} | 负 {group_stats['losses']}")
         
         # 外层：按币种

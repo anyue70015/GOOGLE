@@ -19,7 +19,6 @@ LOOKBACK_VOL = 20    # 过去20期5min均量
 MA_PERIOD = 200      # 200日均线判定
 TOP_N = 80           # 监控总数
 
-# 真实主流币种名单 (确保包含 TAO, XAG, XAU)
 REAL_TOP_COINS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT',
     'LINKUSDT', 'DOTUSDT', 'MATICUSDT', 'SHIBUSDT', 'TRXUSDT', 'UNIUSDT', 'NEARUSDT', 'FTMUSDT',
@@ -33,19 +32,17 @@ REAL_TOP_COINS = [
     'KAVAUSDT', 'ANKRUSDT', 'WAVESUSDT', 'ROSEUSDT', 'SNXUSDT', 'DYMUSDT', 'STRKUSDT', 'AXLUSDT'
 ]
 
-# DNS解析配置
 DNS_SERVERS = ["https://dns.pub/dns-query", "https://dns.alidns.com/dns-query"]
 BINANCE_DOMAIN = "api.binance.com"
 
 # ==================== 3. 核心功能函数 ====================
 
+# 初始化全局变量
 if 'signals_history' not in st.session_state:
     st.session_state.signals_history = []
-if 'api_base' not in st.session_state:
-    st.session_state.api_base = None
 
 def resolve_binance_ip():
-    """通过腾讯云/阿里云DoH解析获取币安真实IP"""
+    """通过DNS解析获取IP"""
     headers = {"Accept": "application/dns-json"}
     for dns_url in DNS_SERVERS:
         try:
@@ -58,31 +55,23 @@ def resolve_binance_ip():
         except: continue
     return BINANCE_DOMAIN
 
-def get_base_url():
-    if not st.session_state.api_base:
-        ip_or_domain = resolve_binance_ip()
-        st.session_state.api_base = f"https://{ip_or_domain}/api/v3"
-    return st.session_state.api_base
-
-def fetch_and_calc(symbol):
-    """单币种数据获取与核心指标计算"""
-    base_url = get_base_url()
+def fetch_and_calc(symbol, base_url):
+    """注意：base_url 现在是作为参数传入，不读取 session_state"""
     headers = {"Host": BINANCE_DOMAIN, "User-Agent": "Mozilla/5.0"}
     try:
-        # 同时请求5m线和1d线
+        # 5m线算量比
         r_5m = requests.get(f"{base_url}/klines", params={'symbol': symbol, 'interval': '5m', 'limit': 21}, headers=headers, timeout=5)
+        # 1d线算200MA
         r_1d = requests.get(f"{base_url}/klines", params={'symbol': symbol, 'interval': '1d', 'limit': 201}, headers=headers, timeout=5)
         
         if r_5m.status_code == 200 and r_1d.status_code == 200:
             k_5m = r_5m.json()
             k_1d = r_1d.json()
             
-            # 量比计算: 当前5min成交量 / 过去20根5min均值
             curr_v = float(k_5m[-1][5])
             avg_v = sum([float(x[5]) for x in k_5m[:-1]]) / (len(k_5m)-1)
             vol_ratio = curr_v / avg_v if avg_v > 0 else 0
             
-            # 200MA计算: 过去200日收盘价均值
             closes = [float(x[4]) for x in k_1d]
             ma200 = sum(closes) / len(closes)
             curr_p = closes[-1]
@@ -91,7 +80,6 @@ def fetch_and_calc(symbol):
             dist = (curr_p - ma200) / ma200 * 100
             pct = (curr_p - float(k_1d[-2][4])) / float(k_1d[-2][4]) * 100
             
-            # 合约标注 (TAO, XAG, XAU)
             is_contract = "合约" if any(x in symbol for x in ['TAO', 'XAG', 'XAU']) else "现货"
             
             return {
@@ -105,33 +93,35 @@ def fetch_and_calc(symbol):
             }
     except: return None
 
-# ==================== 4. Streamlit 界面渲染 ====================
+# ==================== 4. 主流程 ====================
 
-st.title("🌐 8:00 汰弱留强看板 (腾讯云DNS加速版)")
-st.info("监控逻辑：5分钟成交量比爆发 + 日线200MA趋势过滤。")
+st.title("🌐 8:00 汰弱留强看板")
 
-# 侧边栏配置
+# 1. 在主线程提前解析好 IP (避开多线程 session_state 限制)
+if 'static_base_url' not in st.session_state or st.sidebar.button("🔄 刷新域名解析"):
+    ip = resolve_binance_ip()
+    st.session_state.static_base_url = f"https://{ip}/api/v3"
+
+current_base_url = st.session_state.static_base_url
+
 with st.sidebar:
     st.header("⚙️ 监控配置")
     vol_th = st.slider("信号触发量比", 1.0, 5.0, 2.5, 0.1)
-    if st.button("🔄 刷新DNS解析"):
-        st.session_state.api_base = None
-        st.rerun()
-    if st.button("🧹 清除记录"):
+    if st.button("🧹 清除历史"):
         st.session_state.signals_history = []
 
-# 并发扫描执行
 placeholder = st.empty()
 scan_results = []
 
+# 并发扫描
 with st.spinner(f"正在扫描前 {TOP_N} 个币种..."):
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        futures = {executor.submit(fetch_and_calc, s): s for s in REAL_TOP_COINS[:TOP_N]}
+    # 将 current_base_url 作为参数传递给子线程
+    with ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(fetch_and_calc, s, current_base_url): s for s in REAL_TOP_COINS[:TOP_N]}
         for future in as_completed(futures):
             res = future.result()
             if res:
                 scan_results.append(res)
-                # 动态更新大表
                 df_show = pd.DataFrame(scan_results).sort_values(by="5min量比", ascending=False)
                 with placeholder.container():
                     st.dataframe(
@@ -142,25 +132,21 @@ with st.spinner(f"正在扫描前 {TOP_N} 个币种..."):
                         use_container_width=True, height=600, hide_index=True
                     )
 
-# 信号捕获与展示
+# 历史记录逻辑
 current_signals = [r for r in scan_results if r['5min量比'] >= vol_th and r['200MA状态'] == "🔥 趋势之上"]
-if current_signals:
-    for s in current_signals:
-        if s['币种'] not in [h['币种'] for h in st.session_state.signals_history[:5]]: # 简单去重
-            s_log = s.copy()
-            s_log['捕获时间'] = datetime.now().strftime('%H:%M:%S')
-            st.session_state.signals_history.insert(0, s_log)
+for s in current_signals:
+    if s['币种'] not in [h['币种'] for h in st.session_state.signals_history[:5]]:
+        s_log = s.copy()
+        s_log['捕获时间'] = datetime.now().strftime('%H:%M:%S')
+        st.session_state.signals_history.insert(0, s_log)
 
 st.divider()
-st.subheader("📜 历史异动爆发 (符合汰弱留强条件)")
+st.subheader("📜 历史爆发记录")
 if st.session_state.signals_history:
     st.dataframe(pd.DataFrame(st.session_state.signals_history).head(20), use_container_width=True, hide_index=True)
-else:
-    st.write("暂无符合【爆发且在趋势线上】的币种。")
 
-# 底部状态栏
-st.caption(f"🟢 运行中 | 节点: {st.session_state.api_base} | 刷新时间: {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"🟢 正常运行 | 节点: {current_base_url} | 刷新: {datetime.now().strftime('%H:%M:%S')}")
 
-# 自动刷新逻辑
-time.sleep(30)
+# 自动刷新
+time.sleep(45)
 st.rerun()

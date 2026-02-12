@@ -10,8 +10,8 @@ import pytz
 import time
 
 # ==================== 1. 核心配置 ====================
-APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH"
-USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM"
+APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH0"
+USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM0"
 LOG_FILE = "trade_resonance_master.csv"  # 永久保存文件名
 
 # 品种列表
@@ -180,3 +180,4 @@ else:
 st.sidebar.caption(f"最后刷新: {now_str}")
 time.sleep(300)
 st.rerun()
+

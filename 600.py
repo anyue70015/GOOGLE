@@ -252,24 +252,57 @@ if st.session_state.alert_logs:
     
     with col1:
         st.markdown("##### 🟢 Group1 (5-15-60)")
-        g1_logs = df_logs[df_logs["类型"].str.contains("Group1")]
-        st.dataframe(g1_logs[["时间", "资产", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
-        if not g1_logs.empty:
-            st.download_button("下载 G1 CSV", g1_logs.to_csv(index=False).encode('utf-8-sig'), "G1.csv", key="dl_g1")
+        g1_df = df_logs[df_logs["类型"].str.contains("Group1")]
+        
+        g1_open = g1_df[~g1_df["类型"].str.contains("平仓")]
+        g1_close = g1_df[g1_df["类型"].str.contains("平仓")]
+        
+        if not g1_open.empty:
+            st.markdown("**开仓记录**")
+            st.dataframe(g1_open[["时间", "资产", "方向", "价格"]], use_container_width=True, hide_index=True)
+        
+        if not g1_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(g1_close[["时间", "资产", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        
+        if not g1_df.empty:
+            st.download_button("下载 G1 全记录 CSV", g1_df.to_csv(index=False).encode('utf-8-sig'), "G1_full.csv", key="dl_g1")
 
     with col2:
         st.markdown("##### 🔵 Group2 (15-60-240)")
-        g2_logs = df_logs[df_logs["类型"].str.contains("Group2")]
-        st.dataframe(g2_logs[["时间", "资产", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
-        if not g2_logs.empty:
-            st.download_button("下载 G2 CSV", g2_logs.to_csv(index=False).encode('utf-8-sig'), "G2.csv", key="dl_g2")
+        g2_df = df_logs[df_logs["类型"].str.contains("Group2")]
+        
+        g2_open = g2_df[~g2_df["类型"].str.contains("平仓")]
+        g2_close = g2_df[g2_df["类型"].str.contains("平仓")]
+        
+        if not g2_open.empty:
+            st.markdown("**开仓记录**")
+            st.dataframe(g2_open[["时间", "资产", "方向", "价格"]], use_container_width=True, hide_index=True)
+        
+        if not g2_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(g2_close[["时间", "资产", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        
+        if not g2_df.empty:
+            st.download_button("下载 G2 全记录 CSV", g2_df.to_csv(index=False).encode('utf-8-sig'), "G2_full.csv", key="dl_g2")
 
     with col3:
         st.markdown("##### 🟠 大周期单周期 (1h+)")
-        major_logs = df_logs[df_logs["类型"].str.contains("大周期")]
-        st.dataframe(major_logs[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
-        if not major_logs.empty:
-            st.download_button("下载大周期 CSV", major_logs.to_csv(index=False).encode('utf-8-sig'), "Major.csv", key="dl_major")
+        major_df = df_logs[df_logs["类型"].str.contains("大周期")]
+        
+        major_open = major_df[~major_df["类型"].str.contains("平仓")]
+        major_close = major_df[major_df["类型"].str.contains("平仓")]
+        
+        if not major_open.empty:
+            st.markdown("**开仓记录**")
+            st.dataframe(major_open[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        
+        if not major_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(major_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        
+        if not major_df.empty:
+            st.download_button("下载大周期 全记录 CSV", major_df.to_csv(index=False).encode('utf-8-sig'), "Major_full.csv", key="dl_major")
 else:
     st.info("监控运行中，暂无触发信号...")
 

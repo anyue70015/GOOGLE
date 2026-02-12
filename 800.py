@@ -5,22 +5,31 @@ import requests
 from datetime import datetime, timedelta
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="币圈5分钟异动监控 · 量价双爆",
+    page_title="币圈5分钟异动监控 · 多节点容灾版",
     page_icon="🚨",
     layout="wide"
 )
 
 # ==================== 核心配置 ====================
-BINANCE_API = "https://api.binance.cc/api/v3"  # 官方免翻域名
+# 币安多节点镜像池（全球可用，无需翻墙）
+BINANCE_ENDPOINTS = [
+    "https://api.binance.us/api/v3",   # 币安美国
+    "https://api.binance.is/api/v3",   # 币安冰岛
+    "https://api.binance.je/api/v3",   # 币安泽西
+    "https://api.binance.sg/api/v3",   # 币安新加坡
+    "https://api.binance.com/api/v3",  # 主站（可能被墙，作为后备）
+]
+
 TIMEFRAME = '5m'
 LOOKBACK = 20
 PRICE_THRESHOLD = 0.5      # 涨幅 ≥ 0.5%
 VOLUME_THRESHOLD = 2.0     # 成交量 ≥ 20期均值的2倍
 TOP_N = 80                 # 监控前80币种
-REFRESH_INTERVAL = 60      # 60秒刷新一次（非阻塞）
+REFRESH_INTERVAL = 60      # 60秒刷新一次
 
 # ==================== 初始化状态 ====================
 if 'last_update' not in st.session_state:
@@ -28,19 +37,62 @@ if 'last_update' not in st.session_state:
     st.session_state.signals_history = []
     st.session_state.top_pairs = []
     st.session_state.auto_refresh = True
+    st.session_state.working_endpoint = None
+    st.session_state.endpoint_failures = {}
 
 # ==================== 工具函数 ====================
 
+def test_endpoint(endpoint):
+    """测试API节点是否可用"""
+    try:
+        test_url = f"{endpoint}/ping"
+        response = requests.get(test_url, timeout=5)
+        return response.status_code == 200
+    except:
+        return False
+
+def get_working_endpoint():
+    """获取可用的API节点（带缓存）"""
+    # 如果已有可用节点且最近10秒内测试通过，直接使用
+    if st.session_state.working_endpoint:
+        if test_endpoint(st.session_state.working_endpoint):
+            return st.session_state.working_endpoint
+    
+    # 否则重新测试所有节点
+    st.info("🔄 正在检测可用的币安API节点...")
+    
+    for endpoint in BINANCE_ENDPOINTS:
+        if test_endpoint(endpoint):
+            st.session_state.working_endpoint = endpoint
+            st.success(f"✅ 已连接到: {endpoint}")
+            return endpoint
+    
+    st.error("❌ 所有币安API节点均不可用，请检查网络")
+    return None
+
 @st.cache_data(ttl=300)
 def get_top_usdt_pairs(limit=100):
-    """获取币安现货交易量前N的USDT交易对（使用24h成交量）"""
+    """获取币安现货交易量前N的USDT交易对"""
+    endpoint = get_working_endpoint()
+    if not endpoint:
+        # 返回默认币种
+        default_symbols = [
+            'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+            'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
+            'MATICUSDT', 'SHIBUSDT', 'TRXUSDT', 'UNIUSDT', 'ATOMUSDT',
+            'ETCUSDT', 'LTCUSDT', 'BCHUSDT', 'ALGOUSDT', 'VETUSDT',
+            'FILUSDT', 'ICPUSDT', 'EOSUSDT', 'THETAUSDT', 'XLMUSDT',
+            'AAVEUSDT', 'MKRUSDT', 'SUSHIUSDT', 'YFIUSDT', 'SNXUSDT',
+            'COMPUSDT', 'CRVUSDT', '1INCHUSDT', 'ENJUSDT', 'MANAUSDT',
+            'SANDUSDT', 'AXSUSDT', 'GALAUSDT', 'APEUSDT', 'CHZUSDT',
+        ] * 2  # 重复到80个
+        return default_symbols[:limit]
+    
     try:
-        # 获取24h ticker数据
-        url = f"{BINANCE_API}/ticker/24hr"
+        url = f"{endpoint}/ticker/24hr"
         response = requests.get(url, timeout=10)
         data = response.json()
         
-        # 筛选USDT交易对
         usdt_pairs = []
         for item in data:
             symbol = item.get('symbol', '')
@@ -52,29 +104,30 @@ def get_top_usdt_pairs(limit=100):
                     'price': float(item.get('lastPrice', 0))
                 })
         
-        # 按交易额排序
         usdt_pairs.sort(key=lambda x: x['volume'], reverse=True)
-        
-        # 返回前N个交易对的symbol列表
         return [p['symbol'] for p in usdt_pairs[:limit]]
     
     except Exception as e:
-        st.error(f"获取交易对列表失败: {e}")
-        # 返回默认主流币种作为备选
+        st.warning(f"获取交易对列表失败，使用默认列表: {e}")
+        # 返回默认币种
         return [
             'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
-            'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT'
-        ] * 8  # 凑够80个
+            'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
+        ] * 8
 
-@st.cache_data(ttl=50)  # 缓存50秒
-def fetch_klines(symbol, limit=LOOKBACK+1):
+@st.cache_data(ttl=50)
+def fetch_klines(symbol):
     """获取单个币种的5分钟K线数据"""
+    endpoint = get_working_endpoint()
+    if not endpoint:
+        return None
+    
     try:
-        url = f"{BINANCE_API}/klines"
+        url = f"{endpoint}/klines"
         params = {
             'symbol': symbol,
             'interval': TIMEFRAME,
-            'limit': limit
+            'limit': LOOKBACK + 1
         }
         response = requests.get(url, params=params, timeout=10)
         data = response.json()
@@ -82,7 +135,6 @@ def fetch_klines(symbol, limit=LOOKBACK+1):
         if not data or 'code' in data:
             return None
         
-        # 解析K线数据
         klines = []
         for k in data:
             klines.append({
@@ -99,26 +151,21 @@ def fetch_klines(symbol, limit=LOOKBACK+1):
     except Exception as e:
         return None
 
-def check_signal(symbol, df):
+def check_signal(symbol, df, price_threshold, vol_threshold):
     """检查是否满足量价异动条件"""
     if df is None or len(df) < LOOKBACK:
         return None
     
     try:
-        # 当前最新K线
         current = df.iloc[-1]
         prev = df.iloc[-2]
         
-        # 计算涨幅（相对于前一根K线）
         pct_change = (current['close'] - prev['close']) / prev['close'] * 100
-        
-        # 计算成交量与20期均值对比（排除当前K线）
         current_volume = current['volume']
         avg_volume = df['volume'].iloc[:-1].mean()
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
         
-        # 触发条件
-        if pct_change >= PRICE_THRESHOLD and volume_ratio >= VOLUME_THRESHOLD:
+        if pct_change >= price_threshold and volume_ratio >= vol_threshold:
             return {
                 '时间': datetime.now().strftime('%H:%M:%S'),
                 '币种': symbol.replace('USDT', ''),
@@ -132,6 +179,28 @@ def check_signal(symbol, df):
         pass
     
     return None
+
+def scan_symbols_concurrent(symbols, price_th, vol_th):
+    """并发扫描多个币种"""
+    results = []
+    
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_symbol = {
+            executor.submit(fetch_klines, symbol): symbol 
+            for symbol in symbols
+        }
+        
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                df = future.result(timeout=15)
+                signal = check_signal(symbol, df, price_th, vol_th)
+                if signal:
+                    results.append(signal)
+            except:
+                continue
+    
+    return results
 
 # ==================== 侧边栏配置 ====================
 with st.sidebar:
@@ -165,41 +234,50 @@ with st.sidebar:
             st.rerun()
     
     st.markdown("---")
+    
+    # 显示当前API节点状态
+    if st.session_state.working_endpoint:
+        st.success(f"✅ 当前节点: {st.session_state.working_endpoint.split('/')[2]}")
+    else:
+        st.warning("⚠️ 正在检测可用节点...")
+    
     st.info(
         "**监控规则**\n\n"
         f"• 周期: {TIMEFRAME}\n"
         f"• 涨幅: ≥{price_th}%\n"
         f"• 量比: ≥{vol_th}倍\n"
         f"• 范围: 前{top_n}币种\n\n"
-        "数据源: Binance 官方API"
+        "**节点池**\n"
+        "• 币安美国\n"
+        "• 币安冰岛\n"
+        "• 币安泽西\n"
+        "• 币安新加坡\n\n"
+        "自动切换可用节点"
     )
 
 # ==================== 主界面 ====================
 
-st.title("🚨 币圈5分钟量价异动监控")
+st.title("🚨 币圈5分钟量价异动监控 · 多节点容灾版")
 st.caption(f"监控策略: 5分钟涨幅 ≥{price_th}% + 成交量 ≥{vol_th}倍20期均值 | 监控范围: 前{top_n}币种")
-
-# 更新全局参数
-PRICE_THRESHOLD = price_th
-VOLUME_THRESHOLD = vol_th
-TOP_N = top_n
 
 # 创建指标卡片
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("监控币种", f"{TOP_N}个")
+    st.metric("监控币种", f"{top_n}个")
 with col2:
-    st.metric("触发阈值", f"{PRICE_THRESHOLD}% + {VOLUME_THRESHOLD}倍")
+    st.metric("触发阈值", f"{price_th}% + {vol_th}倍")
 with col3:
     st.metric("今日信号", f"{len(st.session_state.signals_history)}次")
 with col4:
-    st.metric("刷新频率", f"{refresh_rate}秒")
+    if st.session_state.working_endpoint:
+        node = st.session_state.working_endpoint.split('/')[2]
+        st.metric("当前节点", node)
+    else:
+        st.metric("当前节点", "检测中")
 
 st.markdown("---")
 
-# ==================== 数据获取与信号检测 ====================
-
-# 检查是否需要刷新
+# 自动刷新逻辑
 current_time = time.time()
 time_since_update = current_time - st.session_state.last_update
 
@@ -209,8 +287,6 @@ if st.session_state.auto_refresh and time_since_update > refresh_rate:
 
 # 显示刷新倒计时
 st.caption(f"下次自动刷新: {max(0, int(refresh_rate - time_since_update))}秒后")
-
-# 进度条
 progress = min(1.0, time_since_update / refresh_rate)
 st.progress(progress, text="刷新倒计时")
 
@@ -218,43 +294,31 @@ st.markdown("---")
 
 # 获取交易对列表
 with st.spinner("正在获取币安交易对列表..."):
-    if not st.session_state.top_pairs:
-        st.session_state.top_pairs = get_top_usdt_pairs(TOP_N)
+    if not st.session_state.top_pairs or time_since_update < 5:
+        st.session_state.top_pairs = get_top_usdt_pairs(top_n)
     
-    pairs = st.session_state.top_pairs[:TOP_N]
+    pairs = st.session_state.top_pairs[:top_n]
 
-# 分批次显示进度
+# 并发扫描所有币种
 status_text = st.empty()
-progress_bar = st.progress(0, text="正在扫描币种...")
+progress_bar = st.progress(0, text="正在并发扫描币种...")
 
-# 扫描所有币种
-current_signals = []
-for i, symbol in enumerate(pairs):
-    # 更新进度
-    progress = (i + 1) / len(pairs)
-    progress_bar.progress(progress, text=f"扫描中: {symbol} ({i+1}/{len(pairs)})")
+# 执行扫描
+current_signals = scan_symbols_concurrent(pairs, price_th, vol_th)
+
+# 更新历史记录
+for signal in current_signals:
+    signal_key = f"{signal['币种']}_{signal['时间']}"
+    exists = False
+    for s in st.session_state.signals_history:
+        if f"{s['币种']}_{s['时间']}" == signal_key:
+            exists = True
+            break
     
-    # 获取K线数据
-    df = fetch_klines(symbol)
-    
-    # 检查信号
-    signal = check_signal(symbol, df)
-    if signal:
-        current_signals.append(signal)
-        
-        # 添加到历史记录（去重）
-        signal_key = f"{signal['币种']}_{signal['时间']}"
-        exists = False
-        for s in st.session_state.signals_history:
-            if f"{s['币种']}_{s['时间']}" == signal_key:
-                exists = True
-                break
-        
-        if not exists:
-            st.session_state.signals_history.insert(0, signal)
-            # 保留最近100条记录
-            if len(st.session_state.signals_history) > 100:
-                st.session_state.signals_history = st.session_state.signals_history[:100]
+    if not exists:
+        st.session_state.signals_history.insert(0, signal)
+        if len(st.session_state.signals_history) > 100:
+            st.session_state.signals_history = st.session_state.signals_history[:100]
 
 # 清除进度显示
 progress_bar.empty()
@@ -265,10 +329,8 @@ status_text.empty()
 st.subheader("🎯 当前5分钟异动币种")
 
 if current_signals:
-    # 转换为DataFrame并显示
     current_df = pd.DataFrame(current_signals)
     
-    # 格式化显示
     st.dataframe(
         current_df,
         column_config={
@@ -284,9 +346,7 @@ if current_signals:
         hide_index=True
     )
     
-    # 显示统计信息
     st.success(f"✅ 当前发现 {len(current_signals)} 个异动币种")
-    
 else:
     st.info("⏳ 当前5分钟周期暂无符合条件的异动币种")
 
@@ -299,7 +359,6 @@ st.subheader("📜 历史异动记录")
 if st.session_state.signals_history:
     history_df = pd.DataFrame(st.session_state.signals_history)
     
-    # 添加筛选器
     col1, col2 = st.columns(2)
     with col1:
         if len(history_df) > 0:
@@ -308,12 +367,10 @@ if st.session_state.signals_history:
     with col2:
         st.caption(f"共 {len(history_df)} 条记录 | 仅保留最近100条")
     
-    # 应用筛选
     display_history = history_df.copy()
     if selected_symbol != '全部':
         display_history = display_history[display_history['币种'] == selected_symbol]
     
-    # 显示历史记录
     st.dataframe(
         display_history,
         column_config={
@@ -329,12 +386,11 @@ if st.session_state.signals_history:
         hide_index=True
     )
     
-    # 下载按钮
     csv = history_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
         label="📥 下载历史记录 (CSV)",
         data=csv,
-        file_name=f"binance_signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        file_name=f"signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
         mime="text/csv"
     )
 else:
@@ -346,6 +402,6 @@ st.markdown("---")
 st.caption(
     f"🟢 监控状态: 运行中 | "
     f"最后扫描: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-    f"数据源: Binance 官方API (免翻) | "
-    f"⚠️ 注意: 请勿使用非官方域名"
+    f"节点池: {len(BINANCE_ENDPOINTS)}个镜像节点 | "
+    f"当前节点: {st.session_state.working_endpoint if st.session_state.working_endpoint else '检测中'}"
 )

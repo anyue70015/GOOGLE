@@ -37,7 +37,7 @@ if 'last_update' not in st.session_state:
     st.session_state.signals_history = []
     st.session_state.top_pairs = []
     st.session_state.auto_refresh = True
-    st.session_state.working_endpoint = None
+    st.session_state.working_endpoint = None  # ✅ 修复：初始化 working_endpoint
     st.session_state.endpoint_failures = {}
 
 # ==================== 工具函数 ====================

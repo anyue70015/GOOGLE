@@ -2,31 +2,26 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
-import json
-import dns.resolver
 from datetime import datetime
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== 页面配置 ====================
 st.set_page_config(
-    page_title="币安总站 · Cloudflare DNS解析版",
-    page_icon="🌐",
+    page_title="BMW代理 · 币安镜像版",
+    page_icon="🔄",
     layout="wide"
 )
 
 # ==================== 核心配置 ====================
+BMW_API = "https://www.bmwweb.academy/api/v3"
 TIMEFRAME = '5m'
 LOOKBACK = 20
 PRICE_THRESHOLD = 0.5
 VOLUME_THRESHOLD = 2.0
 TOP_N = 80
 
-# Cloudflare DNS-over-HTTPS
-CLOUDFLARE_DNS = "https://cloudflare-dns.com/dns-query"
-BINANCE_DOMAIN = "api.binance.com"
-
-# 真实主流币种（硬编码，保证有行情）
+# 真实主流币种（与版本A完全一致）
 REAL_TOP_COINS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
     'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
@@ -52,44 +47,9 @@ if 'last_update' not in st.session_state:
     st.session_state.last_update = time.time()
     st.session_state.signals_history = []
     st.session_state.auto_refresh = True
-    st.session_state.binance_ip = None
-    st.session_state.api_base = None
-
-# ==================== Cloudflare DNS解析 ====================
-
-def resolve_binance_via_cloudflare():
-    """通过Cloudflare DNS解析币安总站真实IP"""
-    try:
-        headers = {"Accept": "application/dns-json"}
-        params = {"name": BINANCE_DOMAIN, "type": "A"}
-        
-        response = requests.get(CLOUDFLARE_DNS, params=params, headers=headers, timeout=10)
-        data = response.json()
-        
-        if 'Answer' in data:
-            for answer in data['Answer']:
-                if answer['type'] == 1:  # A记录
-                    ip = answer['data']
-                    return ip
-        return None
-    except Exception as e:
-        st.sidebar.error(f"DNS解析失败: {e}")
-        return None
-
-def get_binance_endpoint():
-    """获取币安总站API地址（通过DNS解析）"""
-    if st.session_state.binance_ip and st.session_state.api_base:
-        return st.session_state.api_base
-    
-    ip = resolve_binance_via_cloudflare()
-    if ip:
-        st.session_state.binance_ip = ip
-        st.session_state.api_base = f"https://{ip}/api/v3"
-        return st.session_state.api_base
-    
-    # 降级方案：直接使用域名
-    st.session_state.api_base = "https://api.binance.com/api/v3"
-    return st.session_state.api_base
+    st.session_state.bmw_online = None
+    st.session_state.bmw_error = None
+    st.session_state.consecutive_failures = 0
 
 # ==================== 数据获取 ====================
 
@@ -98,24 +58,61 @@ def get_top_pairs():
     """直接返回硬编码的主流币种"""
     return REAL_TOP_COINS[:TOP_N]
 
+def test_bmw_endpoint():
+    """测试BMW代理是否可用"""
+    try:
+        url = f"{BMW_API}/ping"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            st.session_state.bmw_online = True
+            st.session_state.bmw_error = None
+            st.session_state.consecutive_failures = 0
+            return True
+        else:
+            st.session_state.bmw_online = False
+            st.session_state.bmw_error = f"HTTP {response.status_code}"
+            st.session_state.consecutive_failures += 1
+            return False
+    except requests.exceptions.Timeout:
+        st.session_state.bmw_online = False
+        st.session_state.bmw_error = "连接超时"
+        st.session_state.consecutive_failures += 1
+        return False
+    except requests.exceptions.ConnectionError:
+        st.session_state.bmw_online = False
+        st.session_state.bmw_error = "连接失败"
+        st.session_state.consecutive_failures += 1
+        return False
+    except Exception as e:
+        st.session_state.bmw_online = False
+        st.session_state.bmw_error = str(e)[:50]
+        st.session_state.consecutive_failures += 1
+        return False
+
 def fetch_klines(symbol):
-    """获取K线数据"""
-    endpoint = get_binance_endpoint()
+    """通过BMW代理获取K线数据"""
+    if not st.session_state.bmw_online:
+        return None
     
     try:
-        # 使用Host头欺骗CDN
-        headers = {"Host": "api.binance.com"}
-        url = f"{endpoint}/klines"
+        url = f"{BMW_API}/klines"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         params = {
             'symbol': symbol,
             'interval': TIMEFRAME,
             'limit': LOOKBACK + 1
         }
         
-        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            return None
+            
         data = response.json()
         
-        if not data or 'code' in data:
+        if not data or isinstance(data, dict) and 'code' in data:
             return None
         
         klines = []
@@ -164,49 +161,161 @@ def check_signal(symbol, df):
 
 # ==================== 主界面 ====================
 
-st.title("🌐 版本A：Cloudflare DNS + 币安总站")
-st.caption("通过Cloudflare DNS解析币安总站真实IP，绕过DNS污染")
+st.title("🔄 版本B：BMW代理镜像版")
+st.caption(f"数据源: {BMW_API}")
 
 # 侧边栏
 with st.sidebar:
-    st.title("⚙️ 版本A配置")
-    st.info(f"当前解析IP: {st.session_state.binance_ip or '解析中...'}")
-    st.info(f"API地址: {st.session_state.api_base or '初始化中...'}")
+    st.title("⚙️ 版本B配置")
     
-    if st.button("🔄 强制重新解析DNS"):
-        st.session_state.binance_ip = None
-        st.session_state.api_base = None
+    # 连接状态显示
+    st.subheader("📡 代理状态")
+    if st.session_state.bmw_online is True:
+        st.success("✅ 代理在线")
+    elif st.session_state.bmw_online is False:
+        st.error(f"❌ 代理离线: {st.session_state.bmw_error}")
+    else:
+        st.info("⏳ 未测试")
+    
+    if st.session_state.consecutive_failures > 0:
+        st.warning(f"连续失败: {st.session_state.consecutive_failures}次")
+    
+    # 测试连接按钮
+    if st.button("🔍 测试BMW代理连接", use_container_width=True):
+        with st.spinner("测试中..."):
+            if test_bmw_endpoint():
+                st.success("✅ BMW代理连接正常")
+            else:
+                st.error(f"❌ BMW代理无法连接: {st.session_state.bmw_error}")
+    
+    # 清除缓存
+    if st.button("🔄 清除缓存", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    
+    # 自动刷新开关
+    st.markdown("---")
+    auto_refresh = st.toggle("自动刷新", value=st.session_state.auto_refresh)
+    st.session_state.auto_refresh = auto_refresh
+    
+    refresh_rate = st.slider("刷新间隔(秒)", 30, 300, 60, 10)
+
+# 首次运行时自动测试连接
+if st.session_state.bmw_online is None:
+    test_bmw_endpoint()
+
+# 自动刷新逻辑
+current_time = time.time()
+time_since_update = current_time - st.session_state.last_update
+
+if st.session_state.auto_refresh and time_since_update > refresh_rate:
+    st.session_state.last_update = current_time
+    # 定时重新测试连接
+    if st.session_state.consecutive_failures > 3:
+        test_bmw_endpoint()
+    st.rerun()
+
+# 显示倒计时
+if st.session_state.auto_refresh:
+    st.caption(f"下次自动刷新: {max(0, int(refresh_rate - time_since_update))}秒后")
+    progress = min(1.0, time_since_update / refresh_rate)
+    st.progress(progress, text="刷新倒计时")
+
+st.markdown("---")
 
 # 获取币种列表
 pairs = get_top_pairs()
+st.caption(f"监控币种数量: {len(pairs)}个")
 
 # 并发扫描
-with st.spinner("正在通过币安总站扫描..."):
+if st.session_state.bmw_online:
+    with st.spinner("正在通过BMW代理扫描..."):
+        results = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_symbol = {executor.submit(fetch_klines, symbol): symbol for symbol in pairs}
+            
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                try:
+                    df = future.result(timeout=15)
+                    signal = check_signal(symbol, df)
+                    if signal:
+                        results.append(signal)
+                except:
+                    continue
+else:
     results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_symbol = {executor.submit(fetch_klines, symbol): symbol for symbol in pairs}
-        
-        for future in as_completed(future_to_symbol):
-            symbol = future_to_symbol[future]
-            try:
-                df = future.result(timeout=15)
-                signal = check_signal(symbol, df)
-                if signal:
-                    results.append(signal)
-            except:
-                continue
+    st.warning("⏳ BMW代理未连接，请先测试连接")
 
 # 显示结果
 st.subheader("🎯 当前5分钟异动币种")
 
 if results:
     df_result = pd.DataFrame(results)
-    st.dataframe(df_result, use_container_width=True, hide_index=True)
+    st.dataframe(
+        df_result,
+        column_config={
+            "时间": st.column_config.TextColumn("时间", width="small"),
+            "币种": st.column_config.TextColumn("币种", width="small"),
+            "价格": st.column_config.NumberColumn("价格", format="%.4f"),
+            "涨幅%": st.column_config.NumberColumn("涨幅%", format="%.2f%%"),
+            "量比": st.column_config.NumberColumn("量比", format="%.2f倍"),
+            "成交量": st.column_config.TextColumn("成交量", width="medium"),
+            "状态": st.column_config.TextColumn("状态", width="small")
+        },
+        use_container_width=True,
+        hide_index=True
+    )
     st.success(f"✅ 发现 {len(results)} 个异动币种")
+    
+    # 更新历史记录
+    for signal in results:
+        st.session_state.signals_history.insert(0, signal)
+        if len(st.session_state.signals_history) > 100:
+            st.session_state.signals_history = st.session_state.signals_history[:100]
 else:
-    st.info("⏳ 当前周期暂无符合条件的异动币种")
+    if st.session_state.bmw_online:
+        st.info("⏳ 当前5分钟周期暂无符合条件的异动币种")
+    else:
+        st.info("⏳ 等待代理连接...")
 
-# 显示状态
-st.caption(f"最后扫描: {datetime.now().strftime('%H:%M:%S')} | 解析IP: {st.session_state.binance_ip or '无'}")
+# 显示历史记录
+st.markdown("---")
+st.subheader("📜 历史异动记录")
+
+if st.session_state.signals_history:
+    history_df = pd.DataFrame(st.session_state.signals_history[:20])
+    st.dataframe(
+        history_df,
+        column_config={
+            "时间": st.column_config.TextColumn("时间", width="small"),
+            "币种": st.column_config.TextColumn("币种", width="small"),
+            "价格": st.column_config.NumberColumn("价格", format="%.4f"),
+            "涨幅%": st.column_config.NumberColumn("涨幅%", format="%.2f%%"),
+            "量比": st.column_config.NumberColumn("量比", format="%.2f倍"),
+            "成交量": st.column_config.TextColumn("成交量", width="medium"),
+            "状态": st.column_config.TextColumn("状态", width="small")
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    # 下载按钮
+    csv = pd.DataFrame(st.session_state.signals_history).to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        label="📥 下载历史记录 (CSV)",
+        data=csv,
+        file_name=f"bmw_signals_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+        mime="text/csv"
+    )
+else:
+    st.info("暂无历史记录")
+
+# 状态栏
+st.markdown("---")
+st.caption(
+    f"🟢 监控状态: 运行中 | "
+    f"最后扫描: {datetime.now().strftime('%H:%M:%S')} | "
+    f"代理状态: {'在线' if st.session_state.bmw_online else '离线'} | "
+    f"失败次数: {st.session_state.consecutive_failures}"
+)

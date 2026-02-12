@@ -1,97 +1,212 @@
 import streamlit as st
 import pandas as pd
-import ccxt
-import time
+import numpy as np
+import requests
+import json
+import dns.resolver
 from datetime import datetime
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-st.set_page_config(page_title="8:00 最终稳定版", layout="wide")
+# ==================== 页面配置 ====================
+st.set_page_config(
+    page_title="币安总站 · Cloudflare DNS解析版",
+    page_icon="🌐",
+    layout="wide"
+)
 
-# 1. 【硬名单】直接写死 Top 80 活跃币种，确保名单永远不会变成只有一个
-STABLE_LIST = [
-    'TAO/USDT', 'XAG/USDT', 'XAU/USDT', 'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'SUI/USDT',
-    'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'TRX/USDT', 'TON/USDT', 'LINK/USDT', 'AVAX/USDT', 'SHIB/USDT',
-    'DOT/USDT', 'BCH/USDT', 'NEAR/USDT', 'LTC/USDT', 'APT/USDT', 'PEPE/USDT', 'STX/USDT', 'ORDI/USDT',
-    'RENDER/USDT', 'WIF/USDT', 'FET/USDT', 'TIA/USDT', 'ARB/USDT', 'OP/USDT', 'INJ/USDT', 'FIL/USDT',
-    'LDO/USDT', 'JUP/USDT', 'PYTH/USDT', 'ENA/USDT', 'W/USDT', 'SATS/USDT', 'FLOKI/USDT', 'GALA/USDT',
-    'GRT/USDT', 'AAVE/USDT', 'MKR/USDT', 'UNI/USDT', 'CRV/USDT', 'ETC/USDT', 'DYDX/USDT', 'ENS/USDT',
-    'PENDLE/USDT', 'GAS/USDT', 'ARKM/USDT', 'NOT/USDT', 'SEI/USDT', 'RUNE/USDT', 'OM/USDT', 'BGB/USDT',
-    'FTM/USDT', 'IMX/USDT', 'KAS/USDT', 'WLD/USDT', 'BONK/USDT', 'JASMY/USDT', 'AR/USDT', 'THETA/USDT'
+# ==================== 核心配置 ====================
+TIMEFRAME = '5m'
+LOOKBACK = 20
+PRICE_THRESHOLD = 0.5
+VOLUME_THRESHOLD = 2.0
+TOP_N = 80
+
+# Cloudflare DNS-over-HTTPS
+CLOUDFLARE_DNS = "https://cloudflare-dns.com/dns-query"
+BINANCE_DOMAIN = "api.binance.com"
+
+# 真实主流币种（硬编码，保证有行情）
+REAL_TOP_COINS = [
+    'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
+    'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
+    'MATICUSDT', 'SHIBUSDT', 'TRXUSDT', 'UNIUSDT', 'ATOMUSDT',
+    'ETCUSDT', 'LTCUSDT', 'BCHUSDT', 'ALGOUSDT', 'VETUSDT',
+    'FILUSDT', 'ICPUSDT', 'EOSUSDT', 'THETAUSDT', 'XLMUSDT',
+    'AAVEUSDT', 'MKRUSDT', 'SUSHIUSDT', 'SNXUSDT', 'COMPUSDT',
+    'CRVUSDT', '1INCHUSDT', 'ENJUSDT', 'MANAUSDT', 'SANDUSDT',
+    'AXSUSDT', 'GALAUSDT', 'APEUSDT', 'CHZUSDT', 'NEARUSDT',
+    'FTMUSDT', 'EGLDUSDT', 'FLOWUSDT', 'KSMUSDT', 'ZECUSDT',
+    'DASHUSDT', 'WAVESUSDT', 'OMGUSDT', 'ZILUSDT', 'BATUSDT',
+    'ZRXUSDT', 'IOSTUSDT', 'IOTAUSDT', 'ONTUSDT', 'QTUMUSDT',
+    'KAVAUSDT', 'RUNEUSDT', 'ALPHAUSDT', 'TLMUSDT', 'C98USDT',
+    'KLAYUSDT', 'STXUSDT', 'ARUSDT', 'ENSUSDT', 'PEOPLEUSDT',
+    'LDOUSDT', 'OPUSDT', 'ARBUSDT', 'APTUSDT', 'SUIUSDT',
+    'SEIUSDT', 'TIAUSDT', 'BLURUSDT', 'JTOUSDT', 'PYTHUSDT',
+    'JUPUSDT', 'WIFUSDT', 'ONDOUSDT', 'STRKUSDT', 'PENDLEUSDT',
+    'ENAUSDT', 'ETHFIUSDT', 'NOTUSDT', 'ZROUSDT', 'POLUSDT'
 ]
 
-# 初始化交易所
-ex = ccxt.gateio({'enableRateLimit': True})
+# ==================== 初始化状态 ====================
+if 'last_update' not in st.session_state:
+    st.session_state.last_update = time.time()
+    st.session_state.signals_history = []
+    st.session_state.auto_refresh = True
+    st.session_state.binance_ip = None
+    st.session_state.api_base = None
 
-def get_stats(sym):
-    """精准计算：量比(对比1h均值) 和 200MA"""
+# ==================== Cloudflare DNS解析 ====================
+
+def resolve_binance_via_cloudflare():
+    """通过Cloudflare DNS解析币安总站真实IP"""
     try:
-        # 抓取 5min 线 (13根，其中前12根算均值，最后1根是当前)
-        bars = ex.fetch_ohlcv(sym, timeframe='5m', limit=13)
-        # 抓取日线
-        daily = ex.fetch_ohlcv(sym, timeframe='1d', limit=205)
+        headers = {"Accept": "application/dns-json"}
+        params = {"name": BINANCE_DOMAIN, "type": "A"}
         
-        if not bars or not daily: return 0, 0, "无数据"
+        response = requests.get(CLOUDFLARE_DNS, params=params, headers=headers, timeout=10)
+        data = response.json()
         
-        # 量比逻辑：当前 5min 成交量 / 过去 1 小时(12根5min线)的平均量
-        current_v = bars[-1][5]
-        past_avg_v = sum([b[5] for b in bars[:-1]]) / 12
-        v_ratio = current_v / past_avg_v if past_avg_v > 0 else 0
-        
-        # 200MA 逻辑
-        df_d = pd.DataFrame(daily, columns=['t','o','h','l','c','v'])
-        ma200 = df_d['c'].rolling(200).mean().iloc[-1]
-        last_p = df_d['c'].iloc[-1]
-        
-        status = "🔥 趋势之上" if last_p > ma200 else "❄️ 趋势之下"
-        dist = (last_p - ma200) / ma200 * 100
-        
-        return v_ratio, dist, status
-    except:
-        return 0, 0, "限速/错误"
+        if 'Answer' in data:
+            for answer in data['Answer']:
+                if answer['type'] == 1:  # A记录
+                    ip = answer['data']
+                    return ip
+        return None
+    except Exception as e:
+        st.sidebar.error(f"DNS解析失败: {e}")
+        return None
 
-st.title("🛡️ 8:00 汰弱留强：Top 80 精准监控")
-st.write(f"当前时间: {datetime.now().strftime('%H:%M:%S')} | 锁定币种: {len(STABLE_LIST)}")
+def get_binance_endpoint():
+    """获取币安总站API地址（通过DNS解析）"""
+    if st.session_state.binance_ip and st.session_state.api_base:
+        return st.session_state.api_base
+    
+    ip = resolve_binance_via_cloudflare()
+    if ip:
+        st.session_state.binance_ip = ip
+        st.session_state.api_base = f"https://{ip}/api/v3"
+        return st.session_state.api_base
+    
+    # 降级方案：直接使用域名
+    st.session_state.api_base = "https://api.binance.com/api/v3"
+    return st.session_state.api_base
 
-# 自动刷新 (45秒/次)
-from streamlit_autorefresh import st_autorefresh
-st_autorefresh(interval=45000, key="final_refresh")
+# ==================== 数据获取 ====================
 
-placeholder = st.empty()
-results = []
+@st.cache_data(ttl=3600)
+def get_top_pairs():
+    """直接返回硬编码的主流币种"""
+    return REAL_TOP_COINS[:TOP_N]
 
-# 开始逐个“啃”名单
-for i, sym in enumerate(STABLE_LIST):
+def fetch_klines(symbol):
+    """获取K线数据"""
+    endpoint = get_binance_endpoint()
+    
     try:
-        # 为了防封，必须给 0.2s 延时，跑完 80 个约 16s
-        time.sleep(0.2)
+        # 使用Host头欺骗CDN
+        headers = {"Host": "api.binance.com"}
+        url = f"{endpoint}/klines"
+        params = {
+            'symbol': symbol,
+            'interval': TIMEFRAME,
+            'limit': LOOKBACK + 1
+        }
         
-        v_ratio, dist_ma, status = get_stats(sym)
-        ticker = ex.fetch_ticker(sym)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        data = response.json()
         
-        results.append({
-            "币种": sym,
-            "5min量比": round(v_ratio, 2),
-            "200MA状态": status,
-            "偏离200MA%": round(dist_ma, 2),
-            "24h涨跌%": round(ticker.get('percentage', 0), 2),
-            "价格": ticker.get('last', 0),
-            "类型": "合约" if any(x in sym for x in ['TAO', 'XAG', 'XAU']) else "现货"
-        })
+        if not data or 'code' in data:
+            return None
         
-        # 实时排序并动态刷新
-        df_display = pd.DataFrame(results).sort_values(by="5min量比", ascending=False)
-        with placeholder.container():
-            def style_row(val):
-                color = 'background-color: #ff4b4b; color: white' if val == "🔥 趋势之上" else ''
-                return color
+        klines = []
+        for k in data:
+            klines.append({
+                'time': datetime.fromtimestamp(k[0] / 1000),
+                'open': float(k[1]),
+                'high': float(k[2]),
+                'low': float(k[3]),
+                'close': float(k[4]),
+                'volume': float(k[5])
+            })
+        
+        return pd.DataFrame(klines)
+    
+    except Exception as e:
+        return None
 
-            st.dataframe(
-                df_display.style.applymap(style_row, subset=['200MA状态']),
-                use_container_width=True,
-                height=800
-            )
-            st.caption(f"加载进度: {len(results)} / {len(STABLE_LIST)}")
-            
+def check_signal(symbol, df):
+    """检查异动信号"""
+    if df is None or len(df) < LOOKBACK:
+        return None
+    
+    try:
+        current = df.iloc[-1]
+        prev = df.iloc[-2]
+        
+        pct_change = (current['close'] - prev['close']) / prev['close'] * 100
+        current_volume = current['volume']
+        avg_volume = df['volume'].iloc[:-1].mean()
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
+        
+        if pct_change >= PRICE_THRESHOLD and volume_ratio >= VOLUME_THRESHOLD:
+            return {
+                '时间': datetime.now().strftime('%H:%M:%S'),
+                '币种': symbol.replace('USDT', ''),
+                '价格': current['close'],
+                '涨幅%': round(pct_change, 2),
+                '量比': round(volume_ratio, 2),
+                '成交量': f"{current_volume:.0f}",
+                '状态': '🚨 异动'
+            }
     except:
-        continue
+        pass
+    return None
 
-st.success("✅ 扫描任务完成")
+# ==================== 主界面 ====================
+
+st.title("🌐 版本A：Cloudflare DNS + 币安总站")
+st.caption("通过Cloudflare DNS解析币安总站真实IP，绕过DNS污染")
+
+# 侧边栏
+with st.sidebar:
+    st.title("⚙️ 版本A配置")
+    st.info(f"当前解析IP: {st.session_state.binance_ip or '解析中...'}")
+    st.info(f"API地址: {st.session_state.api_base or '初始化中...'}")
+    
+    if st.button("🔄 强制重新解析DNS"):
+        st.session_state.binance_ip = None
+        st.session_state.api_base = None
+        st.cache_data.clear()
+        st.rerun()
+
+# 获取币种列表
+pairs = get_top_pairs()
+
+# 并发扫描
+with st.spinner("正在通过币安总站扫描..."):
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_symbol = {executor.submit(fetch_klines, symbol): symbol for symbol in pairs}
+        
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                df = future.result(timeout=15)
+                signal = check_signal(symbol, df)
+                if signal:
+                    results.append(signal)
+            except:
+                continue
+
+# 显示结果
+st.subheader("🎯 当前5分钟异动币种")
+
+if results:
+    df_result = pd.DataFrame(results)
+    st.dataframe(df_result, use_container_width=True, hide_index=True)
+    st.success(f"✅ 发现 {len(results)} 个异动币种")
+else:
+    st.info("⏳ 当前周期暂无符合条件的异动币种")
+
+# 显示状态
+st.caption(f"最后扫描: {datetime.now().strftime('%H:%M:%S')} | 解析IP: {st.session_state.binance_ip or '无'}")

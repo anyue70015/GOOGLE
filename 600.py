@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import pytz
 import time
 
-# ==================== 核心配置（不变） ====================
+# ==================== 1. 核心配置 ====================
 APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH0"
 USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM0"
 LOG_FILE = "trade_resonance_master.csv"
@@ -27,10 +27,46 @@ MAJOR_LEVELS = ["1h", "4h", "1d"]
 
 BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
-# ==================== 功能函数（不变） ====================
-# load_logs, save_log_to_disk, send_wx, calculate_ut_bot 全部保持原样
+# ==================== 2. 功能函数 ====================
 
-# ==================== 主程序 ====================
+def load_logs():
+    if os.path.exists(LOG_FILE):
+        try:
+            return pd.read_csv(LOG_FILE, encoding='utf-8-sig').to_dict('records')
+        except:
+            return []
+    return []
+
+def save_log_to_disk(entry):
+    df = pd.DataFrame([entry])
+    header = not os.path.exists(LOG_FILE)
+    df.to_csv(LOG_FILE, mode='a', index=False, header=header, encoding='utf-8-sig')
+
+def send_wx(title, body):
+    try:
+        payload = {"appToken": APP_TOKEN, "content": f"{title}\n{body}", "uids": [USER_UID]}
+        requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
+    except:
+        pass
+
+def calculate_ut_bot(df, sensitivity, atr_period):
+    if df.empty or len(df) < 50: return pd.DataFrame()
+    df.columns = [str(c).capitalize() for c in df.columns]
+    df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
+    df = df.dropna(subset=['atr']).copy()
+    n_loss = sensitivity * df['atr']
+    src, trail_stop = df['Close'], np.zeros(len(df))
+    for i in range(1, len(df)):
+        p = trail_stop[i-1]
+        if src.iloc[i] > p and src.iloc[i-1] > p: trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
+        elif src.iloc[i] < p and src.iloc[i-1] < p: trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
+        else: trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
+    df['ts'] = trail_stop
+    df['pos'] = np.where(df['Close'] > df['ts'], "BUY", "SELL")
+    df['sig_change'] = (df['pos'] != df['pos'].shift(1)).fillna(False)
+    return df
+
+# ==================== 3. 主程序 ====================
 st.set_page_config(page_title="UT Bot 多重看板+分列日志版", layout="wide")
 
 if "alert_logs" not in st.session_state:
@@ -54,7 +90,7 @@ macd_signal = st.sidebar.slider("MACD信号线", 5, 15, 9)
 atr_mult_thresh = st.sidebar.slider("ATR波动阈值倍数 (> sma(ATR))", 0.5, 2.0, 1.0)
 obv_sma_period = st.sidebar.slider("OBV SMA周期", 5, 50, 20)
 
-# 抓取数据（不变）
+# 抓取数据（完全不变）
 all_data = {}
 for base in CRYPTO_LIST:
     sym = f"{base}-USDT-SWAP" if base in CONTRACTS else f"{base}/USDT"
@@ -115,7 +151,7 @@ for base in CRYPTO_LIST:
                     break
             
             if filter_pass:
-                # 1. 翻转瞬间强制记录
+                # 翻转强制记录
                 if any(all_data[base][tf].iloc[-1]['sig_change'] for tf in g_tfs if not all_data[base][tf].empty):
                     cache_key = f"{base}_{g_name}_FLIP_{now_str[:16]}"
                     if cache_key not in st.session_state.sent_cache:
@@ -126,17 +162,17 @@ for base in CRYPTO_LIST:
                         st.session_state.sent_cache.add(cache_key)
                         st.session_state.positions[base] = {'方向': direction, '入场价': price_now, '入场时间': now_str, '类型': g_name}
 
-                # 2. 状态同步记录（每次符合条件都记）
+                # 状态同步记录（与表格方向保持一致）
                 cache_key = f"{base}_{g_name}_STATE_{now_str[:16]}"
                 if cache_key not in st.session_state.sent_cache:
                     log_entry = {"时间": now_str, "资产": base, "类型": f"{g_name}_状态", "方向": direction, "价格": price_now}
                     st.session_state.alert_logs.insert(0, log_entry)
                     save_log_to_disk(log_entry)
-                    # 可选：注释掉下面推送，避免太频繁
+                    # 状态不推送，避免轰炸
                     # send_wx(f"共振状态({g_name})", f"{base} {direction} @{price_now}")
                     st.session_state.sent_cache.add(cache_key)
 
-    # 大周期部分（保持你上个版本的逻辑，已同步状态 + 翻转）
+    # ────────────── 大周期：翻转强制 + 状态同步 ──────────────
     for tf in MAJOR_LEVELS:
         df = all_data[base].get(tf, pd.DataFrame())
         if not df.empty:
@@ -150,7 +186,7 @@ for base in CRYPTO_LIST:
             
             filter_pass = rsi_ok and macd_ok and obv_ok and atr_ok
             
-            # 翻转强制
+            # 翻转强制记录
             if df.iloc[-1]['sig_change'] and filter_pass:
                 cache_key = f"{base}_{tf}_FLIP_{now_str[:16]}"
                 if cache_key not in st.session_state.sent_cache:
@@ -161,49 +197,63 @@ for base in CRYPTO_LIST:
                     st.session_state.sent_cache.add(cache_key)
                     st.session_state.positions[base] = {'方向': direction, '入场价': price_now, '入场时间': now_str, '类型': f"大周期_{tf}"}
 
-            # 状态同步
+            # 状态同步记录
             if filter_pass:
                 cache_key = f"{base}_{tf}_STATE_{now_str[:16]}"
                 if cache_key not in st.session_state.sent_cache:
                     log_entry = {"时间": now_str, "资产": base, "类型": f"大周期_{tf}_状态", "方向": direction, "价格": price_now}
                     st.session_state.alert_logs.insert(0, log_entry)
                     save_log_to_disk(log_entry)
-                    # send_wx(f"状态更新({tf})", f"{base} {direction} @{price_now}")  # 可注释
+                    # 状态不推送
+                    # send_wx(f"状态更新({tf})", f"{base} {direction} @{price_now}")
                     st.session_state.sent_cache.add(cache_key)
 
     rows.append(row)
 
-    # 止盈止损（盈亏百分比已包含）
-    if isinstance(price_now, (int, float)):
-        if base in st.session_state.positions:
-            pos = st.session_state.positions[base]
-            entry_price = pos['入场价']
-            direction = pos['方向']
-            if direction == "BUY":
-                tp_price = entry_price * (1 + tp_ratio)
-                sl_price = entry_price * (1 - sl_ratio)
-                if price_now >= tp_price or price_now <= sl_price:
-                    exit_type = "止盈" if price_now >= tp_price else "止损"
-                    pnl = (price_now - entry_price) / entry_price * 100
-                    log_entry = {"时间": now_str, "资产": base, "类型": f"{pos['类型']}_平仓_{exit_type}", "方向": direction, "价格": price_now, "盈亏(%)": f"{pnl:.2f}"}
-                    st.session_state.alert_logs.insert(0, log_entry)
-                    save_log_to_disk(log_entry)
-                    send_wx(f"🚨{exit_type}平仓({pos['类型']})", f"{base} {direction} 平仓 @{price_now} 盈亏: {pnl:.2f}%")
-                    del st.session_state.positions[base]
-            elif direction == "SELL":
-                tp_price = entry_price * (1 - tp_ratio)
-                sl_price = entry_price * (1 + sl_ratio)
-                if price_now <= tp_price or price_now >= sl_price:
-                    exit_type = "止盈" if price_now <= tp_price else "止损"
-                    pnl = (entry_price - price_now) / entry_price * 100
-                    log_entry = {"时间": now_str, "资产": base, "类型": f"{pos['类型']}_平仓_{exit_type}", "方向": direction, "价格": price_now, "盈亏(%)": f"{pnl:.2f}"}
-                    st.session_state.alert_logs.insert(0, log_entry)
-                    save_log_to_disk(log_entry)
-                    send_wx(f"🚨{exit_type}平仓({pos['类型']})", f"{base} {direction} 平仓 @{price_now} 盈亏: {pnl:.2f}%")
-                    del st.session_state.positions[base]
+    # 止盈止损 - 保留盈亏百分比
+    if isinstance(price_now, (int, float)) and base in st.session_state.positions:
+        pos = st.session_state.positions[base]
+        entry_price = pos['入场价']
+        direction = pos['方向']
+        exit_type = None
+        pnl = None
+        
+        if direction == "BUY":
+            tp_price = entry_price * (1 + tp_ratio)
+            sl_price = entry_price * (1 - sl_ratio)
+            if price_now >= tp_price:
+                exit_type = "止盈"
+                pnl = (price_now - entry_price) / entry_price * 100
+            elif price_now <= sl_price:
+                exit_type = "止损"
+                pnl = (price_now - entry_price) / entry_price * 100
+        else:
+            tp_price = entry_price * (1 - tp_ratio)
+            sl_price = entry_price * (1 + sl_ratio)
+            if price_now <= tp_price:
+                exit_type = "止盈"
+                pnl = (entry_price - price_now) / entry_price * 100
+            elif price_now >= sl_price:
+                exit_type = "止损"
+                pnl = (entry_price - price_now) / entry_price * 100
+        
+        if exit_type:
+            log_entry = {
+                "时间": now_str,
+                "资产": base,
+                "类型": f"{pos['类型']}_平仓_{exit_type}",
+                "方向": direction,
+                "价格": price_now,
+                "盈亏(%)": f"{pnl:.2f}" if pnl is not None else "N/A"
+            }
+            st.session_state.alert_logs.insert(0, log_entry)
+            save_log_to_disk(log_entry)
+            send_wx(f"🚨{exit_type}平仓({pos['类型']})", f"{base} {direction} 平仓 @{price_now} 盈亏: {pnl:.2f}%")
+            del st.session_state.positions[base]
 
-# 渲染界面（不变）
+# ==================== 4. 渲染界面 ====================
 st.markdown("<h3 style='text-align:center;'>🚀 UT Bot 多重过滤共振监控</h3>", unsafe_allow_html=True)
+
 st.write(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.divider()
@@ -217,13 +267,13 @@ if st.session_state.alert_logs:
     with col1:
         st.markdown("##### 🟢 Group1 (5-15-60)")
         g1_df = df_logs[df_logs["类型"].str.contains("Group1", na=False)]
-        g1_open = g1_df[~g1_df["类型"].str.contains("平仓|_状态", na=False)]
+        g1_flip_open = g1_df[g1_df["类型"].str.contains("翻转|开仓", na=False)]
         g1_state = g1_df[g1_df["类型"].str.contains("_状态", na=False)]
         g1_close = g1_df[g1_df["类型"].str.contains("平仓", na=False)]
         
-        if not g1_open.empty:
-            st.markdown("**开仓/翻转**")
-            st.dataframe(g1_open[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g1_flip_open.empty:
+            st.markdown("**翻转/开仓**")
+            st.dataframe(g1_flip_open[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
         if not g1_state.empty:
             st.markdown("**当前状态**")
             st.dataframe(g1_state[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
@@ -231,19 +281,48 @@ if st.session_state.alert_logs:
             st.markdown("**平仓记录**")
             st.dataframe(g1_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
         if not g1_df.empty:
-            st.download_button("下载 G1 全记录", g1_df.to_csv(index=False).encode('utf-8-sig'), "G1_full.csv")
+            st.download_button("下载 G1 全记录", g1_df.to_csv(index=False).encode('utf-8-sig'), "G1_full.csv", key="dl_g1")
 
     with col2:
         st.markdown("##### 🔵 Group2 (15-60-240)")
-        # 同上，类似分组显示
+        g2_df = df_logs[df_logs["类型"].str.contains("Group2", na=False)]
+        g2_flip_open = g2_df[g2_df["类型"].str.contains("翻转|开仓", na=False)]
+        g2_state = g2_df[g2_df["类型"].str.contains("_状态", na=False)]
+        g2_close = g2_df[g2_df["类型"].str.contains("平仓", na=False)]
+        
+        if not g2_flip_open.empty:
+            st.markdown("**翻转/开仓**")
+            st.dataframe(g2_flip_open[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g2_state.empty:
+            st.markdown("**当前状态**")
+            st.dataframe(g2_state[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g2_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(g2_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        if not g2_df.empty:
+            st.download_button("下载 G2 全记录", g2_df.to_csv(index=False).encode('utf-8-sig'), "G2_full.csv", key="dl_g2")
 
     with col3:
         st.markdown("##### 🟠 大周期单周期 (1h+)")
-        # 同上，类似分组显示
-
+        major_df = df_logs[df_logs["类型"].str.contains("大周期", na=False)]
+        major_flip_open = major_df[major_df["类型"].str.contains("翻转|开仓", na=False)]
+        major_state = major_df[major_df["类型"].str.contains("_状态", na=False)]
+        major_close = major_df[major_df["类型"].str.contains("平仓", na=False)]
+        
+        if not major_flip_open.empty:
+            st.markdown("**翻转/开仓**")
+            st.dataframe(major_flip_open[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not major_state.empty:
+            st.markdown("**当前状态**")
+            st.dataframe(major_state[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not major_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(major_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        if not major_df.empty:
+            st.download_button("下载大周期全记录", major_df.to_csv(index=False).encode('utf-8-sig'), "Major_full.csv", key="dl_major")
 else:
-    st.info("监控运行中，暂无触发信号...")
+    st.info("监控运行中，暂无记录...")
 
 st.sidebar.caption(f"最后刷新: {now_str}")
-time.sleep(120)  # 建议缩短到60秒，更容易抓翻转
+time.sleep(120)  # 已改为 120 秒
 st.rerun()

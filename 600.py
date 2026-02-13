@@ -5,144 +5,312 @@ import pandas_ta as ta
 import ccxt
 import requests
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import time
-from concurrent.futures import ThreadPoolExecutor
 
 # ==================== 1. 核心配置 ====================
 APP_TOKEN = "AT_3H9akFZPvOE98cPrDydWmKM4ndgT3bVH0"
 USER_UID = "UID_wfbEjBobfoHNLmprN3Pi5nwWb4oM0"
 LOG_FILE = "trade_resonance_master.csv"
 
-# 资产列表
-CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "AAVE", "TAO", "HYPE"]
-BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+CRYPTO_LIST = ["BTC", "ETH", "SOL", "SUI", "RENDER", "DOGE", "XRP", "HYPE", "AAVE", "TAO", "XAG", "XAU"]
+CONTRACTS = {"TAO", "XAG", "XAU"}
+
+DISPLAY_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 
 RESONANCE_GROUPS = {
     "Group1_短线(5-15-60)": ["5m", "15m", "1h"],
     "Group2_趋势(15-60-240)": ["15m", "1h", "4h"]
 }
+MAJOR_LEVELS = ["1h", "4h", "1d"]
 
-# ==================== 2. 防卡死功能函数 ====================
+BEIJING_TZ = pytz.timezone('Asia/Shanghai')
 
-def fetch_data_safe(base, tf, ex):
-    """带异常处理的数据抓取"""
+# ==================== 2. 功能函数 ====================
+
+def load_logs():
+    if os.path.exists(LOG_FILE):
+        try:
+            return pd.read_csv(LOG_FILE, encoding='utf-8-sig').to_dict('records')
+        except:
+            return []
+    return []
+
+def save_log_to_disk(entry):
+    df = pd.DataFrame([entry])
+    header = not os.path.exists(LOG_FILE)
+    df.to_csv(LOG_FILE, mode='a', index=False, header=header, encoding='utf-8-sig')
+
+def send_wx(title, body):
     try:
-        # 使用统一格式，减少解析错误
-        sym = f"{base}/USDT"
-        bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
-        if not bars: return tf, pd.DataFrame()
-        df = pd.DataFrame(bars, columns=['ts','open','high','low','close','volume'])
-        df['ts'] = pd.to_datetime(df['ts'], unit='ms').dt.tz_localize('UTC')
-        df.set_index('ts', inplace=True)
-        return tf, df
-    except Exception as e:
-        return tf, pd.DataFrame()
+        payload = {"appToken": APP_TOKEN, "content": f"{title}\n{body}", "uids": [USER_UID]}
+        requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
+    except:
+        pass
 
-def calculate_ut_bot_pro(df, sens, atrp=10):
-    """带乖离率计算的 UT Bot"""
+def calculate_ut_bot(df, sensitivity, atr_period):
     if df.empty or len(df) < 50: return pd.DataFrame()
-    
-    # 统一列名
     df.columns = [str(c).capitalize() for c in df.columns]
-    
-    # 计算 ATR 和 Trail Stop
-    df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atrp)
+    df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
     df = df.dropna(subset=['atr']).copy()
-    
-    n_loss = sens * df['atr']
-    src = df['Close']
-    trail_stop = np.zeros(len(df))
-    
+    n_loss = sensitivity * df['atr']
+    src, trail_stop = df['Close'], np.zeros(len(df))
     for i in range(1, len(df)):
         p = trail_stop[i-1]
-        if src.iloc[i] > p and src.iloc[i-1] > p: 
-            trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
-        elif src.iloc[i] < p and src.iloc[i-1] < p: 
-            trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
-        else: 
-            trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
-    
+        if src.iloc[i] > p and src.iloc[i-1] > p: trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
+        elif src.iloc[i] < p and src.iloc[i-1] < p: trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
+        else: trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
     df['ts'] = trail_stop
     df['pos'] = np.where(df['Close'] > df['ts'], "BUY", "SELL")
-    df['bias'] = (df['Close'] - df['ts']).abs() / df['ts'] * 100
-    df['rsi'] = ta.rsi(df['Close'], length=14)
-    
+    df['sig_change'] = (df['pos'] != df['pos'].shift(1)).fillna(False)
     return df
 
 # ==================== 3. 主程序 ====================
-st.set_page_config(page_title="UT Bot 实战看板", layout="wide")
+st.set_page_config(page_title="UT Bot 多重看板+分列日志版", layout="wide")
 
-# 初始化缓存，防止由于刷新导致的记录消失
-if "alert_logs" not in st.session_state: st.session_state.alert_logs = []
+if "alert_logs" not in st.session_state:
+    st.session_state.alert_logs = load_logs()
+if "sent_cache" not in st.session_state:
+    st.session_state.sent_cache = {f"{l['资产']}_{l['类型']}_{l['时间'][:16]}" for l in st.session_state.alert_logs if '类型' in l}
 
-st.sidebar.title("🛠️ 参数设置")
+ex = ccxt.okx({'enableRateLimit': True})
 sens = st.sidebar.slider("敏感度", 0.1, 5.0, 1.2)
-max_bias = st.sidebar.slider("最大允许乖离(%)", 0.5, 5.0, 1.8)
+atrp = st.sidebar.slider("ATR周期", 1, 30, 10)
 
-# 交易所初始化
-ex = ccxt.binance({'enableRateLimit': True})
+tp_ratio = st.sidebar.slider("止盈比率 (%)", 0.1, 10.0, 2.0) / 100
+sl_ratio = st.sidebar.slider("止损比率 (%)", 0.1, 10.0, 1.0) / 100
 
-now_str = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
-st.markdown(f"### 🚀 多重共振实时监控 ({now_str})")
+rsi_period = st.sidebar.slider("RSI周期", 5, 30, 14)
+rsi_buy_thresh = st.sidebar.slider("RSI BUY阈值 (>)", 30, 70, 50)
+rsi_sell_thresh = st.sidebar.slider("RSI SELL阈值 (<)", 30, 70, 50)
+macd_fast = st.sidebar.slider("MACD快线", 5, 20, 12)
+macd_slow = st.sidebar.slider("MACD慢线", 20, 40, 26)
+macd_signal = st.sidebar.slider("MACD信号线", 5, 15, 9)
+atr_mult_thresh = st.sidebar.slider("ATR波动阈值倍数 (> sma(ATR))", 0.5, 2.0, 1.0)
+obv_sma_period = st.sidebar.slider("OBV SMA周期", 5, 50, 20)
+
+# 抓取数据（完全不变）
+all_data = {}
+for base in CRYPTO_LIST:
+    sym = f"{base}-USDT-SWAP" if base in CONTRACTS else f"{base}/USDT"
+    all_data[base] = {}
+    for tf in DISPLAY_INTERVALS:
+        try:
+            bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
+            df = pd.DataFrame(bars, columns=['ts','open','high','low','close','volume'])
+            df.set_index(pd.to_datetime(df['ts'], unit='ms').dt.tz_localize('UTC'), inplace=True)
+            df = calculate_ut_bot(df, sens, atrp)
+            if not df.empty:
+                df['rsi'] = ta.rsi(df['Close'], length=rsi_period)
+                macd = ta.macd(df['Close'], fast=macd_fast, slow=macd_slow, signal=macd_signal)
+                df['macd'] = macd['MACD_12_26_9']
+                df['macd_signal'] = macd['MACDs_12_26_9']
+                df['macd_hist'] = macd['MACDh_12_26_9']
+                df['obv'] = ta.obv(df['Close'], df['Volume'])
+                df['obv_sma'] = ta.sma(df['obv'], length=obv_sma_period)
+                df['atr_sma'] = ta.sma(df['atr'], length=atrp)
+            all_data[base][tf] = df
+        except: all_data[base][tf] = pd.DataFrame()
 
 rows = []
+now_str = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
-# --- 数据抓取与计算 ---
-with st.spinner('正在同步全球交易所数据...'):
-    for base in CRYPTO_LIST:
-        symbol_results = {}
-        # 为每个币种开启多线程抓取所有周期，解决卡顿
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_tf = {executor.submit(fetch_data_safe, base, tf, ex): tf for tf in ["5m", "15m", "1h", "4h"]}
-            for future in future_to_tf:
-                tf, df = future.result()
-                symbol_results[tf] = calculate_ut_bot_pro(df, sens)
+if "positions" not in st.session_state:
+    st.session_state.positions = {}
 
-        # 构建展示行
-        p_15m = symbol_results.get("15m", pd.DataFrame())
-        price_now = p_15m.iloc[-1]['Close'] if not p_15m.empty else "N/A"
+# 持久化每个资产的上一次方向
+if "last_dirs" not in st.session_state:
+    st.session_state.last_dirs = {base: None for base in CRYPTO_LIST}
+
+for base in CRYPTO_LIST:
+    p_15m = all_data[base].get("15m", pd.DataFrame())
+    price_now = p_15m.iloc[-1]['Close'] if not p_15m.empty else "N/A"
+    
+    row = {"资产": base, "实时价格": f"<b>{price_now}</b>"}
+    for tf in DISPLAY_INTERVALS:
+        df = all_data[base].get(tf, pd.DataFrame())
+        if df.empty: row[tf] = "-"; continue
+        curr = df.iloc[-1]
+        color = "#00ff00" if curr['pos'] == "BUY" else "#ff0000"
+        row[tf] = f"<div style='color:{color};font-weight:bold;'>{curr['pos']}</div><div style='font-size:0.75em;color:#888;'>Stop:{curr['ts']:.2f}</div>"
+
+    # ────────────── 共振组 ──────────────
+    for g_name, g_tfs in RESONANCE_GROUPS.items():
+        states = [all_data[base][tf].iloc[-1]['pos'] for tf in g_tfs if not all_data[base][tf].empty]
+        is_res = len(states) == 3 and len(set(states)) == 1
+        if is_res:
+            direction = states[0]
+            filter_pass = True
+            for tf in g_tfs:
+                df = all_data[base][tf]
+                if df.empty: filter_pass = False; break
+                curr = df.iloc[-1]
+                rsi_ok = (curr['rsi'] > rsi_buy_thresh if direction == "BUY" else curr['rsi'] < rsi_sell_thresh)
+                macd_ok = (curr['macd'] > curr['macd_signal'] if direction == "BUY" else curr['macd'] < curr['macd_signal'])
+                obv_ok = (curr['obv'] > curr['obv_sma'] if direction == "BUY" else curr['obv'] < curr['obv_sma'])
+                atr_ok = curr['atr'] > curr['atr_sma'] * atr_mult_thresh
+                if not (rsi_ok and macd_ok and obv_ok and atr_ok):
+                    filter_pass = False
+                    break
+            
+            if filter_pass:
+                last_dir = st.session_state.last_dirs.get(base, None)
+                if direction != last_dir:
+                    cache_key = f"{base}_{g_name}_CHANGE_{now_str[:16]}"
+                    if cache_key not in st.session_state.sent_cache:
+                        log_entry = {
+                            "时间": now_str,
+                            "资产": base,
+                            "类型": f"{g_name}_方向变化",
+                            "方向": direction,
+                            "价格": price_now
+                        }
+                        st.session_state.alert_logs.insert(0, log_entry)
+                        save_log_to_disk(log_entry)
+                        send_wx(f"⚡共振方向变化({g_name})", f"{base} → {direction} @{price_now}")
+                        st.session_state.sent_cache.add(cache_key)
+                        st.session_state.positions[base] = {'方向': direction, '入场价': price_now, '入场时间': now_str, '类型': g_name}
+                    # 更新最后方向
+                    st.session_state.last_dirs[base] = direction
+
+    # ────────────── 大周期 ──────────────
+    for tf in MAJOR_LEVELS:
+        df = all_data[base].get(tf, pd.DataFrame())
+        if not df.empty:
+            curr = df.iloc[-1]
+            direction = curr['pos']
+            
+            rsi_ok = (curr['rsi'] > rsi_buy_thresh if direction == "BUY" else curr['rsi'] < rsi_sell_thresh)
+            macd_ok = (curr['macd'] > curr['macd_signal'] if direction == "BUY" else curr['macd'] < curr['macd_signal'])
+            obv_ok = (curr['obv'] > curr['obv_sma'] if direction == "BUY" else curr['obv'] < curr['obv_sma'])
+            atr_ok = curr['atr'] > curr['atr_sma'] * atr_mult_thresh
+            
+            if rsi_ok and macd_ok and obv_ok and atr_ok:
+                last_dir = st.session_state.last_dirs.get(base, None)
+                if direction != last_dir:
+                    cache_key = f"{base}_{tf}_CHANGE_{now_str[:16]}"
+                    if cache_key not in st.session_state.sent_cache:
+                        log_entry = {
+                            "时间": now_str,
+                            "资产": base,
+                            "类型": f"大周期_{tf}_方向变化",
+                            "方向": direction,
+                            "价格": price_now
+                        }
+                        st.session_state.alert_logs.insert(0, log_entry)
+                        save_log_to_disk(log_entry)
+                        send_wx(f"⚡大周期方向变化({tf})", f"{base} → {direction} @{price_now}")
+                        st.session_state.sent_cache.add(cache_key)
+                        st.session_state.positions[base] = {'方向': direction, '入场价': price_now, '入场时间': now_str, '类型': f"大周期_{tf}"}
+                    # 更新最后方向
+                    st.session_state.last_dirs[base] = direction
+
+    rows.append(row)
+
+    # 止盈止损 - 保留盈亏百分比
+    if isinstance(price_now, (int, float)) and base in st.session_state.positions:
+        pos = st.session_state.positions[base]
+        entry_price = pos['入场价']
+        direction = pos['方向']
+        exit_type = None
+        pnl = None
         
-        row = {"资产": base, "当前价格": price_now}
+        if direction == "BUY":
+            tp_price = entry_price * (1 + tp_ratio)
+            sl_price = entry_price * (1 - sl_ratio)
+            if price_now >= tp_price:
+                exit_type = "止盈"
+                pnl = (price_now - entry_price) / entry_price * 100
+            elif price_now <= sl_price:
+                exit_type = "止损"
+                pnl = (price_now - entry_price) / entry_price * 100
+        else:
+            tp_price = entry_price * (1 - tp_ratio)
+            sl_price = entry_price * (1 + sl_ratio)
+            if price_now <= tp_price:
+                exit_type = "止盈"
+                pnl = (entry_price - price_now) / entry_price * 100
+            elif price_now >= sl_price:
+                exit_type = "止损"
+                pnl = (entry_price - price_now) / entry_price * 100
         
-        # 判断共振
-        for g_name, g_tfs in RESONANCE_GROUPS.items():
-            try:
-                states = [symbol_results[tf].iloc[-1]['pos'] for tf in g_tfs if not symbol_results[tf].empty]
-                if len(states) == 3 and len(set(states)) == 1:
-                    direction = states[0]
-                    color = "green" if direction == "BUY" else "red"
-                    
-                    # 检查乖离率（防追高）
-                    curr_bias = symbol_results[g_tfs[0]].iloc[-1]['bias']
-                    if curr_bias > max_bias:
-                        row[g_name] = f"⚠️ <span style='color:{color}'>{direction} (过热)</span>"
-                    else:
-                        row[g_name] = f"✅ <span style='color:{color}; font-weight:bold;'>{direction}</span>"
-                        # 信号记录与发送（此处可加去重逻辑）
-                else:
-                    row[g_name] = "⏳ 扫描中"
-            except:
-                row[g_name] = "❌ 数据缺失"
-        
-        rows.append(row)
+        if exit_type:
+            log_entry = {
+                "时间": now_str,
+                "资产": base,
+                "类型": f"{pos['类型']}_平仓_{exit_type}",
+                "方向": direction,
+                "价格": price_now,
+                "盈亏(%)": f"{pnl:.2f}" if pnl is not None else "N/A"
+            }
+            st.session_state.alert_logs.insert(0, log_entry)
+            save_log_to_disk(log_entry)
+            send_wx(f"🚨{exit_type}平仓({pos['类型']})", f"{base} {direction} 平仓 @{price_now} 盈亏: {pnl:.2f}%")
+            del st.session_state.positions[base]
+            # 平仓后重置方向记录（可选，避免后续误判）
+            st.session_state.last_dirs[base] = None
 
-# --- 渲染表格 ---
-if rows:
-    df_display = pd.DataFrame(rows)
-    st.write(df_display.to_html(escape=False, index=False), unsafe_allow_html=True)
-else:
-    st.error("无法获取数据，请检查网络连接或API限制")
+# ==================== 4. 渲染界面 ====================
+st.markdown("<h3 style='text-align:center;'>🚀 UT Bot 多重过滤共振监控</h3>", unsafe_allow_html=True)
 
-# --- 日志显示 ---
+st.write(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
+
 st.divider()
-st.subheader("📜 历史信号日志")
-if st.session_state.alert_logs:
-    st.table(pd.DataFrame(st.session_state.alert_logs).head(10))
-else:
-    st.info("当前暂无触发信号，系统正在持续监控...")
+st.subheader("📜 分列历史日志 (左:Group1 | 中:Group2 | 右:大周期单发)")
 
-# 每60秒自动刷新
-time.sleep(60)
+if st.session_state.alert_logs:
+    df_logs = pd.DataFrame(st.session_state.alert_logs)
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("##### 🟢 Group1 (5-15-60)")
+        g1_df = df_logs[df_logs["类型"].str.contains("Group1", na=False)]
+        g1_change = g1_df[g1_df["类型"].str.contains("方向变化", na=False)]
+        g1_close = g1_df[g1_df["类型"].str.contains("平仓", na=False)]
+        
+        if not g1_change.empty:
+            st.markdown("**方向变化记录**")
+            st.dataframe(g1_change[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g1_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(g1_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        if not g1_df.empty:
+            st.download_button("下载 G1 全记录", g1_df.to_csv(index=False).encode('utf-8-sig'), "G1_full.csv", key="dl_g1")
+
+    with col2:
+        st.markdown("##### 🔵 Group2 (15-60-240)")
+        g2_df = df_logs[df_logs["类型"].str.contains("Group2", na=False)]
+        g2_change = g2_df[g2_df["类型"].str.contains("方向变化", na=False)]
+        g2_close = g2_df[g2_df["类型"].str.contains("平仓", na=False)]
+        
+        if not g2_change.empty:
+            st.markdown("**方向变化记录**")
+            st.dataframe(g2_change[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not g2_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(g2_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        if not g2_df.empty:
+            st.download_button("下载 G2 全记录", g2_df.to_csv(index=False).encode('utf-8-sig'), "G2_full.csv", key="dl_g2")
+
+    with col3:
+        st.markdown("##### 🟠 大周期单周期 (1h+)")
+        major_df = df_logs[df_logs["类型"].str.contains("大周期", na=False)]
+        major_change = major_df[major_df["类型"].str.contains("方向变化", na=False)]
+        major_close = major_df[major_df["类型"].str.contains("平仓", na=False)]
+        
+        if not major_change.empty:
+            st.markdown("**方向变化记录**")
+            st.dataframe(major_change[["时间", "资产", "类型", "方向", "价格"]], use_container_width=True, hide_index=True)
+        if not major_close.empty:
+            st.markdown("**平仓记录**")
+            st.dataframe(major_close[["时间", "资产", "类型", "方向", "价格", "盈亏(%)"]], use_container_width=True, hide_index=True)
+        if not major_df.empty:
+            st.download_button("下载大周期全记录", major_df.to_csv(index=False).encode('utf-8-sig'), "Major_full.csv", key="dl_major")
+else:
+    st.info("监控运行中，暂无记录...")
+
+st.sidebar.caption(f"最后刷新: {now_str}")
+time.sleep(120)
 st.rerun()

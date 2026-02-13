@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
 import ccxt
 import requests
 import os
@@ -52,20 +51,46 @@ def send_wx(title, body):
 
 def calculate_ut_bot(df, sensitivity, atr_period):
     if df.empty or len(df) < 50: return pd.DataFrame()
-    df.columns = [str(c).capitalize() for c in df.columns]
-    df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
+    df.columns = [str(c).lower() for c in df.columns]  # 改为小写统一
+    # 手写 ATR
+    tr = np.maximum(df['high'] - df['low'],
+                    np.maximum(abs(df['high'] - df['close'].shift()),
+                               abs(df['low'] - df['close'].shift())))
+    df['atr'] = tr.rolling(atr_period).mean()
     df = df.dropna(subset=['atr']).copy()
     n_loss = sensitivity * df['atr']
-    src, trail_stop = df['Close'], np.zeros(len(df))
+    src, trail_stop = df['close'], np.zeros(len(df))
     for i in range(1, len(df)):
         p = trail_stop[i-1]
         if src.iloc[i] > p and src.iloc[i-1] > p: trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
         elif src.iloc[i] < p and src.iloc[i-1] < p: trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
         else: trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
     df['ts'] = trail_stop
-    df['pos'] = np.where(df['Close'] > df['ts'], "BUY", "SELL")
+    df['pos'] = np.where(df['close'] > df['ts'], "BUY", "SELL")
     df['sig_change'] = (df['pos'] != df['pos'].shift(1))
     return df
+
+def rsi_manual(close, period=14):
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
+
+def macd_manual(close, fast=12, slow=26, signal=9):
+    ema_fast = close.ewm(span=fast, adjust=False).mean()
+    ema_slow = close.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+def obv_manual(close, volume):
+    direction = np.sign(close.diff())
+    obv = (direction * volume).fillna(0).cumsum()
+    return obv
 
 # ==================== 3. 主程序 ====================
 st.set_page_config(page_title="UT Bot 多重看板+分列日志版", layout="wide")
@@ -76,13 +101,13 @@ if "alert_logs" not in st.session_state:
 if "sent_cache" not in st.session_state:
     st.session_state.sent_cache = {f"{l['资产']}_{l['类型']}_{l['时间'][:16]}" for l in st.session_state.alert_logs if '类型' in l}
 
-ex = ccxt.okx({'enableRateLimit': True})
-sens = st.sidebar.slider("敏感度", 0.1, 5.0, 1.2)
+ex = ccxt.okx({'enableRateLimit': True, 'defaultType': 'swap'})  # 指定 swap
+sens = st.sidebar.slider("敏感度", 0.1, 5.0, 2.0)  # 默认调高到2.0
 atrp = st.sidebar.slider("ATR周期", 1, 30, 10)
 
 # 新增侧边栏配置止盈止损比率
-tp_ratio = st.sidebar.slider("止盈比率 (%)", 0.1, 10.0, 2.0) / 100  # e.g., 2% = 0.02
-sl_ratio = st.sidebar.slider("止损比率 (%)", 0.1, 10.0, 1.0) / 100  # e.g., 1% = 0.01
+tp_ratio = st.sidebar.slider("止盈比率 (%)", 0.1, 10.0, 2.0) / 100
+sl_ratio = st.sidebar.slider("止损比率 (%)", 0.1, 10.0, 1.0) / 100
 
 # 新增指标参数
 rsi_period = st.sidebar.slider("RSI周期", 5, 30, 14)
@@ -91,46 +116,51 @@ rsi_sell_thresh = st.sidebar.slider("RSI SELL阈值 (<)", 30, 70, 50)
 macd_fast = st.sidebar.slider("MACD快线", 5, 20, 12)
 macd_slow = st.sidebar.slider("MACD慢线", 20, 40, 26)
 macd_signal = st.sidebar.slider("MACD信号线", 5, 15, 9)
-atr_mult_thresh = st.sidebar.slider("ATR波动阈值倍数 (> sma(ATR))", 0.5, 2.0, 1.0)  # ATR > sma(ATR, atrp) * mult
+atr_mult_thresh = st.sidebar.slider("ATR波动阈值倍数 (> sma(ATR))", 0.5, 2.0, 0.8)  # 默认放宽到0.8
 obv_sma_period = st.sidebar.slider("OBV SMA周期", 5, 50, 20)
 
 # 抓取数据
 all_data = {}
 for base in CRYPTO_LIST:
-    sym = f"{base}-USDT-SWAP" if base in CONTRACTS else f"{base}/USDT"
+    sym = f"{base}/USDT" if base not in CONTRACTS else f"{base}-USDT-SWAP"  # 修正
     all_data[base] = {}
     for tf in DISPLAY_INTERVALS:
         try:
-            bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=100)
+            bars = ex.fetch_ohlcv(sym, timeframe=tf, limit=200)  # 增加到200
             df = pd.DataFrame(bars, columns=['ts','open','high','low','close','volume'])
             df.set_index(pd.to_datetime(df['ts'], unit='ms').dt.tz_localize('UTC'), inplace=True)
             df = calculate_ut_bot(df, sens, atrp)
             if not df.empty:
                 # 计算额外指标
-                df['rsi'] = ta.rsi(df['Close'], length=rsi_period)
-                macd = ta.macd(df['Close'], fast=macd_fast, slow=macd_slow, signal=macd_signal)
-                df['macd'] = macd['MACD_12_26_9']  # 假设默认列名
-                df['macd_signal'] = macd['MACDs_12_26_9']
-                df['macd_hist'] = macd['MACDh_12_26_9']
-                df['obv'] = ta.obv(df['Close'], df['Volume'])
-                df['obv_sma'] = ta.sma(df['obv'], length=obv_sma_period)
-                df['atr_sma'] = ta.sma(df['atr'], length=atrp)
+                df['rsi'] = rsi_manual(df['close'], rsi_period)
+                macd_line, macd_sig, macd_hist = macd_manual(df['close'], macd_fast, macd_slow, macd_signal)
+                df['macd'] = macd_line
+                df['macd_signal'] = macd_sig
+                df['macd_hist'] = macd_hist
+                df['obv'] = obv_manual(df['close'], df['volume'])
+                df['obv_sma'] = df['obv'].rolling(obv_sma_period).mean()
+                df['atr_sma'] = df['atr'].rolling(atrp).mean()
             all_data[base][tf] = df
-        except: all_data[base][tf] = pd.DataFrame()
+            # DEBUG: 最后时间
+            if not df.empty:
+                st.sidebar.write(f"{base} {tf} 最后时间: {df.index[-1]}")
+        except Exception as e:
+            st.sidebar.error(f"{base} {tf} 抓取失败: {e}")
+            all_data[base][tf] = pd.DataFrame()
 
 # 核心：生成看板行 + 信号逻辑
 rows = []
 now_str = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
-# 初始化开仓位置字典（session_state持久化模拟持仓）
+# 初始化开仓位置字典
 if "positions" not in st.session_state:
-    st.session_state.positions = {}  # {base: {'方向': 'BUY/SELL', '入场价': price, '入场时间': now_str, '类型': 'Group1/大周期_1h 等'}}
+    st.session_state.positions = {}
 
 for base in CRYPTO_LIST:
     p_15m = all_data[base].get("15m", pd.DataFrame())
-    price_now = p_15m.iloc[-1]['Close'] if not p_15m.empty else "N/A"
+    price_now = p_15m.iloc[-1]['close'] if not p_15m.empty else "N/A"
     
-    # --- 1. 构造顶部的看板行 (格局不变) ---
+    # 构造顶部的看板行
     row = {"资产": base, "实时价格": f"<b>{price_now}</b>"}
     for tf in DISPLAY_INTERVALS:
         df = all_data[base].get(tf, pd.DataFrame())
@@ -139,13 +169,11 @@ for base in CRYPTO_LIST:
         color = "#00ff00" if curr['pos'] == "BUY" else "#ff0000"
         row[tf] = f"<div style='color:{color};font-weight:bold;'>{curr['pos']}</div><div style='font-size:0.75em;color:#888;'>Stop:{curr['ts']:.2f}</div>"
 
-    # --- 2. 信号触发逻辑 ---
-    # A. 检查两组共振 (共振才发)
+    # 信号触发逻辑 A. 共振组
     for g_name, g_tfs in RESONANCE_GROUPS.items():
         states = [all_data[base][tf].iloc[-1]['pos'] for tf in g_tfs if not all_data[base][tf].empty]
         is_res = len(states) == 3 and len(set(states)) == 1
         if is_res:
-            # 加强过滤: 检查三个周期的指标一致
             filter_pass = True
             for tf in g_tfs:
                 df = all_data[base][tf]
@@ -153,17 +181,13 @@ for base in CRYPTO_LIST:
                 curr = df.iloc[-1]
                 direction = states[0]
                 
-                # RSI 过滤
                 rsi_ok = (curr['rsi'] > rsi_buy_thresh if direction == "BUY" else curr['rsi'] < rsi_sell_thresh)
-                
-                # MACD 过滤: MACD > signal 为 BUY, < 为 SELL
                 macd_ok = (curr['macd'] > curr['macd_signal'] if direction == "BUY" else curr['macd'] < curr['macd_signal'])
-                
-                # OBV 过滤: OBV > SMA 为 BUY, < 为 SELL
                 obv_ok = (curr['obv'] > curr['obv_sma'] if direction == "BUY" else curr['obv'] < curr['obv_sma'])
-                
-                # ATR 过滤: 当前 ATR > SMA(ATR) * mult (高波动确认)
                 atr_ok = curr['atr'] > curr['atr_sma'] * atr_mult_thresh
+                
+                # DEBUG: 输出过滤
+                st.sidebar.write(f"DEBUG {base} {tf} {direction}: RSI={rsi_ok}, MACD={macd_ok}, OBV={obv_ok}, ATR={atr_ok}")
                 
                 if not (rsi_ok and macd_ok and obv_ok and atr_ok):
                     filter_pass = False
@@ -177,37 +201,46 @@ for base in CRYPTO_LIST:
                     save_log_to_disk(log_entry)
                     send_wx(f"🔗共振({g_name})", f"{base} {states[0]} @{price_now}")
                     st.session_state.sent_cache.add(cache_key)
-                    # 记录开仓
                     st.session_state.positions[base] = {'方向': states[0], '入场价': price_now, '入场时间': now_str, '类型': g_name}
 
-    # B. 检查大周期 (1h+出信号即发)
+    # B. 大周期
     for tf in MAJOR_LEVELS:
         df = all_data[base].get(tf, pd.DataFrame())
-        if not df.empty and df.iloc[-1]['sig_change']:
+        if not df.empty:
             curr = df.iloc[-1]
-            direction = curr['pos']
+            # DEBUG sig_change
+            if len(df) >= 2:
+                prev_pos = df.iloc[-2]['pos']
+                curr_pos = curr['pos']
+                sig_change = df.iloc[-1]['sig_change']
+                st.sidebar.write(f"DEBUG: {base} {tf} sig_change={sig_change} (当前:{curr_pos} ← 前:{prev_pos})")
+            else:
+                st.sidebar.write(f"DEBUG: {base} {tf} 数据不足2根")
             
-            # 加强过滤: 单周期指标检查
-            rsi_ok = (curr['rsi'] > rsi_buy_thresh if direction == "BUY" else curr['rsi'] < rsi_sell_thresh)
-            macd_ok = (curr['macd'] > curr['macd_signal'] if direction == "BUY" else curr['macd'] < curr['macd_signal'])
-            obv_ok = (curr['obv'] > curr['obv_sma'] if direction == "BUY" else curr['obv'] < curr['obv_sma'])
-            atr_ok = curr['atr'] > curr['atr_sma'] * atr_mult_thresh
-            
-            if rsi_ok and macd_ok and obv_ok and atr_ok:
-                cache_key = f"{base}_{tf}_{now_str[:16]}"
-                if cache_key not in st.session_state.sent_cache:
-                    log_entry = {"时间": now_str, "资产": base, "类型": f"大周期_{tf}", "方向": direction, "价格": price_now}
-                    st.session_state.alert_logs.insert(0, log_entry)
-                    save_log_to_disk(log_entry)
-                    send_wx(f"📢大周期报警({tf})", f"{base} {direction} @{price_now}")
-                    st.session_state.sent_cache.add(cache_key)
-                    # 记录开仓
-                    st.session_state.positions[base] = {'方向': direction, '入场价': price_now, '入场时间': now_str, '类型': f"大周期_{tf}"}
+            if sig_change:
+                direction = curr['pos']
+                rsi_ok = (curr['rsi'] > rsi_buy_thresh if direction == "BUY" else curr['rsi'] < rsi_sell_thresh)
+                macd_ok = (curr['macd'] > curr['macd_signal'] if direction == "BUY" else curr['macd'] < curr['macd_signal'])
+                obv_ok = (curr['obv'] > curr['obv_sma'] if direction == "BUY" else curr['obv'] < curr['obv_sma'])
+                atr_ok = curr['atr'] > curr['atr_sma'] * atr_mult_thresh
+                
+                # DEBUG 过滤
+                st.sidebar.write(f"DEBUG {base} {tf} {direction}: RSI={rsi_ok}, MACD={macd_ok}, OBV={obv_ok}, ATR={atr_ok}")
+                
+                if rsi_ok and macd_ok and obv_ok and atr_ok:
+                    cache_key = f"{base}_{tf}_{now_str[:16]}"
+                    if cache_key not in st.session_state.sent_cache:
+                        log_entry = {"时间": now_str, "资产": base, "类型": f"大周期_{tf}", "方向": direction, "价格": price_now}
+                        st.session_state.alert_logs.insert(0, log_entry)
+                        save_log_to_disk(log_entry)
+                        send_wx(f"📢大周期报警({tf})", f"{base} {direction} @{price_now}")
+                        st.session_state.sent_cache.add(cache_key)
+                        st.session_state.positions[base] = {'方向': direction, '入场价': price_now, '入场时间': now_str, '类型': f"大周期_{tf}"}
     
     rows.append(row)
 
-    # --- 新增: 止盈止损监控（只在日志系统内操作） ---
-    if isinstance(price_now, (int, float)):  # 确保有有效价格
+    # 止盈止损监控
+    if isinstance(price_now, (int, float)):
         if base in st.session_state.positions:
             pos = st.session_state.positions[base]
             entry_price = pos['入场价']
@@ -222,7 +255,7 @@ for base in CRYPTO_LIST:
                     st.session_state.alert_logs.insert(0, log_entry)
                     save_log_to_disk(log_entry)
                     send_wx(f"🚨{exit_type}平仓({pos['类型']})", f"{base} {direction} 平仓 @{price_now} 盈亏: {pnl:.2f}%")
-                    del st.session_state.positions[base]  # 关闭位置
+                    del st.session_state.positions[base]
             elif direction == "SELL":
                 tp_price = entry_price * (1 - tp_ratio)
                 sl_price = entry_price * (1 + sl_ratio)
@@ -233,12 +266,11 @@ for base in CRYPTO_LIST:
                     st.session_state.alert_logs.insert(0, log_entry)
                     save_log_to_disk(log_entry)
                     send_wx(f"🚨{exit_type}平仓({pos['类型']})", f"{base} {direction} 平仓 @{price_now} 盈亏: {pnl:.2f}%")
-                    del st.session_state.positions[base]  # 关闭位置
+                    del st.session_state.positions[base]
 
 # ==================== 4. 渲染界面 ====================
 st.markdown("<h3 style='text-align:center;'>🚀 UT Bot 多重过滤共振监控</h3>", unsafe_allow_html=True)
 
-# 渲染顶部看板 (格局保持)
 st.write(pd.DataFrame(rows).to_html(escape=False, index=False), unsafe_allow_html=True)
 
 st.divider()
@@ -247,13 +279,11 @@ st.subheader("📜 分列历史日志 (左:Group1 | 中:Group2 | 右:大周期�
 if st.session_state.alert_logs:
     df_logs = pd.DataFrame(st.session_state.alert_logs)
     
-    # --- 重点：三列日志展示 ---
     col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown("##### 🟢 Group1 (5-15-60)")
         g1_df = df_logs[df_logs["类型"].str.contains("Group1")]
-        
         g1_open = g1_df[~g1_df["类型"].str.contains("平仓")]
         g1_close = g1_df[g1_df["类型"].str.contains("平仓")]
         
@@ -271,7 +301,6 @@ if st.session_state.alert_logs:
     with col2:
         st.markdown("##### 🔵 Group2 (15-60-240)")
         g2_df = df_logs[df_logs["类型"].str.contains("Group2")]
-        
         g2_open = g2_df[~g2_df["类型"].str.contains("平仓")]
         g2_close = g2_df[g2_df["类型"].str.contains("平仓")]
         
@@ -289,7 +318,6 @@ if st.session_state.alert_logs:
     with col3:
         st.markdown("##### 🟠 大周期单周期 (1h+)")
         major_df = df_logs[df_logs["类型"].str.contains("大周期")]
-        
         major_open = major_df[~major_df["类型"].str.contains("平仓")]
         major_close = major_df[major_df["类型"].str.contains("平仓")]
         
@@ -307,5 +335,5 @@ else:
     st.info("监控运行中，暂无触发信号...")
 
 st.sidebar.caption(f"最后刷新: {now_str}")
-time.sleep(300)
+time.sleep(120)  # 缩短到120秒
 st.rerun()

@@ -4,37 +4,33 @@ import pandas_ta as ta
 import yfinance as yf
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime
 
 st.set_page_config(page_title="老兵做市商战术板", layout="wide")
 st.title("⚔️ 老兵 30 年做市商：10天回血战术板")
 
-def calculate_strategy(df, key_value=3, atr_period=10):
-df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
-n_loss = key_value * df['atr']
+def calculate_strategy(df):
+# 下面这些行必须比 def 往右缩进 4 个空格
+df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=10)
+n_loss = 3 * df['atr']
 ts = np.zeros(len(df))
 for i in range(1, len(df)):
-p_ts = ts[i-1]
-c = df['Close'].iloc[i]
-pc = df['Close'].iloc[i-1]
-if c > p_ts and pc > p_ts:
-ts[i] = max(p_ts, c - n_loss.iloc[i])
-elif c < p_ts and pc < p_ts:
-ts[i] = min(p_ts, c + n_loss.iloc[i])
+if df['Close'].iloc[i] > ts[i-1]:
+ts[i] = max(ts[i-1], df['Close'].iloc[i] - n_loss.iloc[i])
 else:
-ts[i] = c - n_loss.iloc[i] if c > p_ts else c + n_loss.iloc[i]
+ts[i] = df['Close'].iloc[i] + n_loss.iloc[i]
 df['ts'] = ts
 df['mfi'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'], length=14)
 counts, bins = np.histogram(df['Close'], bins=50, weights=df['Volume'])
 poc_price = bins[np.argmax(counts)]
 return df, poc_price
 
-st.sidebar.header("🎯 决战目标")
-target = st.sidebar.text_input("代码 (美股如 SNDK, 币如 BTC-USD)", "SNDK")
-days = st.sidebar.slider("回测天数", 30, 365, 180)
+target = st.sidebar.text_input("代码 (如 SNDK 或 BTC-USD)", "SNDK")
 
 if target:
-df = yf.download(target, period=f"{days}d", interval="1d")
+df = yf.download(target, period="6mo", interval="1d")
 if not df.empty:
 df, poc = calculate_strategy(df)
 last = df.iloc[-1]
+c1, c2, c3 = st.columns(3)
+c1.metric("现价", f"last[′Close′]:.2f")c2.metric("生命线(ts)",f"{last['ts']:.2f}")
+c3.metric("资金流 (MFI)", f"{last['mfi']:.1f}")

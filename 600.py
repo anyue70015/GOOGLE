@@ -49,25 +49,45 @@ def send_wx(title, body):
         requests.post("https://wxpusher.zjiecode.com/api/send/message", json=payload, timeout=5)
     except: pass
 
+def rma(series, length):
+    """Wilder 平滑 (RMA)"""
+    alpha = 1.0 / length
+    rma_series = series.copy()
+    rma_series.iloc[:length] = np.nan
+    rma_series.iloc[length-1] = series.iloc[:length].mean()
+    for i in range(length, len(series)):
+        rma_series.iloc[i] = alpha * series.iloc[i] + (1 - alpha) * rma_series.iloc[i-1]
+    return rma_series
+
 def calculate_ut_bot(df, sensitivity, atr_period):
     if df.empty or len(df) < 50: return pd.DataFrame()
     df.columns = [str(c).lower() for c in df.columns]  # 改为小写统一
-    # 手写 ATR
+    # 手写 TR 和 ATR (使用 RMA 平滑)
     tr = np.maximum(df['high'] - df['low'],
                     np.maximum(abs(df['high'] - df['close'].shift()),
                                abs(df['low'] - df['close'].shift())))
-    df['atr'] = tr.rolling(atr_period).mean()
+    df['atr'] = rma(tr, atr_period)
     df = df.dropna(subset=['atr']).copy()
     n_loss = sensitivity * df['atr']
-    src, trail_stop = df['close'], np.zeros(len(df))
+    src = df['close']
+    trail_stop = np.full(len(df), np.nan)
+    trail_stop[0] = src[0] - n_loss[0]  # 初始化第一个 trail_stop 为 close - n_loss (假设初始 BUY 方向)
     for i in range(1, len(df)):
         p = trail_stop[i-1]
-        if src.iloc[i] > p and src.iloc[i-1] > p: trail_stop[i] = max(p, src.iloc[i] - n_loss.iloc[i])
-        elif src.iloc[i] < p and src.iloc[i-1] < p: trail_stop[i] = min(p, src.iloc[i] + n_loss.iloc[i])
-        else: trail_stop[i] = src.iloc[i] - n_loss.iloc[i] if src.iloc[i] > p else src.iloc[i] + n_loss.iloc[i]
+        if src[i] > p and src[i-1] > p: 
+            trail_stop[i] = max(p, src[i] - n_loss[i])
+        elif src[i] < p and src[i-1] < p: 
+            trail_stop[i] = min(p, src[i] + n_loss[i])
+        else: 
+            trail_stop[i] = src[i] - n_loss[i] if src[i] > src[i-1] else src[i] + n_loss[i]  # 调整翻转逻辑
     df['ts'] = trail_stop
     df['pos'] = np.where(df['close'] > df['ts'], "BUY", "SELL")
-    df['sig_change'] = (df['pos'] != df['pos'].shift(1))
+    # 改进 sig_change 计算
+    if len(df) >= 2:
+        df['sig_change'] = False
+        df['sig_change'].iloc[1:] = df['pos'].iloc[1:] != df['pos'].iloc[:-1]
+    else:
+        df['sig_change'] = False
     return df
 
 def rsi_manual(close, period=14):
@@ -102,7 +122,7 @@ if "sent_cache" not in st.session_state:
     st.session_state.sent_cache = {f"{l['资产']}_{l['类型']}_{l['时间'][:16]}" for l in st.session_state.alert_logs if '类型' in l}
 
 ex = ccxt.okx({'enableRateLimit': True, 'defaultType': 'swap'})  # 指定 swap
-sens = st.sidebar.slider("敏感度", 0.1, 5.0, 2.0)  # 默认调高到2.0
+sens = st.sidebar.slider("敏感度", 0.1, 5.0, 1.0)  # 默认调低到1.0，更容易触发
 atrp = st.sidebar.slider("ATR周期", 1, 30, 10)
 
 # 新增侧边栏配置止盈止损比率
@@ -207,13 +227,18 @@ for base in CRYPTO_LIST:
     for tf in MAJOR_LEVELS:
         df = all_data[base].get(tf, pd.DataFrame())
         if not df.empty:
+            total_changes = df['sig_change'].sum()
+            st.sidebar.write(f"DEBUG: {base} {tf} total_changes={total_changes}")
             curr = df.iloc[-1]
             # DEBUG sig_change
             if len(df) >= 2:
-                prev_pos = df.iloc[-2]['pos']
+                prev = df.iloc[-2]
+                prev_pos = prev['pos']
                 curr_pos = curr['pos']
-                sig_change = df.iloc[-1]['sig_change']
-                st.sidebar.write(f"DEBUG: {base} {tf} sig_change={sig_change} (当前:{curr_pos} ← 前:{prev_pos})")
+                sig_change = curr['sig_change']
+                diff = curr['close'] - curr['ts']
+                st.sidebar.write(f"DEBUG: {base} {tf} sig_change={sig_change} (当前:{curr_pos} ← 前:{prev_pos}), Diff={diff:.2f}")
+                st.sidebar.write(f"DEBUG {base} {tf} | 前一根 pos: {prev_pos}, ts:{prev['ts']:.2f}, close:{prev['close']:.2f} | 最新 pos: {curr_pos}, ts:{curr['ts']:.2f}, close:{curr['close']:.2f}")
             else:
                 st.sidebar.write(f"DEBUG: {base} {tf} 数据不足2根")
             

@@ -1,78 +1,42 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import ccxt
+import pandas_ta as ta
 import yfinance as yf
-from datetime import datetime
+import numpy as np
+import plotly.graph_objects as go
 
-# ==================== 1. 定义四大 AI 的推荐组合 ====================
-AI_PORTFOLIOS = {
-    "GPT (BTC单押)": ["BTC-USDT"],
-    "GROK (算力+避险)": ["VRT", "TSM", "SLV"],
-    "GEMINI (共振+存储)": ["SNDK", "STX", "DY", "VRT"],
-    "DEEPSEEK (存储全家桶)": ["SNDK", "STX", "WDC"]
-}
+st.set_page_config(page_title="老兵做市商战术板", layout="wide")
+st.title("⚔️ 老兵 30 年做市商战术板：10天回血决战")
 
-def get_latest_prices(tickers):
-    """同时获取加密货币和美股的最新涨跌幅"""
-    results = {}
-    for t in tickers:
-        try:
-            if "-USDT" in t: # 抓取加密货币 (OKX/Binance)
-                exchange = ccxt.binance()
-                ticker = exchange.fetch_ticker(t)
-                results[t] = ticker['percentage'] # 24h 涨跌幅
-            else: # 抓取美股 (Yahoo Finance)
-                stock = yf.Ticker(t)
-                data = stock.history(period="2d")
-                if len(data) >= 2:
-                    change = (data['Close'].iloc[-1] - data['Close'].iloc[-2]) / data['Close'].iloc[-2] * 100
-                    results[t] = change
-                else:
-                    results[t] = 0.0
-        except:
-            results[t] = 0.0
-    return results
+def calculate_strategy(df, key_value=3, atr_period=10):
+df['atr'] = ta.atr(df['High'], df['Low'], df['Close'], length=atr_period)
+n_loss = key_value * df['atr']
+ts = np.zeros(len(df))
+for i in range(1, len(df)):
+prev_ts = ts[i-1]
+close, prev_close = df['Close'].iloc[i], df['Close'].iloc[i-1]
+if close > prev_ts and prev_close > prev_ts:
+ts[i] = max(prev_ts, close - n_loss.iloc[i])
+elif close < prev_ts and prev_close < prev_ts:
+ts[i] = min(prev_ts, close + n_loss.iloc[i])
+else:
+ts[i] = close - n_loss.iloc[i] if close > prev_ts else close + n_loss.iloc[i]
+df['ts'] = ts
+df['mfi'] = ta.mfi(df['High'], df['Low'], df['Close'], df['Volume'], length=14)
+counts, bins = np.histogram(df['Close'], bins=50, weights=df['Volume'])
+poc_price = bins[np.argmax(counts)]
+return df, poc_price
 
-# ==================== 2. 计算实时战斗力 ====================
-st.title("⚔️ AI 诸神之战：带单大神实时排行")
+st.sidebar.header("🎯 目标选择")
+ticker = st.sidebar.text_input("输入代码 (币加 -USD, 美股直接敲)", "SNDK")
+period = st.sidebar.selectbox("数据跨度", ["1mo", "3mo", "6mo", "1y"], index=1)
 
-with st.spinner('正在同步各路神仙的实战数据...'):
-    # 获取所有涉及的标的价格
-    all_tickers = list(set([item for sublist in AI_PORTFOLIOS.values() for item in sublist]))
-    current_performance = get_latest_prices(all_tickers)
-
-    performance_report = []
-    for ai_name, symbols in AI_PORTFOLIOS.items():
-        avg_change = sum([current_performance.get(s, 0) for s in symbols]) / len(symbols)
-        performance_report.append({"AI 大神": ai_name, "组合平均涨幅 (%)": round(avg_change, 2)})
-
-df_score = pd.DataFrame(performance_report).sort_values(by="组合平均涨幅 (%)", ascending=False)
-
-# ==================== 3. 渲染雷达图/对比图 ====================
-fig = go.Figure()
-
-fig.add_trace(go.Bar(
-    x=df_score["AI 大神"],
-    y=df_score["组合平均涨幅 (%)"],
-    marker_color=['#00ff00' if x > 0 else '#ff0000' for x in df_score["组合平均涨幅 (%)"]],
-    text=df_score["组合平均涨幅 (%)"],
-    textposition='auto',
-))
-
-fig.update_layout(
-    title="今日 AI 组合收益率对比",
-    xaxis_title="AI 派系",
-    yaxis_title="涨跌幅 (%)",
-    template="plotly_dark"
-)
-
-st.plotly_chart(fig, use_container_width=True)
-
-# 展示排行榜
-st.subheader("🏆 实时战力排名")
-st.dataframe(df_score, hide_index=True)
-
-# 老兵点评逻辑
-top_ai = df_score.iloc[0]["AI 大神"]
-st.info(f"**老兵点评：** 现在的带单大神是 **{top_ai}**。看来现在的市场风格更偏向它的逻辑。别急着追，看看它的组合里有没有刚回调的票！")
+if ticker:
+df = yf.download(ticker, period=period, interval="1d")
+if not df.empty:
+df, poc = calculate_strategy(df)
+last = df.iloc[-1]
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("当前价格", f"last[′Close′]:.2f")c2.metric("止损线(ts)",f"{last['ts']:.2f}", f"{((last['Close']-last['ts'])/last['ts']*100):.1f}%")
+c3.metric("资金流 (MFI)", f"{last['mfi']:.1f}")
+c4.metric("筹码中心 (POC)", f"${poc:.2f}")

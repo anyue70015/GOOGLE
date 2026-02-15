@@ -14,3 +14,6 @@ cloudscraper
 urllib3
 streamlit-autorefresh
 pytz
+ta
+python-telegram-bot
+schedule

@@ -9,22 +9,28 @@ import asyncio
 import numpy as np
 
 # ================= 配置 =================
-EXCHANGE_NAME = 'binance'  # 改为Binance匹配你的截图
+EXCHANGE_NAME = 'okx'  # 使用OKX
 TIMEFRAME = '1m'
 SCAN_INTERVAL = 30
 
 SYMBOLS = [
-    'BTC/USDT',  # 只测试BTC先
-    'HYPE/USDT',
+    'BTC/USDT',
     'ETH/USDT',
     'SOL/USDT',
+    'HYPE/USDT',
+    'AAVE/USDT',
+    'XRP/USDT',
+    'DOGE/USDT',
+    'TAO/USDT',
+    'RENDER/USDT',
+    'SUI/USDT',
 ]
 
 # Telegram配置
 TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 
-# 指标参数 - 完全匹配Pine Script
+# 指标参数
 UT_FACTOR = 1.0
 UT_ATR_LEN = 10
 ST_ATR_LEN = 10
@@ -42,71 +48,46 @@ def init_bot():
 bot = init_bot()
 
 # ================= UI =================
-st.set_page_config(page_title="UT Bot修复版 - 匹配图表", layout="wide")
-st.title("📊 UT Bot修复版 (应该显示BUY)")
+st.set_page_config(page_title="OKX 1min 全指标扫描器", layout="wide")
+st.title("📊 OKX 1分钟全指标扫描器 (匹配Pine Script)")
 
 # 侧边栏
 with st.sidebar:
-    st.header("⚙️ 参数")
+    st.header("⚙️ 参数设置")
     scan_interval = st.number_input("扫描间隔(秒)", 5, 60, SCAN_INTERVAL)
     
-    st.header("📈 UT参数")
+    st.header("📈 指标参数")
     ut_factor = st.slider("UT Factor", 0.5, 3.0, UT_FACTOR, 0.1)
     ut_atr_len = st.slider("UT ATR长度", 5, 20, UT_ATR_LEN)
+    st_atr_len = st.slider("SuperTrend ATR长度", 5, 20, ST_ATR_LEN)
+    st_multiplier = st.slider("SuperTrend乘数", 1.0, 5.0, ST_MULTIPLIER, 0.5)
+    
+    st.header("🔔 通知")
+    enable_telegram = st.checkbox("启用Telegram", value=bot is not None)
     
     if st.button("🔄 立即扫描"):
         st.session_state.manual_scan = True
 
-# 初始化
+# 初始化session_state
 if 'last_scan_time' not in st.session_state:
     st.session_state.last_scan_time = 0
 if 'manual_scan' not in st.session_state:
     st.session_state.manual_scan = False
-if 'btc_data' not in st.session_state:
-    st.session_state.btc_data = None
-if 'debug_info' not in st.session_state:
-    st.session_state.debug_info = {}
-
-# ================= UT Bot精确实现 =================
-def calculate_ut_bot_exact(high, low, close, factor=1.0, atr_length=10):
-    """
-    完全匹配Pine Script的UT Bot实现
-    """
-    # 计算ATR
-    atr = pta.atr(high=high, low=low, close=close, length=atr_length)
-    
-    # 初始化UT Stop
-    length = len(close)
-    ut_stop = np.zeros(length)
-    ut_stop[0] = close.iloc[0] - factor * atr.iloc[0]
-    
-    # UT Bull状态
-    ut_bull = np.zeros(length, dtype=bool)
-    ut_bull[0] = close.iloc[0] > ut_stop[0]
-    
-    # 按照Pine Script逻辑逐根K线计算
-    for i in range(1, length):
-        # 计算UT Stop - 完全按照Pine Script
-        # utStop := close > utStop[1] ? math.max(utStop[1], close - utFactor * atr) : math.min(utStop[1], close + utFactor * atr)
-        if close.iloc[i] > ut_stop[i-1]:
-            ut_stop[i] = max(ut_stop[i-1], close.iloc[i] - factor * atr.iloc[i])
-        else:
-            ut_stop[i] = min(ut_stop[i-1], close.iloc[i] + factor * atr.iloc[i])
-        
-        # UT Bull状态: close > utStop
-        ut_bull[i] = close.iloc[i] > ut_stop[i]
-    
-    return pd.Series(ut_stop, index=close.index), pd.Series(ut_bull, index=close.index)
+if 'scan_results' not in st.session_state:
+    st.session_state.scan_results = []
+if 'scan_count' not in st.session_state:
+    st.session_state.scan_count = 0
 
 # ================= 数据获取 =================
-@st.cache_data(ttl=10)  # 10秒缓存，更实时
+@st.cache_data(ttl=30)
 def fetch_ohlcv(symbol):
+    """从OKX获取数据"""
+    exchange = ccxt.okx({
+        'enableRateLimit': True,
+        'options': {'defaultType': 'spot'}
+    })
     try:
-        exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=100)
+        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -114,170 +95,317 @@ def fetch_ohlcv(symbol):
         st.error(f"获取{symbol}失败: {e}")
         return None
 
-# ================= 只分析BTC =================
-def analyze_btc():
-    """专门分析BTC，显示详细调试信息"""
+# ================= UT Bot精确实现 =================
+def calculate_ut_bot(high, low, close, factor=1.0, atr_length=10):
+    """完全匹配Pine Script的UT Bot实现"""
+    atr = pta.atr(high=high, low=low, close=close, length=atr_length)
     
-    # 获取BTC数据
-    df = fetch_ohlcv('BTC/USDT')
-    if df is None or len(df) < 30:
-        st.error("无法获取BTC数据")
-        return
+    length = len(close)
+    ut_stop = np.zeros(length)
+    ut_stop[0] = close.iloc[0] - factor * atr.iloc[0]
     
-    # 计算UT Bot
-    ut_stop, ut_bull = calculate_ut_bot_exact(
-        df['high'], df['low'], df['close'], 
-        ut_factor, ut_atr_len
+    for i in range(1, length):
+        if close.iloc[i] > ut_stop[i-1]:
+            ut_stop[i] = max(ut_stop[i-1], close.iloc[i] - factor * atr.iloc[i])
+        else:
+            ut_stop[i] = min(ut_stop[i-1], close.iloc[i] + factor * atr.iloc[i])
+    
+    return pd.Series(ut_stop, index=close.index)
+
+# ================= 计算所有指标 =================
+def calculate_all_indicators(df):
+    """计算所有Pine Script指标"""
+    close = df['close']
+    high = df['high']
+    low = df['low']
+    volume = df['volume']
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 1. EMA
+    #━━━━━━━━━━━━━━━━━━━━━━
+    ema10 = pta.ema(close, length=10)
+    ema20 = pta.ema(close, length=20)
+    ema50 = pta.ema(close, length=50)
+    ema200 = pta.ema(close, length=200)
+    
+    ema10_gt_20 = ema10.iloc[-1] > ema20.iloc[-1]
+    close_gt_ema50 = close.iloc[-1] > ema50.iloc[-1]
+    close_gt_ema200 = close.iloc[-1] > ema200.iloc[-1]
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 2. SuperTrend
+    #━━━━━━━━━━━━━━━━━━━━━━
+    st = pta.supertrend(
+        high=high, 
+        low=low, 
+        close=close, 
+        length=st_atr_len, 
+        multiplier=st_multiplier
     )
     
-    # 当前值
-    current_close = df['close'].iloc[-1]
-    current_stop = ut_stop.iloc[-1]
-    current_bull = ut_bull.iloc[-1]
+    # 找到SuperTrend列
+    st_col = None
+    for col in st.columns:
+        if 'SUPERT_' in col:
+            st_col = col
+            break
     
-    # 最后10根K线数据
-    last_10 = pd.DataFrame({
-        '时间': df['timestamp'].tail(10).dt.strftime('%H:%M:%S'),
-        '收盘价': df['close'].tail(10).round(2),
-        'UT止损': ut_stop.tail(10).round(2),
-        '价格>止损': ut_bull.tail(10),
-        'UT状态': ut_bull.tail(10).map({True: 'BUY', False: 'SELL'})
-    })
+    super_trend = st[st_col] if st_col else pd.Series(index=close.index)
+    st_bull = close.iloc[-1] > super_trend.iloc[-1] if st_col else False
     
-    # 保存到session_state
-    st.session_state.btc_data = {
-        'close': current_close,
-        'stop': current_stop,
-        'bull': current_bull,
-        'last_10': last_10,
-        'df': df,
-        'ut_stop': ut_stop,
-        'ut_bull': ut_bull
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 3. UT Bot (关键修复)
+    #━━━━━━━━━━━━━━━━━━━━━━
+    ut_stop = calculate_ut_bot(high, low, close, ut_factor, ut_atr_len)
+    ut_bull = close.iloc[-1] > ut_stop.iloc[-1]  # 这就是UT Bot行的BUY/SELL
+    
+    # UT Bull变化检测
+    ut_bull_history = close > ut_stop
+    ut_bull_change = ut_bull_history & ~ut_bull_history.shift(1).fillna(False)
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 4. BUY/SELL信号 (图表上的标签)
+    #━━━━━━━━━━━━━━━━━━━━━━
+    buy_signal = ut_bull_change.iloc[-1] and ema10_gt_20
+    sell_signal = (~ut_bull_history).iloc[-1] and ut_bull_history.shift(1).fillna(False).iloc[-1]
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 5. VWAP
+    #━━━━━━━━━━━━━━━━━━━━━━
+    typical = (high + low + close) / 3
+    vwap = (typical * volume).cumsum() / volume.cumsum()
+    close_gt_vwap = close.iloc[-1] > vwap.iloc[-1]
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 6. Today Pivot (简化版)
+    #━━━━━━━━━━━━━━━━━━━━━━
+    last_24h = df.tail(1440)
+    if len(last_24h) > 0:
+        d_high = last_24h['high'].max()
+        d_low = last_24h['low'].min()
+        d_close = last_24h['close'].iloc[-1]
+        today_pivot = (d_high + d_low + d_close) / 3
+    else:
+        today_pivot = close.iloc[-1]
+    
+    close_gt_pivot = close.iloc[-1] > today_pivot
+    
+    # 返回所有指标
+    return {
+        # EMA
+        'ema10_gt_20': ema10_gt_20,
+        'close_gt_ema50': close_gt_ema50,
+        'close_gt_ema200': close_gt_ema200,
+        
+        # SuperTrend
+        'st_bull': st_bull,
+        
+        # UT Bot (核心)
+        'ut_bull': ut_bull,  # 这是UT Bot行的状态
+        'ut_stop': ut_stop.iloc[-1],
+        'ut_bull_history': ut_bull_history,
+        
+        # 买卖信号
+        'buy_signal': buy_signal,
+        'sell_signal': sell_signal,
+        
+        # VWAP
+        'close_gt_vwap': close_gt_vwap,
+        'vwap': vwap.iloc[-1],
+        
+        # Pivot
+        'close_gt_pivot': close_gt_pivot,
+        'today_pivot': today_pivot,
+        
+        # 当前价格
+        'close': close.iloc[-1]
     }
+
+# ================= 发送Telegram =================
+def send_telegram_message(message):
+    if bot and enable_telegram:
+        try:
+            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message))
+        except:
+            pass
+
+# ================= 执行扫描 =================
+def perform_scan():
+    st.session_state.scan_count += 1
+    current_time = datetime.now()
+    
+    st.session_state.scan_results = []
+    buy_signals = []
+    
+    status = st.empty()
+    status.info(f"🔄 第{st.session_state.scan_count}次扫描 {current_time.strftime('%H:%M:%S')}")
+    
+    progress_bar = st.progress(0)
+    
+    for i, symbol in enumerate(SYMBOLS):
+        df = fetch_ohlcv(symbol)
+        if df is not None and len(df) >= 50:
+            ind = calculate_all_indicators(df)
+            
+            # 全绿条件
+            all_green = all([
+                ind['ema10_gt_20'],
+                ind['st_bull'],
+                ind['ut_bull'],  # 注意：这里是ut_bull，不是buy_signal
+                ind['close_gt_vwap']
+            ])
+            
+            result = {
+                '交易对': symbol,
+                '时间': current_time.strftime('%H:%M:%S'),
+                '价格': f"${ind['close']:,.2f}" if 'BTC' in symbol else f"${ind['close']:.4f}",
+                
+                # EMA
+                'EMA10>20': '✅' if ind['ema10_gt_20'] else '❌',
+                'EMA50': '✅' if ind['close_gt_ema50'] else '❌',
+                'EMA200': '✅' if ind['close_gt_ema200'] else '❌',
+                
+                # SuperTrend
+                'SuperTrend': '✅' if ind['st_bull'] else '❌',
+                
+                # UT Bot - 这就是图表上显示BUY/SELL的那一行
+                'UT Bot': 'BUY' if ind['ut_bull'] else 'SELL',
+                
+                # 实际买卖信号
+                'UT信号': 'BUY🔥' if ind['buy_signal'] else ('SELL⚠️' if ind['sell_signal'] else '➖'),
+                
+                # VWAP & Pivot
+                'VWAP': '✅' if ind['close_gt_vwap'] else '❌',
+                'Pivot': '✅' if ind['close_gt_pivot'] else '❌',
+                
+                # 全绿信号
+                '全绿': '✅' if all_green else '❌',
+                
+                # 调试信息
+                'UT止损': f"${ind['ut_stop']:,.2f}",
+                '价格>止损': '✅' if ind['ut_bull'] else '❌'
+            }
+            
+            st.session_state.scan_results.append(result)
+            
+            # 记录BUY信号
+            if ind['buy_signal']:
+                buy_signals.append((symbol, ind['close']))
+        
+        progress_bar.progress((i + 1) / len(SYMBOLS))
+    
+    progress_bar.empty()
+    status.success(f"✅ 扫描完成！{len(st.session_state.scan_results)}个币种")
+    
+    # 发送Telegram通知
+    for symbol, price in buy_signals:
+        msg = f"🚨 BUY信号 {symbol}\n价格: {price:.4f}\n时间: {current_time.strftime('%H:%M:%S')}"
+        send_telegram_message(msg)
+        st.balloons()
 
 # ================= 主循环 =================
 current_time = time.time()
 if st.session_state.manual_scan or (current_time - st.session_state.last_scan_time > scan_interval):
-    analyze_btc()
+    perform_scan()
     st.session_state.last_scan_time = current_time
     st.session_state.manual_scan = False
 
 # ================= 显示结果 =================
-st.subheader("🎯 BTC/USDT UT Bot状态")
-
-if st.session_state.btc_data:
-    data = st.session_state.btc_data
+if st.session_state.scan_results:
+    st.subheader("📊 扫描结果")
     
-    # 创建三列显示关键指标
-    col1, col2, col3, col4 = st.columns(4)
+    # 转换为DataFrame
+    df_results = pd.DataFrame(st.session_state.scan_results)
+    
+    # 定义颜色函数
+    def highlight_rows(row):
+        styles = [''] * len(row)
+        
+        # 全绿行用绿色
+        if row['全绿'] == '✅':
+            return ['background-color: #90EE90'] * len(row)
+        
+        # UT Bot BUY用浅绿色
+        if row['UT Bot'] == 'BUY':
+            return ['background-color: #e8f5e8'] * len(row)
+        
+        # BUY信号用黄色
+        if row['UT信号'] == 'BUY🔥':
+            return ['background-color: #FFE55C'] * len(row)
+        
+        return styles
+    
+    # 应用样式
+    styled_df = df_results.style.apply(highlight_rows, axis=1)
+    
+    # 显示表格
+    st.dataframe(styled_df, use_container_width=True, height=600)
+    
+    # 统计
+    st.subheader("📈 统计")
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     
     with col1:
-        st.metric(
-            "当前价格", 
-            f"${data['close']:,.2f}",
-            delta=None
-        )
-    
+        st.metric("总币种", len(df_results))
     with col2:
-        st.metric(
-            "UT止损线", 
-            f"${data['stop']:,.2f}",
-            delta=None
-        )
-    
+        st.metric("UT BUY状态", len(df_results[df_results['UT Bot'] == 'BUY']))
     with col3:
-        diff = ((data['close'] - data['stop']) / data['stop'] * 100)
-        st.metric(
-            "偏离", 
-            f"{diff:+.2f}%",
-            delta=None
-        )
-    
+        st.metric("UT SELL状态", len(df_results[df_results['UT Bot'] == 'SELL']))
     with col4:
-        # 这里就是关键 - 根据ut_bull显示BUY/SELL
-        status = "BUY ✅" if data['bull'] else "SELL ❌"
-        status_color = "green" if data['bull'] else "red"
-        st.markdown(
-            f"<h3 style='color: {status_color}; text-align: center;'>UT状态: {status}</h3>", 
-            unsafe_allow_html=True
-        )
-    
-    # 显示最后10根K线的详细数据
-    st.subheader("📊 最后10根K线分析")
-    
-    # 添加高亮
-    def highlight_buy(row):
-        if row['UT状态'] == 'BUY':
-            return ['background-color: #90EE90'] * len(row)
-        return [''] * len(row)
-    
-    styled_df = data['last_10'].style.apply(highlight_buy, axis=1)
-    st.dataframe(styled_df, use_container_width=True)
-    
-    # 绘制图表
-    st.subheader("📈 价格与UT止损线")
-    
-    # 准备图表数据
-    chart_df = pd.DataFrame({
-        '时间': data['df']['timestamp'].tail(30).dt.strftime('%H:%M'),
-        '价格': data['df']['close'].tail(30),
-        'UT止损': data['ut_stop'].tail(30)
-    }).set_index('时间')
-    
-    st.line_chart(chart_df)
-    
-    # 调试信息
-    with st.expander("🔍 调试信息"):
-        st.write("### 当前计算详情")
-        st.write(f"- 最后价格: {data['close']:.2f}")
-        st.write(f"- 最后止损: {data['stop']:.2f}")
-        st.write(f"- 价格 > 止损: {data['bull']}")
-        st.write(f"- 偏离百分比: {((data['close'] - data['stop']) / data['stop'] * 100):.4f}%")
-        
-        # 显示最后几根K线的原始数据
-        st.write("### 最后5根K线原始数据")
-        last_5_raw = data['df'][['timestamp', 'open', 'high', 'low', 'close']].tail(5)
-        last_5_raw['timestamp'] = last_5_raw['timestamp'].dt.strftime('%H:%M:%S')
-        st.dataframe(last_5_raw)
-        
-        st.write("### UT Stop计算过程")
-        calc_data = []
-        for i in range(-5, 0):
-            idx = data['df'].index[i]
-            calc_data.append({
-                '位置': i,
-                'close': data['df']['close'].iloc[i],
-                'ut_stop': data['ut_stop'].iloc[i],
-                'bull': data['ut_bull'].iloc[i]
-            })
-        st.dataframe(pd.DataFrame(calc_data))
+        st.metric("BUY信号", len(df_results[df_results['UT信号'] == 'BUY🔥']))
+    with col5:
+        st.metric("全绿信号", len(df_results[df_results['全绿'] == '✅']))
+    with col6:
+        st.metric("扫描次数", st.session_state.scan_count)
 
-else:
-    st.info("等待首次扫描...")
+# ================= 调试信息 =================
+with st.expander("🔍 查看BTC详细调试"):
+    btc_data = next((r for r in st.session_state.scan_results if r['交易对'] == 'BTC/USDT'), None)
+    if btc_data:
+        st.write("### BTC/USDT当前状态")
+        st.json({
+            '价格': btc_data['价格'],
+            'UT Bot状态': btc_data['UT Bot'],
+            'UT信号': btc_data['UT信号'],
+            '价格>止损': btc_data['价格>止损'],
+            'UT止损': btc_data['UT止损'],
+            '全绿': btc_data['全绿']
+        })
+        
+        # 判断逻辑说明
+        st.write("### UT Bot判断逻辑")
+        st.write("图表UT Bot行显示规则：")
+        st.write("- **BUY**: 价格 > UT止损线")
+        st.write("- **SELL**: 价格 < UT止损线")
+        
+        # 从BTC数据中提取数值
+        price_str = btc_data['价格'].replace('$', '').replace(',', '')
+        stop_str = btc_data['UT止损'].replace('$', '').replace(',', '')
+        
+        if price_str and stop_str:
+            price = float(price_str)
+            stop = float(stop_str)
+            st.write(f"当前价格: {price:,.2f}")
+            st.write(f"UT止损: {stop:,.2f}")
+            st.write(f"价格 > 止损: {price > stop}")
+            st.write(f"所以UT Bot显示: **{'BUY' if price > stop else 'SELL'}**")
 
-# ================= 手动测试 =================
+# ================= 使用说明 =================
 st.markdown("---")
-st.subheader("🧪 手动测试")
+st.markdown("""
+### 📝 指标说明（完全匹配Pine Script）
 
-col1, col2 = st.columns(2)
+| 列名 | 含义 | 对应Pine Script |
+|------|------|-----------------|
+| **UT Bot** | UT多空状态 | `f_ut_row(5, "UT Bot", utBull)` - 显示BUY/SELL |
+| **UT信号** | 实际买卖信号 | 图表上的BUY/SELL标签 |
+| **全绿** | 所有条件满足 | EMA10>20 + SuperTrend多头 + UT多头 + VWAP |
 
-with col1:
-    test_price = st.number_input("测试价格", value=69000.0, step=10.0)
-    test_stop = st.number_input("测试止损", value=68950.0, step=10.0)
-    
-    if st.button("测试UT状态"):
-        test_bull = test_price > test_stop
-        st.write(f"测试结果: {'BUY' if test_bull else 'SELL'}")
-        st.write(f"价格 > 止损: {test_bull}")
-
-with col2:
-    st.write("### 判断逻辑")
-    st.write("UT Bot行显示:")
-    st.write("- **BUY**: 价格 > UT止损线")
-    st.write("- **SELL**: 价格 < UT止损线")
-    st.write("")
-    st.write("所以如果价格是69,058，止损是69,006：")
-    st.write("69,058 > 69,006 = **BUY** ✅")
+### 🎯 当前重点
+- **UT Bot列**应该和你的图表完全一致
+- 如果BTC价格69,058 > UT止损，就显示BUY
+- 使用OKX数据源，匹配你的设置
+""")
 
 # ================= 自动刷新 =================
 time.sleep(2)

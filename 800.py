@@ -16,12 +16,12 @@ SYMBOLS = [
     'BTC/USDT',
     'ETH/USDT',
     'SOL/USDT',
-    'ADA/USDT',
+    'AAVE/USDT',
     'XRP/USDT',
-    'DOT/USDT',
-    'LINK/USDT',
-    'AVAX/USDT',
-    'TRX/USDT',
+    'DOGE/USDT',
+    'TAO/USDT',
+    'RENDER/USDT',
+    'SUI/USDT',
 ]
 
 TELEGRAM_TOKEN = 'YOUR_BOT_TOKEN_HERE'   # 替换你的
@@ -131,3 +131,4 @@ if st.button("立即扫描一次（测试）"):
 
 st.caption("页面自动刷新扫描。日志显示每个币状态。")
 st.caption("如果日志无任何币信息，检查 Manage app logs (ccxt拉数据问题)。")
+

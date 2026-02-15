@@ -1,226 +1,75 @@
 import streamlit as st
+import ccxt
 import pandas as pd
-import numpy as np
-import requests
-from datetime import datetime
+import ta  # pip install ta
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import telegram  # from python-telegram-bot
+from datetime import datetime
 
-# ==================== 页面配置 ====================
-st.set_page_config(
-    page_title="BMW代理 · 币安镜像版",
-    page_icon="🔄",
-    layout="wide"
-)
+# 配置
+exchange = ccxt.okx({'enableRateLimit': True})  # 或 binance
+symbols = ['HYPE/USDT', 'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'ADA/USDT', 
+           'XRP/USDT', 'DOT/USDT', 'LINK/USDT', 'AVAX/USDT', 'TRX/USDT']  # 你的10个
 
-# ==================== 核心配置 ====================
-BMW_API = "https://www.bmwweb.academy/api/v3"  # 你指定的域名
-TIMEFRAME = '5m'
-LOOKBACK = 20
-PRICE_THRESHOLD = 0.5
-VOLUME_THRESHOLD = 2.0
-TOP_N = 80
+timeframe = '15m'  # 15分钟K
+telegram_token = 'YOUR_BOT_TOKEN'  # 从BotFather获取
+chat_id = 'YOUR_CHAT_ID'  # @userinfobot查
+bot = telegram.Bot(token=telegram_token)
 
-# 真实主流币种（与版本A完全一致，保证对比公平）
-REAL_TOP_COINS = [
-    'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT',
-    'DOGEUSDT', 'ADAUSDT', 'AVAXUSDT', 'LINKUSDT', 'DOTUSDT',
-    'MATICUSDT', 'SHIBUSDT', 'TRXUSDT', 'UNIUSDT', 'ATOMUSDT',
-    'ETCUSDT', 'LTCUSDT', 'BCHUSDT', 'ALGOUSDT', 'VETUSDT',
-    'FILUSDT', 'ICPUSDT', 'EOSUSDT', 'THETAUSDT', 'XLMUSDT',
-    'AAVEUSDT', 'MKRUSDT', 'SUSHIUSDT', 'SNXUSDT', 'COMPUSDT',
-    'CRVUSDT', '1INCHUSDT', 'ENJUSDT', 'MANAUSDT', 'SANDUSDT',
-    'AXSUSDT', 'GALAUSDT', 'APEUSDT', 'CHZUSDT', 'NEARUSDT',
-    'FTMUSDT', 'EGLDUSDT', 'FLOWUSDT', 'KSMUSDT', 'ZECUSDT',
-    'DASHUSDT', 'WAVESUSDT', 'OMGUSDT', 'ZILUSDT', 'BATUSDT',
-    'ZRXUSDT', 'IOSTUSDT', 'IOTAUSDT', 'ONTUSDT', 'QTUMUSDT',
-    'KAVAUSDT', 'RUNEUSDT', 'ALPHAUSDT', 'TLMUSDT', 'C98USDT',
-    'KLAYUSDT', 'STXUSDT', 'ARUSDT', 'ENSUSDT', 'PEOPLEUSDT',
-    'LDOUSDT', 'OPUSDT', 'ARBUSDT', 'APTUSDT', 'SUIUSDT',
-    'SEIUSDT', 'TIAUSDT', 'BLURUSDT', 'JTOUSDT', 'PYTHUSDT',
-    'JUPUSDT', 'WIFUSDT', 'ONDOUSDT', 'STRKUSDT', 'PENDLEUSDT',
-    'ENAUSDT', 'ETHFIUSDT', 'NOTUSDT', 'ZROUSDT', 'POLUSDT'
-]
+def fetch_ohlcv(symbol):
+    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=200)  # 够算EMA200
+    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
-# ==================== 初始化状态 ====================
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = time.time()
-    st.session_state.signals_history = []
-    st.session_state.auto_refresh = True
-    st.session_state.bmw_status = "unknown"
-
-# ==================== 数据获取 ====================
-
-@st.cache_data(ttl=3600)
-def get_top_pairs():
-    """直接返回硬编码的主流币种"""
-    return REAL_TOP_COINS[:TOP_N]
-
-def test_bmw_endpoint():
-    """测试BMW代理是否可用"""
-    try:
-        url = f"{BMW_API}/ping"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            st.session_state.bmw_status = "online"
-            return True
-        else:
-            st.session_state.bmw_status = "error"
-            return False
-    except:
-        st.session_state.bmw_status = "offline"
-        return False
-
-def fetch_klines(symbol):
-    """通过BMW代理获取K线数据"""
-    try:
-        url = f"{BMW_API}/klines"
-        params = {
-            'symbol': symbol,
-            'interval': TIMEFRAME,
-            'limit': LOOKBACK + 1
-        }
-        
-        response = requests.get(url, params=params, timeout=15)
-        
-        # 检查响应
-        if response.status_code != 200:
-            return None
-            
-        data = response.json()
-        
-        if not data or isinstance(data, dict) and 'code' in data:
-            return None
-        
-        klines = []
-        for k in data:
-            klines.append({
-                'time': datetime.fromtimestamp(k[0] / 1000),
-                'open': float(k[1]),
-                'high': float(k[2]),
-                'low': float(k[3]),
-                'close': float(k[4]),
-                'volume': float(k[5])
-            })
-        
-        return pd.DataFrame(klines)
+def check_conditions(df):
+    close = df['close']
     
-    except Exception as e:
-        return None
-
-def check_signal(symbol, df):
-    """检查异动信号"""
-    if df is None or len(df) < LOOKBACK:
-        return None
+    # EMA5 > EMA13
+    ema5 = ta.trend.ema_indicator(close, window=5)
+    ema13 = ta.trend.ema_indicator(close, window=13)
+    cond_ema = ema5.iloc[-1] > ema13.iloc[-1]
     
-    try:
-        current = df.iloc[-1]
-        prev = df.iloc[-2]
-        
-        pct_change = (current['close'] - prev['close']) / prev['close'] * 100
-        current_volume = current['volume']
-        avg_volume = df['volume'].iloc[:-1].mean()
-        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
-        
-        if pct_change >= PRICE_THRESHOLD and volume_ratio >= VOLUME_THRESHOLD:
-            return {
-                '时间': datetime.now().strftime('%H:%M:%S'),
-                '币种': symbol.replace('USDT', ''),
-                '价格': current['close'],
-                '涨幅%': round(pct_change, 2),
-                '量比': round(volume_ratio, 2),
-                '成交量': f"{current_volume:.0f}",
-                '状态': '🚨 异动'
-            }
-    except:
-        pass
-    return None
-
-# ==================== 主界面 ====================
-
-st.title("🔄 版本B：BMW代理镜像版")
-st.caption(f"数据源: {BMW_API}")
-
-# 侧边栏
-with st.sidebar:
-    st.title("⚙️ 版本B配置")
+    # SuperTrend Up (用ta库标准实现，factor=3, period=10)
+    supertrend = ta.trend.supertrend(high=df['high'], low=df['low'], close=close, period=10, multiplier=3)
+    cond_st = close.iloc[-1] > supertrend['SUPERT_10_3.0'].iloc[-1]  # 价格 > SuperTrend线
     
-    # 测试连接
-    if st.button("🔍 测试BMW代理连接"):
-        with st.spinner("测试中..."):
-            if test_bmw_endpoint():
-                st.success("✅ BMW代理连接正常")
-            else:
-                st.error("❌ BMW代理无法连接")
+    # UT Bot BUY (简化翻转版，类似你的Pine逻辑)
+    atr = ta.volatility.atr(high=df['high'], low=df['low'], close=close, window=10)
+    factor = 1.0
+    ut_stop = close - factor * atr  # 简化up trail
+    # 更准需var逻辑，但pandas难模拟var，用最近翻转近似
+    ut_bull = close > ut_stop
+    cond_ut_buy = ut_bull.iloc[-1] and not ut_bull.iloc[-2]  # 翻转到多
     
-    # 显示状态
-    status_map = {
-        "online": "✅ 在线",
-        "offline": "❌ 离线",
-        "error": "⚠️ 响应异常",
-        "unknown": "⏳ 未测试"
+    # VWAP (累计vwap，ta有vwap，但需volume；简化hlc3 vwap)
+    typical = (df['high'] + df['low'] + close) / 3
+    vwap = (typical * df['volume']).cumsum() / df['volume'].cumsum()
+    cond_vwap = close.iloc[-1] > vwap.iloc[-1]
+    
+    all_green = cond_ema and cond_st and cond_ut_buy and cond_vwap
+    return all_green, {
+        'EMA5>13': cond_ema,
+        'ST Up': cond_st,
+        'UT BUY': cond_ut_buy,
+        'VWAP YES': cond_vwap
     }
-    st.info(f"代理状态: {status_map.get(st.session_state.bmw_status, '未知')}")
-    
-    if st.button("🔄 清除缓存"):
-        st.cache_data.clear()
-        st.rerun()
 
-# 先测试连接
-if st.session_state.bmw_status == "unknown":
-    test_bmw_endpoint()
-
-# 获取币种列表
-pairs = get_top_pairs()
-
-# 并发扫描
-if st.session_state.bmw_status in ["online", "unknown"]:
-    with st.spinner("正在通过BMW代理扫描..."):
-        results = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_symbol = {executor.submit(fetch_klines, symbol): symbol for symbol in pairs}
+while True:
+    for symbol in symbols:
+        try:
+            df = fetch_ohlcv(symbol)
+            if len(df) < 100: continue  # 数据不够跳过
             
-            for future in as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    df = future.result(timeout=15)
-                    signal = check_signal(symbol, df)
-                    if signal:
-                        results.append(signal)
-                except:
-                    continue
-else:
-    st.error("❌ BMW代理无法连接，请测试连接状态")
-    results = []
-
-# 显示结果
-st.subheader("🎯 当前5分钟异动币种")
-
-if results:
-    df_result = pd.DataFrame(results)
-    st.dataframe(df_result, use_container_width=True, hide_index=True)
-    st.success(f"✅ 发现 {len(results)} 个异动币种")
+            triggered, details = check_conditions(df)
+            if triggered:
+                msg = f"全4绿警报！ {symbol} @ {timeframe}\n" + \
+                      f"价格: {df['close'].iloc[-1]:.2f}\n" + \
+                      "\n".join([f"{k}: {'YES' if v else 'NO'}" for k,v in details.items()])
+                bot.send_message(chat_id=chat_id, text=msg)
+                print(f"警报发送: {symbol}")
+        except Exception as e:
+            print(f"错误 {symbol}: {e}")
     
-    # 更新历史记录
-    for signal in results:
-        st.session_state.signals_history.insert(0, signal)
-        if len(st.session_state.signals_history) > 100:
-            st.session_state.signals_history = st.session_state.signals_history[:100]
-else:
-    if st.session_state.bmw_status == "online":
-        st.info("⏳ 当前周期暂无符合条件的异动币种")
-    else:
-        st.warning("⏳ 代理连接异常，无法获取数据")
+    time.sleep(60)  # 每分钟扫描一次（调整为15min收盘后更好用schedule）
 
-# 显示历史记录
-st.markdown("---")
-st.subheader("📜 历史记录")
-
-if st.session_state.signals_history:
-    history_df = pd.DataFrame(st.session_state.signals_history[:20])
-    st.dataframe(history_df, use_container_width=True, hide_index=True)
-else:
-    st.info("暂无历史记录")
-
-# 状态栏
-st.caption(f"最后扫描: {datetime.now().strftime('%H:%M:%S')} | 代理状态: {st.session_state.bmw_status}")

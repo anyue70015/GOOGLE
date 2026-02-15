@@ -3,15 +3,15 @@ import ccxt
 import pandas as pd
 import pandas_ta as pta
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Bot
 import asyncio
 import numpy as np
 
 # ================= 配置 =================
 EXCHANGE_NAME = 'okx'
-TIMEFRAME = '1m'  # 改为1分钟
-SCAN_INTERVAL = 30  # 30秒扫描一次
+TIMEFRAME = '1m'
+SCAN_INTERVAL = 30
 
 SYMBOLS = [
     'HYPE/USDT',
@@ -26,7 +26,7 @@ SYMBOLS = [
     'SUI/USDT',
 ]
 
-# 使用secrets管理敏感信息
+# Telegram配置
 TELEGRAM_TOKEN = st.secrets.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 TELEGRAM_CHAT_ID = st.secrets.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID_HERE")
 
@@ -38,498 +38,325 @@ ST_MULTIPLIER = 3.0
 
 # ================= 初始化 =================
 def init_bot():
-    """初始化Telegram bot"""
     if TELEGRAM_TOKEN and TELEGRAM_TOKEN != "YOUR_BOT_TOKEN_HERE":
         try:
             return Bot(token=TELEGRAM_TOKEN)
-        except Exception as e:
-            st.warning(f"Telegram bot初始化失败: {e}")
+        except:
             return None
     return None
 
 bot = init_bot()
 
 # ================= UI =================
-st.set_page_config(
-    page_title="1min 扫描器 - 实时UT信号", 
-    layout="wide",
-    page_icon="📊"
-)
+st.set_page_config(page_title="1min UT Bot调试器", layout="wide")
+st.title("🔍 UT Bot信号调试器")
+st.caption("直接对比：图表显示BUY vs 代码显示SELL")
 
-st.title("📊 1分钟多币种扫描器 (实时UT信号)")
-st.caption("指标条件: EMA10 > EMA20 + SuperTrend多头 + UT Bot多头 + 价格 > VWAP")
-
-# 侧边栏配置
+# 侧边栏
 with st.sidebar:
-    st.header("⚙️ 扫描设置")
-    scan_interval = st.number_input("扫描间隔(秒)", min_value=5, max_value=60, value=SCAN_INTERVAL)
-    
-    st.header("📈 指标参数")
-    ut_factor = st.slider("UT Factor", 0.5, 3.0, UT_FACTOR, 0.1)
-    ut_atr_len = st.slider("UT ATR长度", 5, 20, UT_ATR_LEN)
-    st_atr_len = st.slider("SuperTrend ATR长度", 5, 20, ST_ATR_LEN)
-    st_multiplier = st.slider("SuperTrend乘数", 1.0, 5.0, ST_MULTIPLIER, 0.5)
-    
-    st.header("🔔 通知设置")
-    enable_telegram = st.checkbox("启用Telegram通知", value=bot is not None)
-    
-    # 调试选项
-    st.header("🔧 显示选项")
-    show_ut_details = st.checkbox("显示UT详细信息", value=True)
-    show_all_logs = st.checkbox("显示所有日志", value=False)
+    st.header("⚙️ 参数")
+    scan_interval = st.number_input("扫描间隔(秒)", 5, 60, SCAN_INTERVAL)
+    show_all = st.checkbox("显示所有币种", value=True)
+    debug_mode = st.checkbox("调试模式", value=True)
     
     if st.button("🔄 立即扫描"):
         st.session_state.manual_scan = True
 
-# session_state初始化
+# 初始化session_state
 if 'last_scan_time' not in st.session_state:
     st.session_state.last_scan_time = 0
-if 'scan_count' not in st.session_state:
-    st.session_state.scan_count = 0
 if 'manual_scan' not in st.session_state:
     st.session_state.manual_scan = False
-if 'scan_results' not in st.session_state:
-    st.session_state.scan_results = []
-if 'log_messages' not in st.session_state:
-    st.session_state.log_messages = []
+if 'scan_data' not in st.session_state:
+    st.session_state.scan_data = {}
 
-# 日志显示区域
-log_expander = st.expander("📋 扫描日志", expanded=True)
-status = st.empty()
-stats_col1, stats_col2, stats_col3, stats_col4, stats_col5 = st.columns(5)
+# ================= UT Bot多种实现对比 =================
+def ut_bot_simplified(high, low, close, factor=1.0, atr_length=10):
+    """
+    简化版UT Bot - 最基础的实现
+    只比较价格和止损线
+    """
+    atr = pta.atr(high=high, low=low, close=close, length=atr_length)
+    stop_line = close - factor * atr
+    return stop_line
 
-# ================= UT Bot 正确实现 =================
-def calculate_ut_bot(high, low, close, factor=1.0, atr_length=10):
+def ut_bot_tradingview_style(high, low, close, factor=1.0, atr_length=10):
     """
-    正确实现 UT Bot 算法
-    返回: (stop_line, trend, signal, signal_type)
-    - stop_line: 止损线值
-    - trend: 1=多头, -1=空头
-    - signal: 1=买入信号, -1=卖出信号, 0=无信号
-    - signal_type: 信号类型文字描述
+    模拟TradingView的UT Bot算法
     """
-    # 计算ATR
     atr = pta.atr(high=high, low=low, close=close, length=atr_length)
     
-    # 初始化数组
     length = len(close)
     stop = np.zeros(length)
-    trend = np.ones(length)  # 1=多头, -1=空头
+    trend = np.zeros(length)
     signal = np.zeros(length)
     
     for i in range(1, length):
-        # 计算基础止损线
-        if i == 1:
-            stop[i] = close.iloc[i] - factor * atr.iloc[i]
+        # 计算止损线
+        if close.iloc[i] > stop[i-1]:
+            stop[i] = max(stop[i-1], close.iloc[i] - factor * atr.iloc[i])
         else:
-            # 根据价格相对于上一根止损线的位置计算新的止损线
-            if close.iloc[i] > stop[i-1]:
-                # 上升趋势中，止损线上移
-                stop[i] = max(stop[i-1], close.iloc[i] - factor * atr.iloc[i])
-            else:
-                # 下降趋势中，止损线下移
-                stop[i] = min(stop[i-1], close.iloc[i] + factor * atr.iloc[i])
+            stop[i] = min(stop[i-1], close.iloc[i] + factor * atr.iloc[i])
         
-        # 确定趋势和信号
-        if close.iloc[i] > stop[i] and close.iloc[i-1] <= stop[i-1]:
-            # 从空头转为多头 - 买入信号
+        # 确定趋势
+        if close.iloc[i] > stop[i]:
             trend[i] = 1
-            signal[i] = 1
-        elif close.iloc[i] < stop[i] and close.iloc[i-1] >= stop[i-1]:
-            # 从多头转为空头 - 卖出信号
-            trend[i] = -1
-            signal[i] = -1
         else:
-            # 趋势延续
-            trend[i] = trend[i-1]
-            signal[i] = 0
+            trend[i] = -1
+        
+        # 信号：趋势变化时
+        if i > 1 and trend[i] != trend[i-1]:
+            signal[i] = trend[i]  # 1=买入, -1=卖出
     
-    # 转换为Series
-    stop_series = pd.Series(stop, index=close.index)
-    trend_series = pd.Series(trend, index=close.index)
-    signal_series = pd.Series(signal, index=close.index)
-    
-    return stop_series, trend_series, signal_series
+    return pd.Series(stop, index=close.index), pd.Series(trend, index=close.index), pd.Series(signal, index=close.index)
 
-def get_ut_bot_status(high, low, close, factor=UT_FACTOR, atr_length=UT_ATR_LEN):
+def ut_bot_alternative(high, low, close, factor=1.0, atr_length=10):
     """
-    获取UT Bot完整状态
-    返回: (is_bullish, signal_type, details)
+    另一种常见实现
     """
-    stop_line, trend, signal = calculate_ut_bot(high, low, close, factor, atr_length)
+    atr = pta.atr(high=high, low=low, close=close, length=atr_length)
     
-    # 获取最新的值
-    current_close = close.iloc[-1]
-    current_stop = stop_line.iloc[-1]
-    current_trend = trend.iloc[-1]
-    current_signal = signal.iloc[-1]
+    length = len(close)
+    stop = np.zeros(length)
+    trend = np.ones(length)
     
-    # 信号类型文字描述
-    if current_signal == 1:
-        signal_type = "BUY 🔥"
-    elif current_signal == -1:
-        signal_type = "SELL ⚠️"
-    else:
-        signal_type = "NONE ➖"
+    for i in range(1, length):
+        # 基础止损
+        base_stop = close.iloc[i] - factor * atr.iloc[i] if trend[i-1] == 1 else close.iloc[i] + factor * atr.iloc[i]
+        
+        # 平滑止损
+        if close.iloc[i] > stop[i-1]:
+            stop[i] = max(stop[i-1], base_stop)
+        else:
+            stop[i] = min(stop[i-1], base_stop)
+        
+        # 趋势
+        trend[i] = 1 if close.iloc[i] > stop[i] else -1
     
-    # 趋势文字描述
-    trend_type = "BULL 📈" if current_trend == 1 else "BEAR 📉"
+    # 信号：趋势变化点
+    signal = pd.Series(0, index=close.index)
+    signal[trend != pd.Series(trend).shift(1)] = trend
     
-    # 多头判断
-    price_above_stop = current_close > current_stop
-    is_bullish = price_above_stop and current_trend == 1
-    
-    # 详细结果
-    details = {
-        'close': current_close,
-        'stop_line': current_stop,
-        'trend': current_trend,
-        'trend_type': trend_type,
-        'signal': current_signal,
-        'signal_type': signal_type,
-        'price_above_stop': price_above_stop,
-        'is_bullish': is_bullish,
-        'stop_diff': ((current_close - current_stop) / current_stop * 100) if current_stop != 0 else 0
-    }
-    
-    return is_bullish, signal_type, details
+    return pd.Series(stop, index=close.index), pd.Series(trend, index=close.index), signal
 
-# ================= 其他函数 =================
-@st.cache_data(ttl=60, show_spinner=False)  # 1分钟缓存
+# ================= 数据获取 =================
+@st.cache_data(ttl=30)
 def fetch_ohlcv(symbol):
-    """获取OHLCV数据"""
-    exchange = getattr(ccxt, EXCHANGE_NAME)({
-        'enableRateLimit': True,
-        'options': {'defaultType': 'spot'}
-    })
+    exchange = ccxt.okx({'enableRateLimit': True})
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=200)
-        if not ohlcv:
-            return None
-            
+        ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=100)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
-    except Exception as e:
+    except:
         return None
 
-def send_telegram_message(message):
-    """发送Telegram消息"""
-    if bot and enable_telegram:
-        try:
-            asyncio.run(bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message))
-        except Exception as e:
-            st.error(f"Telegram发送失败: {e}")
-
-def add_log(message, level="info"):
-    """添加日志消息"""
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    st.session_state.log_messages.append({
-        'time': timestamp,
-        'message': message,
-        'level': level
-    })
-    if len(st.session_state.log_messages) > 100:
-        st.session_state.log_messages = st.session_state.log_messages[-100:]
-
-def calculate_indicators(df):
-    """计算所有技术指标"""
-    close = df['close']
-    high = df['high']
-    low = df['low']
-    volume = df['volume']
-    
-    # EMA
-    ema10 = pta.ema(close, length=10)
-    ema20 = pta.ema(close, length=20)
-    
-    # SuperTrend
-    st_result = pta.supertrend(
-        high=high, 
-        low=low, 
-        close=close, 
-        length=st_atr_len, 
-        multiplier=st_multiplier
-    )
-    
-    # 查找SuperTrend列
-    st_col = None
-    st_dir_col = None
-    for col in st_result.columns:
-        if 'SUPERT_' in col and str(st_atr_len) in col:
-            st_col = col
-        elif 'SUPERTd_' in col:
-            st_dir_col = col
-    
-    # UT Bot (使用正确实现)
-    ut_bullish, ut_signal, ut_details = get_ut_bot_status(high, low, close, ut_factor, ut_atr_len)
-    
-    # VWAP
-    typical = (high + low + close) / 3
-    vwap = (typical * volume).cumsum() / volume.cumsum()
-    
-    return {
-        'ema10': ema10,
-        'ema20': ema20,
-        'st': st_result,
-        'st_col': st_col,
-        'st_dir_col': st_dir_col,
-        'ut_bullish': ut_bullish,
-        'ut_signal': ut_signal,
-        'ut_details': ut_details,
-        'vwap': vwap
-    }
-
-def check_conditions(symbol, df, indicators):
-    """检查所有条件"""
-    if df is None or len(df) < 50:
+# ================= 分析函数 =================
+def analyze_ut_bot(symbol, df):
+    """全面分析UT Bot"""
+    if df is None or len(df) < 30:
         return None
     
-    close = df['close']
     high = df['high']
     low = df['low']
+    close = df['close']
     
-    # EMA条件
-    cond_ema = False
-    if not indicators['ema10'].isna().iloc[-1] and not indicators['ema20'].isna().iloc[-1]:
-        cond_ema = indicators['ema10'].iloc[-1] > indicators['ema20'].iloc[-1]
+    # 获取最后5根K线
+    last_5 = df.tail(5).copy()
     
-    # SuperTrend条件
-    cond_st = False
-    if indicators['st_col'] and indicators['st_col'] in indicators['st'].columns:
-        cond_st = close.iloc[-1] > indicators['st'][indicators['st_col']].iloc[-1]
-    elif indicators['st_dir_col'] and indicators['st_dir_col'] in indicators['st'].columns:
-        cond_st = indicators['st'][indicators['st_dir_col']].iloc[-1] == 1
+    # 多种UT Bot实现
+    stop1 = ut_bot_simplified(high, low, close)
+    stop2, trend2, signal2 = ut_bot_tradingview_style(high, low, close)
+    stop3, trend3, signal3 = ut_bot_alternative(high, low, close)
     
-    # UT Bot条件
-    cond_ut = indicators['ut_bullish']
+    # 计算ATR
+    atr = pta.atr(high=high, low=low, close=close, length=UT_ATR_LEN)
     
-    # VWAP条件
-    cond_vwap = close.iloc[-1] > indicators['vwap'].iloc[-1]
+    # 当前值
+    current_close = close.iloc[-1]
+    current_atr = atr.iloc[-1]
     
-    # 综合判断
-    all_green = all([cond_ema, cond_st, cond_ut, cond_vwap])
-    
-    return {
+    # 分析结果
+    result = {
         'symbol': symbol,
-        'price': close.iloc[-1],
-        'ema': cond_ema,
-        'st': cond_st,
-        'ut_bullish': cond_ut,
-        'ut_signal': indicators['ut_signal'],
-        'ut_details': indicators['ut_details'],
-        'vwap': cond_vwap,
-        'all_green': all_green,
-        'timestamp': df['timestamp'].iloc[-1]
+        'timestamp': df['timestamp'].iloc[-1],
+        'close': current_close,
+        'atr': current_atr,
+        'stop_simple': stop1.iloc[-1],
+        'stop_tv': stop2.iloc[-1],
+        'stop_alt': stop3.iloc[-1],
+        'trend_tv': 'BULL' if trend2.iloc[-1] == 1 else 'BEAR',
+        'signal_tv': 'BUY' if signal2.iloc[-1] == 1 else ('SELL' if signal2.iloc[-1] == -1 else 'NONE'),
+        'trend_alt': 'BULL' if trend3.iloc[-1] == 1 else 'BEAR',
+        'signal_alt': 'BUY' if signal3.iloc[-1] == 1 else ('SELL' if signal3.iloc[-1] == -1 else 'NONE'),
     }
+    
+    # 添加最后5根K线数据用于调试
+    last_5_data = []
+    for i in range(len(last_5)):
+        idx = last_5.index[i]
+        last_5_data.append({
+            'time': last_5['timestamp'].iloc[i].strftime('%H:%M'),
+            'close': last_5['close'].iloc[i],
+            'stop_tv': stop2.loc[idx],
+            'trend_tv': 'BULL' if trend2.loc[idx] == 1 else 'BEAR',
+            'signal_tv': 'BUY' if signal2.loc[idx] == 1 else ('SELL' if signal2.loc[idx] == -1 else 'NONE'),
+        })
+    
+    result['last_5'] = last_5_data
+    
+    return result
 
+# ================= 主扫描 =================
 def perform_scan():
-    """执行一次扫描"""
-    st.session_state.scan_count += 1
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    current_time = datetime.now()
     
-    status.info(f"🔄 第 {st.session_state.scan_count} 次扫描 ({current_time})")
+    st.session_state.scan_data = {}
     
-    triggered = []
-    results = []
+    status = st.empty()
+    status.info(f"🔄 扫描中... {current_time.strftime('%H:%M:%S')}")
     
-    # 进度条
     progress_bar = st.progress(0)
     
     for i, symbol in enumerate(SYMBOLS):
-        try:
-            # 获取数据
-            df = fetch_ohlcv(symbol)
-            
-            if df is None or len(df) < 50:
-                add_log(f"{symbol}: 数据不足", "warning")
-                progress_bar.progress((i + 1) / len(SYMBOLS))
-                continue
-            
-            # 计算指标
-            indicators = calculate_indicators(df)
-            
-            # 检查条件
-            result = check_conditions(symbol, df, indicators)
-            
+        df = fetch_ohlcv(symbol)
+        if df is not None:
+            result = analyze_ut_bot(symbol, df)
             if result:
-                results.append(result)
-                
-                # 生成日志
-                ut_details = result['ut_details']
-                ut_status = "✅多头" if result['ut_bullish'] else "❌空头"
-                
-                log_msg = (f"{symbol}: EMA={result['ema']} | "
-                          f"ST={result['st']} | "
-                          f"UT={ut_status} | "
-                          f"UT信号={result['ut_signal']} | "
-                          f"VWAP={result['vwap']} | "
-                          f"全绿={result['all_green']}")
-                
-                # 添加UT详细信息
-                if show_ut_details:
-                    log_msg += (f" [价格>止损:{ut_details['price_above_stop']}, "
-                               f"趋势:{ut_details['trend_type']}, "
-                               f"偏离:{ut_details['stop_diff']:.2f}%]")
-                
-                if result['all_green']:
-                    add_log(f"✅ {log_msg}", "success")
-                    triggered.append((symbol, result['price']))
-                elif show_all_logs:
-                    add_log(log_msg, "info")
-                
-                # 特别关注BUY信号
-                if result['ut_signal'] == "BUY 🔥" and not result['all_green']:
-                    add_log(f"⚠️ {symbol} UT BUY信号但其他条件不满足", "warning")
-            
-            progress_bar.progress((i + 1) / len(SYMBOLS))
-            
-        except Exception as e:
-            add_log(f"{symbol} 处理失败: {str(e)}", "error")
+                st.session_state.scan_data[symbol] = result
+        
+        progress_bar.progress((i + 1) / len(SYMBOLS))
     
     progress_bar.empty()
-    
-    # 发送通知 - 只发全绿信号
-    if triggered:
-        for symbol, price in triggered:
-            msg = f"🚨 【全绿信号】 {symbol}\n价格: {price:.4f}\n时间: {current_time}"
-            add_log(f"🎯 触发全绿信号: {symbol}", "success")
-            send_telegram_message(msg)
-        
-        st.balloons()
-    
-    # 统计BUY信号
-    buy_signals = [r for r in results if r['ut_signal'] == "BUY 🔥"]
-    if buy_signals and show_all_logs:
-        add_log(f"📊 UT BUY信号币种: {len(buy_signals)}个", "info")
-        for r in buy_signals:
-            add_log(f"  - {r['symbol']} (价格:{r['price']:.4f})", "info")
-    
-    # 保存结果
-    st.session_state.scan_results = results
-    
-    return triggered
-
-# ================= 显示统计 =================
-with stats_col1:
-    st.metric("扫描次数", st.session_state.scan_count)
-with stats_col2:
-    active_signals = sum(1 for r in st.session_state.scan_results if r['all_green'])
-    st.metric("全绿信号", active_signals)
-with stats_col3:
-    ut_buy_count = sum(1 for r in st.session_state.scan_results if r.get('ut_signal') == "BUY 🔥")
-    st.metric("UT BUY信号", ut_buy_count)
-with stats_col4:
-    ut_bullish_count = sum(1 for r in st.session_state.scan_results if r.get('ut_bullish', False))
-    st.metric("UT多头", ut_bullish_count)
-with stats_col5:
-    st.metric("监控币种", len(SYMBOLS))
+    status.success(f"✅ 扫描完成！{len(st.session_state.scan_data)}个币种")
 
 # ================= 主循环 =================
 current_time = time.time()
-should_scan = False
-
-# 检查是否需要扫描
-if st.session_state.manual_scan:
-    should_scan = True
-    st.session_state.manual_scan = False
-elif current_time - st.session_state.last_scan_time > scan_interval:
-    should_scan = True
-
-if should_scan:
+if st.session_state.manual_scan or (current_time - st.session_state.last_scan_time > scan_interval):
     perform_scan()
     st.session_state.last_scan_time = current_time
+    st.session_state.manual_scan = False
 
-# ================= 显示结果表格 =================
-if st.session_state.scan_results:
-    st.subheader("📊 扫描结果")
+# ================= 显示结果 =================
+if st.session_state.scan_data:
+    st.subheader("📊 UT Bot对比分析")
     
-    # 转换为DataFrame
-    results_df = pd.DataFrame(st.session_state.scan_results)
+    # 创建表格数据
+    table_data = []
+    for symbol, data in st.session_state.scan_data.items():
+        # 判断哪个实现最可能匹配你的图表
+        price_vs_stop_tv = data['close'] > data['stop_tv']
+        price_vs_stop_simple = data['close'] > data['stop_simple']
+        
+        table_data.append({
+            '交易对': symbol,
+            '当前价格': f"{data['close']:.4f}",
+            'ATR': f"{data['atr']:.4f}",
+            'TV趋势': data['trend_tv'],
+            'TV信号': data['signal_tv'],
+            'TV价格>止损': '✅' if price_vs_stop_tv else '❌',
+            'TV止损价': f"{data['stop_tv']:.4f}",
+            '简化版信号': 'BUY' if price_vs_stop_simple else 'SELL',
+            '时间': data['timestamp'].strftime('%H:%M:%S')
+        })
     
-    # 提取UT详细信息
-    if 'ut_details' in results_df.columns:
-        results_df['UT趋势'] = results_df['ut_details'].apply(lambda x: x['trend_type'] if x else 'unknown')
-        results_df['价格>止损'] = results_df['ut_details'].apply(lambda x: x['price_above_stop'] if x else False)
-        results_df['偏离%'] = results_df['ut_details'].apply(lambda x: f"{x['stop_diff']:.2f}%" if x else '0%')
-        results_df = results_df.drop('ut_details', axis=1)
+    df_display = pd.DataFrame(table_data)
+    st.dataframe(df_display, use_container_width=True)
     
-    # 重命名列
-    results_df = results_df.rename(columns={
-        'ut_bullish': 'UT多头',
-        'ut_signal': 'UT信号'
-    })
+    # ================= 详细调试 =================
+    if debug_mode:
+        st.subheader("🔍 详细调试（最后5根K线）")
+        
+        # 选择要调试的币种
+        selected = st.selectbox("选择币种查看详细", list(st.session_state.scan_data.keys()))
+        
+        if selected:
+            data = st.session_state.scan_data[selected]
+            
+            st.write(f"### {selected} 最后5根K线")
+            
+            # 显示K线数据
+            kline_df = pd.DataFrame(data['last_5'])
+            st.dataframe(kline_df, use_container_width=True)
+            
+            # 绘制图表
+            st.write("### 价格和止损线")
+            
+            # 创建图表数据
+            chart_data = []
+            for k in data['last_5']:
+                chart_data.append({
+                    '时间': k['time'],
+                    '收盘价': k['close'],
+                    'TV止损线': k['stop_tv']
+                })
+            
+            chart_df = pd.DataFrame(chart_data)
+            
+            # 使用Streamlit的线图
+            st.line_chart(chart_df.set_index('时间'))
+            
+            # 显示当前状态
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("当前价格", f"{data['close']:.4f}")
+            with col2:
+                st.metric("TV止损线", f"{data['stop_tv']:.4f}")
+            with col3:
+                diff = ((data['close'] - data['stop_tv']) / data['stop_tv'] * 100)
+                st.metric("偏离", f"{diff:.2f}%")
+            
+            # 判断逻辑
+            st.write("### 信号判断逻辑")
+            
+            if data['signal_tv'] == 'BUY':
+                st.success("✅ TV算法: BUY信号")
+            elif data['signal_tv'] == 'SELL':
+                st.error("❌ TV算法: SELL信号")
+            else:
+                st.info("➖ TV算法: 无信号")
+            
+            # 解释为什么显示SELL
+            st.write("### 为什么显示SELL？")
+            
+            reasons = []
+            if not price_vs_stop_tv:
+                reasons.append("❌ 价格低于止损线")
+            if data['trend_tv'] == 'BEAR':
+                reasons.append("❌ 趋势为空头")
+            if data['signal_tv'] == 'SELL':
+                reasons.append("❌ 最新信号是SELL")
+            elif data['signal_tv'] == 'NONE' and data['trend_tv'] == 'BEAR':
+                reasons.append("❌ 处于空头趋势中")
+            
+            if reasons:
+                for r in reasons:
+                    st.write(r)
+            else:
+                st.success("✅ 应该是BUY信号！")
     
-    # 选择要显示的列
-    display_cols = ['symbol', 'price', 'ema', 'st', 'UT多头', 'UT信号', 'UT趋势', '价格>止损', '偏离%', 'vwap', 'all_green', 'timestamp']
-    display_cols = [col for col in display_cols if col in results_df.columns]
+    # ================= 统计 =================
+    st.subheader("📈 统计")
     
-    # 高亮显示
-    def highlight_rows(row):
-        styles = [''] * len(row)
-        if row['all_green']:
-            return ['background-color: #90EE90'] * len(row)
-        elif row.get('UT信号') == "BUY 🔥":
-            return ['background-color: #FFE55C'] * len(row)  # 黄色高亮BUY信号
-        return styles
+    tv_buy = sum(1 for d in st.session_state.scan_data.values() if d['signal_tv'] == 'BUY')
+    tv_sell = sum(1 for d in st.session_state.scan_data.values() if d['signal_tv'] == 'SELL')
+    tv_none = sum(1 for d in st.session_state.scan_data.values() if d['signal_tv'] == 'NONE')
     
-    styled_df = results_df[display_cols].style.apply(highlight_rows, axis=1)
-    
-    st.dataframe(
-        styled_df,
-        use_container_width=True,
-        column_config={
-            'symbol': '交易对',
-            'price': st.column_config.NumberColumn('价格', format='%.4f'),
-            'ema': 'EMA10>20',
-            'st': 'SuperTrend',
-            'UT多头': 'UT多头',
-            'UT信号': 'UT信号',
-            'UT趋势': 'UT趋势',
-            '价格>止损': '价格>止损',
-            '偏离%': '偏离%',
-            'vwap': 'VWAP',
-            'all_green': '全绿',
-            'timestamp': '时间'
-        }
-    )
-
-# ================= 显示日志 =================
-with log_expander:
-    # 添加UT Bot说明
-    st.info("""
-    **UT Bot信号说明:**
-    - **BUY 🔥**: 从空头转为多头的瞬间（买入信号）
-    - **SELL ⚠️**: 从多头转为空头的瞬间（卖出信号）
-    - **NONE ➖**: 趋势延续中
-    - **UT多头**: 价格在止损线上方且趋势为多头
-    - **全绿信号**: 所有指标都满足（EMA+ST+UT多头+VWAP）
-    
-    **注意:** UT BUY信号不等于UT多头！BUY是瞬间信号，多头是持续状态。
-    """)
-    
-    for log in reversed(st.session_state.log_messages[-30:]):
-        if log['level'] == 'success':
-            st.success(f"{log['time']} - {log['message']}")
-        elif log['level'] == 'warning':
-            st.warning(f"{log['time']} - {log['message']}")
-        elif log['level'] == 'error':
-            st.error(f"{log['time']} - {log['message']}")
-        else:
-            st.info(f"{log['time']} - {log['message']}")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("TV BUY信号", tv_buy)
+    with col2:
+        st.metric("TV SELL信号", tv_sell)
+    with col3:
+        st.metric("TV 无信号", tv_none)
+    with col4:
+        st.metric("总币种", len(st.session_state.scan_data))
 
 # ================= 自动刷新 =================
-if not st.session_state.manual_scan:
-    time.sleep(2)
-    st.rerun()
+time.sleep(2)
+st.rerun()
 
-# ================= 页脚 =================
+# ================= 手动控制 =================
 st.markdown("---")
-st.caption("""
-**重要说明:**
-- ✅ **UT信号** 显示实时的BUY/SELL/NONE（与截图一致）
-- ✅ **UT多头** 显示是否为多头状态（用于全绿判断）
-- ✅ **BUY信号** 用黄色高亮显示
-- ✅ **全绿信号** 用绿色高亮显示
-- 🔍 如果看到BUY信号但UT多头为False，说明是刚转为多头的瞬间
-""")
+if st.button("停止自动刷新"):
+    st.stop()

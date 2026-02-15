@@ -18,12 +18,12 @@ SYMBOLS = [
     'BTC/USDT',
     'ETH/USDT',
     'SOL/USDT',
-    'ADA/USDT',
+    'TAO/USDT',
     'XRP/USDT',
-    'DOT/USDT',
-    'LINK/USDT',
-    'AVAX/USDT',
-    'TRX/USDT',
+    'RENDER/USDT',
+    'AAVE/USDT',
+    'DOGE/USDT',
+    'SUI/USDT',
 ]
 
 # Telegram 配置（必须填）
@@ -152,3 +152,4 @@ with st.expander("扫描日志"):
     st.write("线程运行中...")
 
 st.stop()  # 防止脚本继续执行阻塞UI
+

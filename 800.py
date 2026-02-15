@@ -123,14 +123,24 @@ def calculate_indicators(df, symbol):
     ema50 = pta.ema(close, length=50)
     ema200 = pta.ema(close, length=200)
     
-    ema10_gt_20 = ema10.iloc[-1] > ema20.iloc[-1] if not pd.isna(ema10.iloc[-1]) and not pd.isna(ema20.iloc[-1]) else False
-    close_gt_ema50 = close.iloc[-1] > ema50.iloc[-1] if not pd.isna(ema50.iloc[-1]) else False
-    close_gt_ema200 = close.iloc[-1] > ema200.iloc[-1] if not pd.isna(ema200.iloc[-1]) else False
+    ema10_gt_20 = False
+    close_gt_ema50 = False
+    close_gt_ema200 = False
+    
+    if ema10 is not None and ema20 is not None:
+        if not pd.isna(ema10.iloc[-1]) and not pd.isna(ema20.iloc[-1]):
+            ema10_gt_20 = ema10.iloc[-1] > ema20.iloc[-1]
+    
+    if ema50 is not None and not pd.isna(ema50.iloc[-1]):
+        close_gt_ema50 = close.iloc[-1] > ema50.iloc[-1]
+    
+    if ema200 is not None and not pd.isna(ema200.iloc[-1]):
+        close_gt_ema200 = close.iloc[-1] > ema200.iloc[-1]
     
     #━━━━━━━━━━━━━━━━━━━━━━
-    # 2. SuperTrend (关键修复)
+    # 2. SuperTrend (修复列名冲突)
     #━━━━━━━━━━━━━━━━━━━━━━
-    st = pta.supertrend(
+    st_result = pta.supertrend(
         high=high, 
         low=low, 
         close=close, 
@@ -138,45 +148,42 @@ def calculate_indicators(df, symbol):
         multiplier=st_multiplier
     )
     
-    # 打印所有列名用于调试
-    if symbol == 'SOL/USDT':
-        st.session_state.debug_data['st_columns'] = list(st.columns)
-    
-    # 查找SuperTrend列 - 多种可能
+    # 查找SuperTrend列 - 使用不同的变量名避免冲突
     super_trend_col = None
     super_trend_dir_col = None
     
-    for col in st.columns:
-        if f'SUPERT_{st_atr_len}_{st_multiplier:.1f}' in col:
-            super_trend_col = col
-        elif 'SUPERTd' in col:
-            super_trend_dir_col = col
-    
-    # 如果没有找到标准列名，尝试其他格式
-    if not super_trend_col:
-        for col in st.columns:
-            if 'SUPERT_' in col and not 'd' in col:
+    if st_result is not None:
+        for col in st_result.columns:
+            if f'SUPERT_{st_atr_len}_{st_multiplier:.1f}' in col:
                 super_trend_col = col
-                break
+            elif 'SUPERTd' in col:
+                super_trend_dir_col = col
+        
+        # 如果没有找到标准列名，尝试其他格式
+        if not super_trend_col:
+            for col in st_result.columns:
+                if 'SUPERT_' in col and not 'd' in col:
+                    super_trend_col = col
+                    break
     
     # SuperTrend多头判断
     st_bull = False
     super_trend_value = None
     
-    if super_trend_col and super_trend_col in st.columns:
-        super_trend_value = st[super_trend_col].iloc[-1]
+    if super_trend_col and super_trend_col in st_result.columns:
+        super_trend_value = st_result[super_trend_col].iloc[-1]
         if not pd.isna(super_trend_value):
             st_bull = close.iloc[-1] > super_trend_value
     
     # 如果找不到价格列，使用方向列
-    if not st_bull and super_trend_dir_col and super_trend_dir_col in st.columns:
-        st_bull = st[super_trend_dir_col].iloc[-1] == 1
+    if not st_bull and super_trend_dir_col and super_trend_dir_col in st_result.columns:
+        st_bull = st_result[super_trend_dir_col].iloc[-1] == 1
     
     #━━━━━━━━━━━━━━━━━━━━━━
-    # 3. UT Bot (关键修复)
+    # 3. UT Bot
     #━━━━━━━━━━━━━━━━━━━━━━
     ut_stop_series = calculate_ut_bot_exact(high, low, close, ut_factor, ut_atr_len)
-    current_ut_stop = ut_stop_series.iloc[-1]
+    current_ut_stop = ut_stop_series.iloc[-1] if not pd.isna(ut_stop_series.iloc[-1]) else close.iloc[-1]
     
     # UT Bot多头判断 - 这就是图表上显示的BUY/SELL
     ut_bull = close.iloc[-1] > current_ut_stop
@@ -200,7 +207,7 @@ def calculate_indicators(df, symbol):
     #━━━━━━━━━━━━━━━━━━━━━━
     typical = (high + low + close) / 3
     vwap = (typical * volume).cumsum() / volume.cumsum()
-    vwap_value = vwap.iloc[-1] if len(vwap) > 0 else None
+    vwap_value = vwap.iloc[-1] if len(vwap) > 0 and not pd.isna(vwap.iloc[-1]) else None
     close_gt_vwap = close.iloc[-1] > vwap_value if vwap_value is not None else False
     
     #━━━━━━━━━━━━━━━━━━━━━━
@@ -221,10 +228,11 @@ def calculate_indicators(df, symbol):
             'ut_bull': ut_bull,
             'super_trend_value': super_trend_value,
             'st_bull': st_bull,
-            'ema10': ema10.iloc[-1],
-            'ema20': ema20.iloc[-1],
+            'ema10': ema10.iloc[-1] if ema10 is not None else None,
+            'ema20': ema20.iloc[-1] if ema20 is not None else None,
             'vwap': vwap_value,
-            'pivot': today_pivot
+            'pivot': today_pivot,
+            'st_columns': list(st_result.columns) if st_result is not None else []
         }
     
     return {
@@ -290,8 +298,8 @@ def perform_scan():
                 'EMA10>20': '✅' if ind['ema10_gt_20'] else '❌',
                 'EMA50': '✅' if ind['close_gt_ema50'] else '❌',
                 'EMA200': '✅' if ind['close_gt_ema200'] else '❌',
-                'SuperTrend': '✅' if ind['st_bull'] else '❌',  # 这里应该是YES/NO
-                'UT Bot': 'BUY' if ind['ut_bull'] else 'SELL',  # 这里应该是BUY/SELL
+                'SuperTrend': '✅' if ind['st_bull'] else '❌',
+                'UT Bot': 'BUY' if ind['ut_bull'] else 'SELL',
                 'UT信号': ut_signal,
                 'VWAP': '✅' if ind['close_gt_vwap'] else '❌',
                 'Pivot': '✅' if ind['close_gt_pivot'] else '❌',
@@ -318,7 +326,7 @@ if st.session_state.manual_scan or (current_time - st.session_state.last_scan_ti
 if st.session_state.scan_results:
     st.subheader("📊 扫描结果")
     
-    # 转换为DataFrame并高亮SOL
+    # 转换为DataFrame
     df_results = pd.DataFrame(st.session_state.scan_results)
     
     def highlight_sol(row):
@@ -345,40 +353,18 @@ if st.session_state.debug_data:
     with col2:
         st.metric("SuperTrend值", f"${d['super_trend_value']:.4f}" if d['super_trend_value'] else "N/A")
         st.metric("SuperTrend状态", "YES ✅" if d['st_bull'] else "NO ❌")
-        st.metric("EMA10", f"${d['ema10']:.4f}")
+        if d['ema10'] and d['ema20']:
+            st.metric("EMA10/20", f"{d['ema10']:.4f} / {d['ema20']:.4f}")
     
     with col3:
-        st.metric("EMA20", f"${d['ema20']:.4f}")
         st.metric("VWAP", f"${d['vwap']:.4f}" if d['vwap'] else "N/A")
         st.metric("Pivot", f"${d['pivot']:.4f}")
+        st.metric("价格>Pivot", "✅" if d['close'] > d['pivot'] else "❌")
     
-    # 显示应该是什么
-    st.write("### 应该显示的数值")
-    st.json({
-        "你的图表显示": {
-            "EMA10>20": "YES",
-            "SuperTrend": "YES",
-            "UT Bot": "BUY"
-        },
-        "当前计算": {
-            "EMA10>20": "YES" if d['ema10'] > d['ema20'] else "NO",
-            "SuperTrend": "YES" if d['st_bull'] else "NO",
-            "UT Bot": "BUY" if d['ut_bull'] else "SELL"
-        }
-    })
-    
-    # 如果还是不匹配，显示计算过程
-    if not d['st_bull']:
-        st.error("SuperTrend计算可能有问题")
-        st.write(f"最后价格: {d['close']:.4f}")
-        st.write(f"SuperTrend值: {d['super_trend_value']:.4f}")
-        st.write(f"价格 > SuperTrend: {d['close'] > d['super_trend_value'] if d['super_trend_value'] else False}")
-    
-    if not d['ut_bull']:
-        st.error("UT Bot计算可能有问题")
-        st.write(f"最后价格: {d['close']:.4f}")
-        st.write(f"UT止损: {d['ut_stop']:.4f}")
-        st.write(f"价格 > UT止损: {d['close'] > d['ut_stop']}")
+    # 显示SuperTrend列信息
+    if d['st_columns']:
+        st.write("### SuperTrend列名")
+        st.write(d['st_columns'])
 
 # ================= 图表对比 =================
 st.subheader("📊 与你的图表对比")

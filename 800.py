@@ -10,7 +10,7 @@ import numpy as np
 
 # ================= 配置 =================
 EXCHANGE_NAME = 'okx'
-TIMEFRAME = '60m'
+TIMEFRAME = '1m'
 SCAN_INTERVAL = 60  # 秒
 
 SYMBOLS = [
@@ -508,4 +508,5 @@ st.caption("""
 - ✅ 添加调试选项查看详细UT计算
 - ✅ 与截图中的UT Bot SELL信号一致
 """)
+
 

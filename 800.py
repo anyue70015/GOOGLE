@@ -10,7 +10,7 @@ import asyncio
 
 # ================= 配置 =================
 EXCHANGE_NAME = 'okx'  # 或 'binance'
-TIMEFRAME = '15m'      # 15分钟K
+TIMEFRAME = '5m'      # 5分钟K
 SCAN_INTERVAL = 60     # 每60秒扫描一次
 
 SYMBOLS = [
@@ -152,4 +152,5 @@ with st.expander("扫描日志"):
     st.write("线程运行中...")
 
 st.stop()  # 防止脚本继续执行阻塞UI
+
 

@@ -7,7 +7,6 @@ from datetime import datetime, timedelta
 
 # ================= 配置 =================
 EXCHANGE_NAME = 'okx'
-TIMEFRAME = '1m'
 SCAN_INTERVAL = 10
 
 # 只关注HYPE
@@ -20,18 +19,27 @@ UT_FACTOR = 1.0
 UT_ATR_LEN = 10
 
 # ================= UI =================
-st.set_page_config(page_title="HYPE SuperTrend修复", layout="wide")
-st.title("🎯 HYPE/USDT - SuperTrend应该显示YES")
+st.set_page_config(page_title="HYPE 多时间框架匹配器", layout="wide")
+st.title("🎯 HYPE/USDT - 选择你的时间框架")
 
-# 侧边栏
+# 侧边栏 - 时间框架选择
 with st.sidebar:
-    st.header("⚙️ 原始参数")
+    st.header("⚙️ 时间框架选择")
+    
+    timeframe = st.selectbox(
+        "选择你的图表时间框架",
+        ['1m', '5m', '15m', '30m', '1h', '4h'],
+        index=0,  # 默认1分钟
+        help="选择与你图表相同的时间框架"
+    )
+    
+    st.header("📊 原始参数")
     st.write(f"SuperTrend ATR: {ST_ATR_LEN}")
     st.write(f"SuperTrend乘数: {ST_MULTIPLIER}")
     st.write(f"UT Factor: {UT_FACTOR}")
     st.write(f"UT ATR: {UT_ATR_LEN}")
     
-    if st.button("🔄 立即扫描"):
+    if st.button("🔄 立即扫描", use_container_width=True):
         st.session_state.manual_scan = True
 
 # 初始化
@@ -42,11 +50,15 @@ if 'manual_scan' not in st.session_state:
 
 # ================= 数据获取 =================
 @st.cache_data(ttl=5)
-def fetch_hype_data():
-    """获取HYPE数据"""
+def fetch_hype_data(tf='1m'):
+    """获取指定时间框架的HYPE数据"""
     try:
         exchange = ccxt.okx({'enableRateLimit': True})
-        ohlcv = exchange.fetch_ohlcv('HYPE/USDT', TIMEFRAME, limit=200)
+        
+        # 根据时间框架获取足够的数据
+        limit = 500 if tf in ['1m', '5m'] else 300
+        ohlcv = exchange.fetch_ohlcv('HYPE/USDT', tf, limit=limit)
+        
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -155,7 +167,7 @@ def calculate_pivot(df):
 
 # ================= 主分析 =================
 def analyze():
-    df = fetch_hype_data()
+    df = fetch_hype_data(timeframe)
     if df is None:
         return
     
@@ -164,6 +176,7 @@ def analyze():
     low = df['low']
     
     current_price = close.iloc[-1]
+    current_time = df['timestamp'].iloc[-1]
     
     # EMA
     ema10 = close.ewm(span=10, adjust=False).mean()
@@ -176,6 +189,7 @@ def analyze():
     # SuperTrend (Pine版本)
     st_values, st_trend = calculate_supertrend_pine(high, low, close, ST_ATR_LEN, ST_MULTIPLIER)
     st_bull = st_trend.iloc[-1] == 1
+    st_current = st_values.iloc[-1]
     
     # UT Bot (Pine版本)
     ut_stop, ut_bull = calculate_ut_bot_pine(high, low, close, UT_FACTOR, UT_ATR_LEN)
@@ -191,7 +205,7 @@ def analyze():
     close_gt_pivot = current_price > pivot
     
     # ================= 显示结果 =================
-    st.subheader(f"📊 HYPE/USDT - {df['timestamp'].iloc[-1].strftime('%H:%M:%S')}")
+    st.subheader(f"📊 HYPE/USDT - {timeframe} - {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     
     # 创建两列对比
     col1, col2 = st.columns(2)
@@ -227,17 +241,17 @@ def analyze():
     with col1:
         st.metric("当前价格", f"${current_price:.4f}")
         st.metric("UT止损", f"${ut_stop_current:.4f}")
-        st.metric("UT状态", "SELL ❌" if not ut_bull_current else "BUY ✅")
+        st.metric("价格-UT止损", f"${current_price - ut_stop_current:.4f}")
     
     with col2:
-        st.metric("SuperTrend趋势", "上升 📈" if st_bull else "下降 📉")
+        st.metric("SuperTrend值", f"${st_current:.4f}")
+        st.metric("价格-SuperTrend", f"${current_price - st_current:.4f}")
         st.metric("SuperTrend状态", "YES ✅" if st_bull else "NO ❌")
-        st.metric("价格 > UT止损", f"{current_price > ut_stop_current}")
     
     with col3:
         st.metric("VWAP", f"${vwap:.4f}" if vwap else "N/A")
         st.metric("Pivot", f"${pivot:.4f}")
-        st.metric("价格 > Pivot", "YES" if close_gt_pivot else "NO")
+        st.metric("今日K线数", f"{len(df[df['timestamp'].dt.date == datetime.utcnow().date()])}根")
     
     # ================= 匹配度检查 =================
     st.subheader("🎯 匹配度检查")
@@ -256,10 +270,10 @@ def analyze():
     
     all_match = all([m['匹配'] == '✅' for m in matches])
     if all_match:
-        st.success("✅ 完全匹配你的图表！")
+        st.success(f"✅ 完全匹配你的{timeframe}图表！")
         st.balloons()
     else:
-        st.warning("⚠️ 部分指标不匹配")
+        st.warning(f"⚠️ {timeframe}图表部分指标不匹配")
         
         # 显示不匹配的指标
         mismatches = [m['指标'] for m in matches if m['匹配'] == '❌']
@@ -268,15 +282,17 @@ def analyze():
             
             # 提供调整建议
             if 'SuperTrend' in mismatches:
-                st.info("💡 SuperTrend不匹配：检查ATR计算")
-                st.write(f"当前SuperTrend值: {st_values.iloc[-1]:.4f}")
+                st.info("💡 SuperTrend不匹配")
+                st.write(f"当前SuperTrend值: {st_current:.4f}")
                 st.write(f"当前价格: {current_price:.4f}")
-                st.write(f"价格 > SuperTrend: {current_price > st_values.iloc[-1]}")
+                st.write(f"价格 > SuperTrend: {current_price > st_current}")
+                st.write(f"所以SuperTrend应该显示: {'YES' if current_price > st_current else 'NO'}")
             
             if 'UT Bot' in mismatches:
-                st.info("💡 UT Bot不匹配：检查价格与UT止损的关系")
+                st.info("💡 UT Bot不匹配")
                 st.write(f"当前UT止损: {ut_stop_current:.4f}")
                 st.write(f"价格 > UT止损: {current_price > ut_stop_current}")
+                st.write(f"所以UT Bot应该显示: {'BUY' if current_price > ut_stop_current else 'SELL'}")
 
 # ================= 主循环 =================
 current_time = time.time()

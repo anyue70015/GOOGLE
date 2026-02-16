@@ -160,7 +160,8 @@ def calculate_vwap_from_today(df):
         if len(yesterday_data) > 0:
             # 取昨日最后几根补充
             needed = max(10 - len(today_data), 0)
-           补充数据 = yesterday_data.tail(needed)  # 这行有中文字符！
+            # 修复：使用英文变量名，修正缩进
+           补充数据 = yesterday_data.tail(needed)
             combined = pd.concat([补充数据, today_data])
             status = f"补充{needed}根昨日数据，共{len(combined)}根"
         else:

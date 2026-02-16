@@ -160,7 +160,7 @@ def calculate_vwap_from_today(df):
         if len(yesterday_data) > 0:
             # 取昨日最后几根补充
             needed = max(10 - len(today_data), 0)
-           补充数据 = yesterday_data.tail(needed)
+           补充数据 = yesterday_data.tail(needed)  # 这行有中文字符！
             combined = pd.concat([补充数据, today_data])
             status = f"补充{needed}根昨日数据，共{len(combined)}根"
         else:
@@ -455,9 +455,21 @@ def analyze_market():
     
     with col2:
         st.markdown("**📌 最佳VWAP参数建议**")
+        # 计算覆盖时间
+        if timeframe == '1m':
+            coverage = vwap_lookback / 60
+        elif timeframe == '5m':
+            coverage = vwap_lookback * 5 / 60
+        elif timeframe == '15m':
+            coverage = vwap_lookback * 15 / 60
+        elif timeframe == '1h':
+            coverage = vwap_lookback
+        else:
+            coverage = vwap_lookback * 4 if timeframe == '4h' else vwap_lookback * 24
+            
         st.info(f"""
         对于{timeframe}图表，推荐：
-        - 短期交易: 使用{vwap_lookback}根K线 (覆盖约{vwap_lookback * (1 if timeframe=='1m' else 5)/60:.1f}小时)
+        - 短期交易: 使用{vwap_lookback}根K线 (覆盖约{coverage:.1f}小时)
         - 日内交易: 使用从今日0点开始
         - 趋势交易: 使用7天连续数据
         """)

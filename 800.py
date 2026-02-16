@@ -12,7 +12,7 @@ from plotly.subplots import make_subplots
 EXCHANGE_NAME = 'okx'
 SCAN_INTERVAL = 10
 
-SYMBOLS = ['HYPE/USDT', 'BTC/USDT', 'ETH/USDT', 'SOL/USDT']
+SYMBOLS = ['BTC/USDT', 'HYPE/USDT', 'ETH/USDT', 'SOL/USDT']
 
 # 指标参数
 UT_FACTOR = 1.0
@@ -22,294 +22,235 @@ ST_MULTIPLIER = 3.0
 
 # ================= UI =================
 st.set_page_config(
-    page_title="币圈多时间框架VWAP计算器", 
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="币圈指标匹配器", 
+    layout="wide"
 )
 
-st.title("📊 币圈24/7 VWAP计算器")
+st.title("📊 币圈指标匹配器 - VWAP修复版")
 
 # 侧边栏
 with st.sidebar:
     st.header("⚙️ 参数设置")
     
-    # 交易对选择
-    symbol = st.selectbox(
-        "交易对",
-        SYMBOLS,
-        index=0
-    )
+    symbol = st.selectbox("交易对", SYMBOLS, index=0)
     
-    # 时间框架选择
     timeframe = st.selectbox(
         "时间框架",
-        ['1m', '5m', '15m', '1h', '4h', '1d'],
+        ['1m', '5m', '15m', '1h', '4h'],
         index=0
     )
     
-    # VWAP计算参数
-    st.subheader("📈 VWAP计算参数")
-    vwap_lookback = st.number_input(
-        "VWAP使用K线数量",
-        min_value=10,
-        max_value=500,
-        value=200
-    )
-    
+    # VWAP计算方法选择
     vwap_method = st.radio(
         "VWAP计算方法",
-        ['从起点累积 (TradingView模式)', '从今日0点开始', '从昨日延续'],
-        index=0
+        ['🌙 从今日0点开始 (UTC)', '📈 从起点累积', '📊 7天连续'],
+        index=0,
+        help="选择VWAP的计算方式"
     )
     
-    scan_interval = st.number_input("自动刷新间隔(秒)", 5, 60, SCAN_INTERVAL)
+    scan_interval = st.number_input("刷新间隔(秒)", 5, 60, SCAN_INTERVAL)
     
-    if st.button("🔄 立即扫描", use_container_width=True):
+    if st.button("🔄 立即扫描"):
         st.session_state.manual_scan = True
 
-# 初始化session_state
+# 初始化
 if 'last_scan_time' not in st.session_state:
     st.session_state.last_scan_time = 0
 if 'manual_scan' not in st.session_state:
     st.session_state.manual_scan = False
-if 'vwap_history' not in st.session_state:
-    st.session_state.vwap_history = []
+if 'market_data' not in st.session_state:
+    st.session_state.market_data = None
 
 # ================= 数据获取 =================
-@st.cache_data(ttl=5, show_spinner=False)
+@st.cache_data(ttl=5)
 def fetch_market_data(symbol, timeframe, limit=500):
     """获取市场数据"""
     try:
-        exchange = ccxt.okx({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        
+        exchange = ccxt.okx({'enableRateLimit': True})
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-        
-        if not ohlcv or len(ohlcv) < 10:
-            return None
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df['date'] = df['timestamp'].dt.date
-        
+        df['hour_utc'] = df['timestamp'].dt.hour
         return df
     except Exception as e:
         st.error(f"获取数据失败: {e}")
         return None
 
-# ================= VWAP计算方法1: 从起点累积 =================
-def calculate_vwap_from_start(df, lookback_bars=200):
-    """从数据起点开始累积VWAP"""
-    data = df.tail(lookback_bars).copy()
+# ================= VWAP计算方法1: 从今日0点开始 (UTC) =================
+def calculate_vwap_from_today_utc(df):
+    """
+    从今日0点UTC开始计算VWAP
+    匹配TradingView的ta.vwap行为
+    """
+    # 获取今日UTC时间
+    now_utc = datetime.utcnow()
+    today_utc = now_utc.date()
+    
+    # 筛选今日UTC的数据
+    today_data = df[df['timestamp'].dt.date == today_utc].copy()
+    
+    if len(today_data) < 2:
+        # 今日数据不足，返回None
+        return None, len(today_data), f"今日数据不足({len(today_data)}根)"
+    
+    # 计算VWAP
+    typical = (today_data['high'] + today_data['low'] + today_data['close']) / 3
+    volume = today_data['volume']
+    
+    cumulative_pv = (typical * volume).cumsum()
+    cumulative_volume = volume.cumsum()
+    
+    vwap_values = cumulative_pv / cumulative_volume
+    current_vwap = vwap_values.iloc[-1]
+    
+    return current_vwap, len(today_data), f"今日{len(today_data)}根K线"
+
+# ================= VWAP计算方法2: 从起点累积 =================
+def calculate_vwap_from_start(df, lookback=200):
+    """从起点累积VWAP"""
+    data = df.tail(lookback).copy()
     
     if len(data) < 10:
-        return None, 0, "数据不足"
+        return None, len(data), "数据不足"
     
     typical = (data['high'] + data['low'] + data['close']) / 3
     volume = data['volume']
     
     cumulative_pv = (typical * volume).cumsum()
     cumulative_volume = volume.cumsum()
-    cumulative_volume = cumulative_volume.replace(0, np.nan).fillna(method='ffill')
     
-    vwap_series = cumulative_pv / cumulative_volume
-    current_vwap = vwap_series.iloc[-1]
+    vwap_values = cumulative_pv / cumulative_volume
+    current_vwap = vwap_values.iloc[-1]
     
-    time_span = (data['timestamp'].iloc[-1] - data['timestamp'].iloc[0]).total_seconds() / 3600
+    hours = (data['timestamp'].iloc[-1] - data['timestamp'].iloc[0]).total_seconds() / 3600
     
-    return current_vwap, len(data), f"覆盖{time_span:.1f}小时"
+    return current_vwap, len(data), f"覆盖{hours:.1f}小时"
 
-# ================= VWAP计算方法2: 从今日0点开始 (完全修复版) =================
-def calculate_vwap_from_today(df):
-    """从今日0点开始计算VWAP"""
-    today = datetime.now().date()
+# ================= VWAP计算方法3: 7天连续 =================
+def calculate_vwap_7day(df):
+    """7天连续VWAP"""
+    end = df['timestamp'].max()
+    start = end - timedelta(days=7)
+    
+    data = df[df['timestamp'] >= start].copy()
+    
+    if len(data) < 10:
+        return None, len(data), "数据不足"
+    
+    typical = (data['high'] + data['low'] + data['close']) / 3
+    volume = data['volume']
+    
+    cumulative_pv = (typical * volume).cumsum()
+    cumulative_volume = volume.cumsum()
+    
+    vwap_values = cumulative_pv / cumulative_volume
+    current_vwap = vwap_values.iloc[-1]
+    
+    return current_vwap, len(data), f"覆盖{len(data)}根K线"
+
+# ================= 计算所有指标 =================
+def calculate_all_indicators(df):
+    """计算所有指标"""
+    close = df['close'].iloc[-1]
+    high = df['high']
+    low = df['low']
+    volume = df['volume']
+    
+    # EMA
+    ema10 = pta.ema(df['close'], length=10)
+    ema20 = pta.ema(df['close'], length=20)
+    ema50 = pta.ema(df['close'], length=50)
+    
+    ema10_gt_20 = False
+    close_gt_ema50 = False
+    
+    if ema10 is not None and ema20 is not None:
+        if len(ema10) > 0 and len(ema20) > 0:
+            if not pd.isna(ema10.iloc[-1]) and not pd.isna(ema20.iloc[-1]):
+                ema10_gt_20 = ema10.iloc[-1] > ema20.iloc[-1]
+    
+    if ema50 is not None and len(ema50) > 0:
+        if not pd.isna(ema50.iloc[-1]):
+            close_gt_ema50 = close > ema50.iloc[-1]
+    
+    # SuperTrend
+    st_bull = False
+    try:
+        st = pta.supertrend(high=high, low=low, close=df['close'], 
+                           length=ST_ATR_LEN, multiplier=ST_MULTIPLIER)
+        for col in st.columns:
+            if 'SUPERT_' in col and not 'd' in col:
+                st_bull = close > st[col].iloc[-1]
+                break
+    except:
+        pass
+    
+    # UT Bot简化版
+    atr = pta.atr(high=high, low=low, close=df['close'], length=UT_ATR_LEN)
+    ut_stop = close - UT_FACTOR * atr.iloc[-1] if atr is not None else close
+    ut_bull = close > ut_stop
+    
+    # Today Pivot
+    today = datetime.utcnow().date()
     today_data = df[df['timestamp'].dt.date == today]
-    
-    if len(today_data) < 2:
-        # 今日数据不足，使用昨日数据补充
-        yesterday = today - timedelta(days=1)
-        yesterday_data = df[df['timestamp'].dt.date == yesterday]
-        
-        if len(yesterday_data) > 0:
-            # 需要补充的K线数量
-            needed = max(10 - len(today_data), 0)
-            
-            # 修复：使用英文变量名，修正缩进
-            yesterday_tail = yesterday_data.tail(needed)
-            combined_data = pd.concat([yesterday_tail, today_data])
-            status = f"补充{needed}根昨日数据，共{len(combined_data)}根"
-        else:
-            combined_data = today_data
-            status = f"仅今日数据{len(combined_data)}根"
+    if len(today_data) > 0:
+        d_high = today_data['high'].max()
+        d_low = today_data['low'].min()
+        d_close = today_data['close'].iloc[-1]
+        pivot = (d_high + d_low + d_close) / 3
     else:
-        combined_data = today_data
-        status = f"纯今日数据{len(combined_data)}根"
+        pivot = close
     
-    if len(combined_data) < 2:
-        return None, 0, "数据不足"
+    close_gt_pivot = close > pivot
     
-    typical = (combined_data['high'] + combined_data['low'] + combined_data['close']) / 3
-    volume = combined_data['volume']
-    
-    cumulative_pv = (typical * volume).cumsum()
-    cumulative_volume = volume.cumsum()
-    
-    vwap_series = cumulative_pv / cumulative_volume
-    current_vwap = vwap_series.iloc[-1]
-    
-    return current_vwap, len(combined_data), status
-
-# ================= VWAP计算方法3: 从昨日延续 =================
-def calculate_vwap_continuous(df, lookback_days=7):
-    """从昨日延续，包含完整周期"""
-    end_date = df['timestamp'].max()
-    start_date = end_date - timedelta(days=lookback_days)
-    
-    period_data = df[df['timestamp'] >= start_date].copy()
-    
-    if len(period_data) < 10:
-        return None, 0, "数据不足"
-    
-    typical = (period_data['high'] + period_data['low'] + period_data['close']) / 3
-    volume = period_data['volume']
-    
-    cumulative_pv = (typical * volume).cumsum()
-    cumulative_volume = volume.cumsum()
-    
-    vwap_series = cumulative_pv / cumulative_volume
-    current_vwap = vwap_series.iloc[-1]
-    
-    days_covered = (period_data['timestamp'].iloc[-1] - period_data['timestamp'].iloc[0]).days
-    
-    return current_vwap, len(period_data), f"覆盖{days_covered}天"
-
-# ================= 多时间框架VWAP分析 =================
-def analyze_vwap_all_timeframes(df, current_price):
-    """分析所有时间框架的VWAP"""
-    timeframes = ['1m', '5m', '15m', '1h', '4h', '1d']
-    results = []
-    
-    for tf in timeframes:
-        lookback = {
-            '1m': 200,
-            '5m': 200,
-            '15m': 200,
-            '1h': 168,
-            '4h': 126,
-            '1d': 90
-        }.get(tf, 200)
-        
-        vwap, bars, status = calculate_vwap_from_start(df, lookback)
-        
-        if vwap:
-            results.append({
-                '时间框架': tf,
-                'VWAP值': f"${vwap:.4f}",
-                '价格>VWAP': '✅ YES' if current_price > vwap else '❌ NO',
-                '使用K线': bars,
-                '说明': status
-            })
-    
-    return pd.DataFrame(results)
-
-# ================= 绘制VWAP图表 =================
-def plot_vwap_chart(df, vwap_value, method_name):
-    """绘制价格和VWAP对比图"""
-    fig = make_subplots(
-        rows=2, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        row_heights=[0.7, 0.3],
-        subplot_titles=(f'价格与VWAP ({method_name})', '成交量')
-    )
-    
-    # 蜡烛图
-    fig.add_trace(
-        go.Candlestick(
-            x=df['timestamp'].tail(100),
-            open=df['open'].tail(100),
-            high=df['high'].tail(100),
-            low=df['low'].tail(100),
-            close=df['close'].tail(100),
-            name='价格'
-        ),
-        row=1, col=1
-    )
-    
-    # VWAP线
-    fig.add_hline(
-        y=vwap_value,
-        line_dash="dash",
-        line_color="purple",
-        annotation_text=f"VWAP: ${vwap_value:.4f}",
-        annotation_position="top right",
-        row=1, col=1
-    )
-    
-    # 成交量
-    colors = ['red' if df['close'].iloc[i] < df['open'].iloc[i] else 'green' 
-              for i in range(len(df.tail(100)))]
-    
-    fig.add_trace(
-        go.Bar(
-            x=df['timestamp'].tail(100),
-            y=df['volume'].tail(100),
-            name='成交量',
-            marker_color=colors
-        ),
-        row=2, col=1
-    )
-    
-    fig.update_layout(
-        title=f'{symbol} {timeframe} 价格与VWAP',
-        yaxis_title='价格',
-        xaxis_rangeslider_visible=False,
-        height=600,
-        template='plotly_dark'
-    )
-    
-    return fig
+    return {
+        'close': close,
+        'ema10_gt_20': ema10_gt_20,
+        'close_gt_ema50': close_gt_ema50,
+        'st_bull': st_bull,
+        'ut_bull': ut_bull,
+        'close_gt_pivot': close_gt_pivot,
+        'pivot': pivot
+    }
 
 # ================= 主分析函数 =================
 def analyze_market():
     """主分析函数"""
-    df = fetch_market_data(symbol, timeframe, limit=500)
+    df = fetch_market_data(symbol, timeframe)
     
-    if df is None:
-        st.error("无法获取市场数据")
+    if df is None or len(df) < 20:
+        st.error("数据不足")
         return
     
     current_price = df['close'].iloc[-1]
     current_time = df['timestamp'].iloc[-1]
     
     # 显示基本信息
-    st.subheader(f"📊 {symbol} - {timeframe} - {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    st.subheader(f"📊 {symbol} - {timeframe} - {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("当前价格", f"${current_price:.4f}")
+        st.metric("当前价格", f"${current_price:,.2f}" if 'BTC' in symbol else f"${current_price:.4f}")
     with col2:
-        st.metric("24h最高", f"${df['high'].tail(1440).max():.4f}" if timeframe == '1m' else "计算中")
+        st.metric("24h最高", f"${df['high'].tail(1440).max():,.2f}" if 'BTC' in symbol else f"${df['high'].tail(1440).max():.4f}")
     with col3:
-        st.metric("24h最低", f"${df['low'].tail(1440).min():.4f}" if timeframe == '1m' else "计算中")
-    with col4:
-        st.metric("24h成交量", f"{df['volume'].tail(1440).sum():.0f}" if timeframe == '1m' else "计算中")
+        st.metric("24h最低", f"${df['low'].tail(1440).min():,.2f}" if 'BTC' in symbol else f"${df['low'].tail(1440).min():.4f}")
     
     # ================= VWAP三种方法对比 =================
     st.subheader("🔄 VWAP三种计算方法对比")
     
-    vwap1, bars1, status1 = calculate_vwap_from_start(df, vwap_lookback)
-    vwap2, bars2, status2 = calculate_vwap_from_today(df)
-    vwap3, bars3, status3 = calculate_vwap_continuous(df, lookback_days=7)
+    vwap1, bars1, status1 = calculate_vwap_from_today_utc(df)
+    vwap2, bars2, status2 = calculate_vwap_from_start(df, 200)
+    vwap3, bars3, status3 = calculate_vwap_7day(df)
     
     comparison_data = []
     
     if vwap1:
         comparison_data.append({
-            '计算方法': '📈 从起点累积 (TradingView模式)',
-            'VWAP值': f"${vwap1:.4f}",
+            '计算方法': '🌙 从今日0点开始 (UTC)',
+            'VWAP值': f"${vwap1:,.2f}" if 'BTC' in symbol else f"${vwap1:.4f}",
             '价格>VWAP': '✅ YES' if current_price > vwap1 else '❌ NO',
             '使用K线': f"{bars1}根",
             '说明': status1
@@ -317,8 +258,8 @@ def analyze_market():
     
     if vwap2:
         comparison_data.append({
-            '计算方法': '📅 从今日0点开始',
-            'VWAP值': f"${vwap2:.4f}",
+            '计算方法': '📈 从起点累积',
+            'VWAP值': f"${vwap2:,.2f}" if 'BTC' in symbol else f"${vwap2:.4f}",
             '价格>VWAP': '✅ YES' if current_price > vwap2 else '❌ NO',
             '使用K线': f"{bars2}根",
             '说明': status2
@@ -326,81 +267,123 @@ def analyze_market():
     
     if vwap3:
         comparison_data.append({
-            '计算方法': '📊 从昨日延续 (7天)',
-            'VWAP值': f"${vwap3:.4f}",
+            '计算方法': '📊 7天连续',
+            'VWAP值': f"${vwap3:,.2f}" if 'BTC' in symbol else f"${vwap3:.4f}",
             '价格>VWAP': '✅ YES' if current_price > vwap3 else '❌ NO',
             '使用K线': f"{bars3}根",
             '说明': status3
         })
     
     if comparison_data:
-        df_comparison = pd.DataFrame(comparison_data)
-        st.dataframe(df_comparison, use_container_width=True)
+        df_comp = pd.DataFrame(comparison_data)
+        st.dataframe(df_comp, use_container_width=True)
     
-    # ================= 根据选择的方法显示图表 =================
-    st.subheader("📈 VWAP图表分析")
+    # ================= 计算其他指标 =================
+    st.subheader("📊 其他指标")
     
-    if vwap_method == '从起点累积 (TradingView模式)' and vwap1:
-        fig = plot_vwap_chart(df, vwap1, vwap_method)
-        st.plotly_chart(fig, use_container_width=True)
-    elif vwap_method == '从今日0点开始' and vwap2:
-        fig = plot_vwap_chart(df, vwap2, vwap_method)
-        st.plotly_chart(fig, use_container_width=True)
-    elif vwap_method == '从昨日延续' and vwap3:
-        fig = plot_vwap_chart(df, vwap3, vwap_method)
-        st.plotly_chart(fig, use_container_width=True)
+    ind = calculate_all_indicators(df)
     
-    # ================= 多时间框架VWAP分析 =================
-    st.subheader("🕐 多时间框架VWAP分析")
+    # 选择正确的VWAP用于图表对比
+    if vwap_method == '🌙 从今日0点开始 (UTC)' and vwap1:
+        selected_vwap = vwap1
+        selected_method = vwap_method
+    elif vwap_method == '📈 从起点累积' and vwap2:
+        selected_vwap = vwap2
+        selected_method = vwap_method
+    elif vwap_method == '📊 7天连续' and vwap3:
+        selected_vwap = vwap3
+        selected_method = vwap_method
+    else:
+        selected_vwap = vwap1 if vwap1 else (vwap2 if vwap2 else vwap3)
+        selected_method = "默认"
     
-    tf_results = analyze_vwap_all_timeframes(df, current_price)
-    st.dataframe(tf_results, use_container_width=True)
+    # 创建指标表格
+    indicator_data = [
+        {'指标': 'EMA10 > EMA20', '状态': 'YES' if ind['ema10_gt_20'] else 'NO'},
+        {'指标': 'EMA50', '状态': 'YES' if ind['close_gt_ema50'] else 'NO'},
+        {'指标': 'SuperTrend', '状态': 'YES' if ind['st_bull'] else 'NO'},
+        {'指标': 'UT Bot', '状态': 'BUY' if ind['ut_bull'] else 'SELL'},
+        {'指标': 'VWAP', '状态': 'YES' if current_price > selected_vwap else 'NO'},
+        {'指标': 'Today Pivot', '状态': 'YES' if ind['close_gt_pivot'] else 'NO'}
+    ]
     
-    # ================= 统计摘要 =================
-    st.subheader("📊 统计摘要")
+    df_indicators = pd.DataFrame(indicator_data)
+    st.dataframe(df_indicators, use_container_width=True)
     
-    col1, col2 = st.columns(2)
+    # ================= 图表 =================
+    st.subheader("📈 价格与VWAP图表")
     
-    with col1:
-        st.markdown("**📌 当前市场状态**")
-        if vwap1 and vwap2 and vwap3:
-            all_yes = all([current_price > v for v in [vwap1, vwap2, vwap3] if v])
-            if all_yes:
-                st.success("✅ 所有VWAP方法都显示多头信号")
-            else:
-                st.warning("⚠️ VWAP信号不一致，建议谨慎")
+    fig = go.Figure()
     
-    with col2:
-        st.markdown("**📌 最佳VWAP参数建议**")
-        if timeframe == '1m':
-            coverage = vwap_lookback / 60
-        elif timeframe == '5m':
-            coverage = vwap_lookback * 5 / 60
-        elif timeframe == '15m':
-            coverage = vwap_lookback * 15 / 60
-        elif timeframe == '1h':
-            coverage = vwap_lookback
-        else:
-            coverage = vwap_lookback * 4 if timeframe == '4h' else vwap_lookback * 24
-            
-        st.info(f"""
-        对于{timeframe}图表：
-        - 当前使用: {vwap_lookback}根K线 (覆盖约{coverage:.1f}小时)
-        - 日内交易: 用今日0点开始
-        - 趋势交易: 用7天连续数据
-        """)
+    # 价格线
+    fig.add_trace(go.Scatter(
+        x=df['timestamp'].tail(100),
+        y=df['close'].tail(100),
+        mode='lines',
+        name='价格',
+        line=dict(color='blue', width=2)
+    ))
     
-    # ================= 保存历史数据 =================
-    st.session_state.vwap_history.append({
-        '时间': datetime.now().strftime('%H:%M:%S'),
-        '价格': current_price,
-        'VWAP_起点': vwap1 if vwap1 else 0,
-        'VWAP_今日': vwap2 if vwap2 else 0,
-        'VWAP_7天': vwap3 if vwap3 else 0
-    })
+    # VWAP线
+    if selected_vwap:
+        fig.add_hline(
+            y=selected_vwap,
+            line_dash="dash",
+            line_color="purple",
+            annotation_text=f"VWAP: ${selected_vwap:,.2f}" if 'BTC' in symbol else f"VWAP: ${selected_vwap:.4f}",
+            annotation_position="top right"
+        )
     
-    if len(st.session_state.vwap_history) > 20:
-        st.session_state.vwap_history = st.session_state.vwap_history[-20:]
+    fig.update_layout(
+        title=f'{symbol} {timeframe} - {selected_method}',
+        xaxis_title='时间',
+        yaxis_title='价格',
+        height=400,
+        template='plotly_dark'
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # ================= 匹配度检查 =================
+    st.subheader("🎯 与你的图表对比")
+    
+    matches = []
+    
+    # 你的图表显示
+    chart_display = {
+        'EMA10 > EMA20': 'NO',
+        'EMA50': 'NO',
+        'SuperTrend': 'NO',
+        'UT Bot': 'SELL',
+        'VWAP': 'NO',
+        'Today Pivot': 'NO'
+    }
+    
+    current_display = {
+        'EMA10 > EMA20': 'YES' if ind['ema10_gt_20'] else 'NO',
+        'EMA50': 'YES' if ind['close_gt_ema50'] else 'NO',
+        'SuperTrend': 'YES' if ind['st_bull'] else 'NO',
+        'UT Bot': 'BUY' if ind['ut_bull'] else 'SELL',
+        'VWAP': 'YES' if current_price > selected_vwap else 'NO',
+        'Today Pivot': 'YES' if ind['close_gt_pivot'] else 'NO'
+    }
+    
+    for key in chart_display:
+        matches.append({
+            '指标': key,
+            '图表显示': chart_display[key],
+            '当前计算': current_display[key],
+            '匹配': '✅' if chart_display[key] == current_display[key] else '❌'
+        })
+    
+    df_matches = pd.DataFrame(matches)
+    st.dataframe(df_matches, use_container_width=True)
+    
+    all_match = all([m['匹配'] == '✅' for m in matches])
+    if all_match:
+        st.success("✅ 完全匹配你的图表！")
+    else:
+        st.warning("⚠️ 部分指标不匹配，请调整VWAP计算方法")
 
 # ================= 主循环 =================
 current_time = time.time()
@@ -408,27 +391,6 @@ if st.session_state.manual_scan or (current_time - st.session_state.last_scan_ti
     analyze_market()
     st.session_state.last_scan_time = current_time
     st.session_state.manual_scan = False
-
-# ================= 显示历史记录 =================
-if st.session_state.vwap_history:
-    with st.expander("📜 历史扫描记录"):
-        hist_df = pd.DataFrame(st.session_state.vwap_history)
-        st.dataframe(hist_df, use_container_width=True)
-
-# ================= 使用说明 =================
-with st.expander("ℹ️ 使用说明"):
-    st.markdown("""
-    ### VWAP三种计算方法
-    
-    1. **从起点累积 (TradingView模式)**
-       - 从图表起点开始累积，匹配Pine Script的ta.vwap
-       
-    2. **从今日0点开始**  
-       - 传统日线VWAP，数据不足时自动补充昨日数据
-       
-    3. **从昨日延续 (7天)**
-       - 包含完整周期，适合趋势分析
-    """)
 
 # ================= 自动刷新 =================
 time.sleep(2)

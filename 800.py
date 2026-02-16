@@ -35,7 +35,7 @@ with col2:
                              index=3)  # 預設 15m
 
 with col3:
-    bars_back = st.slider("載入 K 線數量", 200, 1500, 800, step=100)
+    bars_back = st.slider("載入 K 線數量（建議 500–1000）", 200, 1500, 800, step=100)
 
 with col4:
     if st.button("重新載入最新資料", type="primary"):
@@ -45,10 +45,10 @@ with col4:
 # ────────────────────────────────────────────────
 # 從 OKX 抓取 OHLCV 資料
 # ────────────────────────────────────────────────
-@st.cache_data(ttl=45)  # 快取 45 秒，適合即時圖表
+@st.cache_data(ttl=45)
 def fetch_okx_ohlcv(symbol_str, tf, limit):
     try:
-        exchange = ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})  # 永續合約流動性較好
+        exchange = ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
         ohlcv = exchange.fetch_ohlcv(symbol_str + '-SWAP', timeframe=tf, limit=limit)
         if not ohlcv:
             return pd.DataFrame()
@@ -71,7 +71,7 @@ if df.empty:
 df = df.dropna(subset=['open', 'high', 'low', 'close'])
 
 # ────────────────────────────────────────────────
-# 計算所有指標（與 Pine Script 盡量一致）
+# 計算指標
 # ────────────────────────────────────────────────
 # EMA
 df['ema10']  = ta.ema(df['close'], length=10)
@@ -79,16 +79,16 @@ df['ema20']  = ta.ema(df['close'], length=20)
 df['ema50']  = ta.ema(df['close'], length=50)
 df['ema200'] = ta.ema(df['close'], length=200)
 
-# EMA cross 用於雲顏色變化
+# EMA cross
 df['ema_bull_cross'] = (df['ema10'] > df['ema20']) & (df['ema10'].shift(1) <= df['ema20'].shift(1))
 df['ema_bear_cross'] = (df['ema10'] < df['ema20']) & (df['ema10'].shift(1) >= df['ema20'].shift(1))
 
 # SuperTrend
 st_res = ta.supertrend(high=df['high'], low=df['low'], close=df['close'], length=10, multiplier=3.0)
-df['supertrend']     = st_res['SUPERT_10_3.0']
-df['st_bull']        = df['close'] > df['supertrend']
+df['supertrend'] = st_res['SUPERT_10_3.0']
+df['st_bull']    = df['close'] > df['supertrend']
 
-# UT Bot（你的原版邏輯：uptrend 時 stop 在下方）
+# UT Bot（原版邏輯）
 atr = ta.atr(high=df['high'], low=df['low'], close=df['close'], length=10)
 ut_stop = pd.Series(np.nan, index=df.index, dtype=float)
 
@@ -106,9 +106,9 @@ for i in range(1, len(df)):
 
 df['ut_stop'] = ut_stop
 df['ut_bull'] = df['close'] > df['ut_stop']
-df['ut_bear'] = df['close'] < df['ut_stop']  # 明確定義 bear
+df['ut_bear'] = df['close'] < df['ut_stop']
 
-# 訊號（關鍵修正：處理 shift 後的 NaN）
+# 訊號（已處理 NaN）
 df['buy_signal'] = (
     df['ut_bull'] &
     (~df['ut_bull'].shift(1).fillna(False)) &
@@ -118,23 +118,22 @@ df['buy_signal'] = (
 df['sell_signal'] = (
     df['ut_bear'] &
     (~df['ut_bear'].shift(1).fillna(False))
-    # 可選：& (df['ema10'] < df['ema20'])  若想對 sell 也加 EMA 過濾
 )
 
 # VWAP
 df['vwap'] = ta.vwap(high=df['high'], low=df['low'], close=df['close'], volume=df['volume'])
 
-# 今日 Pivot Point
+# Today Pivot
 daily = df.resample('D').agg({'high': 'max', 'low': 'min', 'close': 'last'})
 daily['pivot'] = (daily['high'] + daily['low'] + daily['close']) / 3
 df = df.join(daily['pivot'], how='left')
 df['today_pivot'] = df['pivot'].ffill()
 
-# 清理 NaN（避免畫圖出問題）
+# 清理 NaN（避免畫圖崩潰）
 df = df.dropna(subset=['ema10', 'ema20', 'ema50', 'ema200', 'supertrend', 'ut_stop', 'vwap', 'today_pivot'])
 
 # ────────────────────────────────────────────────
-# Checklist 表格（模擬 Pine Script 右上角 panel）
+# Checklist 表格
 # ────────────────────────────────────────────────
 st.subheader("最新狀態 Checklist")
 
@@ -165,9 +164,9 @@ checklist_df = pd.DataFrame(checklist_data)
 
 def style_status(val):
     if val == "YES":
-        return 'background-color: #004d00; color: lime; font-weight: bold;'
+        return 'background-color: #004d00; color: lime; font-weight: bold; text-align: center;'
     else:
-        return 'background-color: #4d0000; color: red; font-weight: bold;'
+        return 'background-color: #4d0000; color: red; font-weight: bold; text-align: center;'
 
 styled_checklist = checklist_df.style.applymap(style_status, subset=['狀態'])
 st.dataframe(styled_checklist, use_container_width=True, hide_index=True)
@@ -187,7 +186,7 @@ fig.add_trace(
     row=1, col=1
 )
 
-# EMA 線
+# EMA
 fig.add_trace(go.Scatter(x=df.index, y=df['ema10'],  name='EMA 10',  line=dict(color='orange', width=2)))
 fig.add_trace(go.Scatter(x=df.index, y=df['ema20'],  name='EMA 20',  line=dict(color='blue',   width=2)))
 fig.add_trace(go.Scatter(x=df.index, y=df['ema50'],  name='EMA 50',  line=dict(color='green',  width=2)))
@@ -204,11 +203,30 @@ fig.add_trace(go.Scatter(x=bear.index, y=bear['ema20'], fill='tonexty', fillcolo
 # SuperTrend
 fig.add_trace(go.Scatter(x=df.index, y=df['supertrend'], name='SuperTrend', line=dict(color='yellow', width=2)))
 
-# UT Bot
-fig.add_trace(go.Scatter(
-    x=df.index, y=df['ut_stop'], name='UT Bot',
-    line=dict(color=np.where(df['ut_bull'], 'lime', 'red'), width=2)
-))
+# UT Bot - 分成 bull / bear 兩條（解決顏色陣列錯誤）
+ut_bull_part = df[df['ut_bull']]
+ut_bear_part = df[~df['ut_bull']]
+
+fig.add_trace(
+    go.Scatter(
+        x=ut_bull_part.index,
+        y=ut_bull_part['ut_stop'],
+        name='UT Bot',
+        line=dict(color='lime', width=2.5),
+        connectgaps=False
+    )
+)
+
+fig.add_trace(
+    go.Scatter(
+        x=ut_bear_part.index,
+        y=ut_bear_part['ut_stop'],
+        name='UT Bot Bear',
+        line=dict(color='red', width=2.5),
+        connectgaps=False,
+        showlegend=False  # 隱藏第二條圖例，只顯示一項 "UT Bot"
+    )
+)
 
 # VWAP & Pivot
 fig.add_trace(go.Scatter(x=df.index, y=df['vwap'],       name='VWAP',       line=dict(color='purple',  width=2, dash='dot')))
@@ -249,5 +267,5 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-st.caption("提示：圖表可能因資料量大而稍慢，若卡頓可減少「載入 K 線數量」或切換較大時間框架。")
-st.caption("UT Bot 使用原版邏輯（uptrend 時 trailing stop 在價格下方）。如需經典 QuantNomad 版 UT Bot 可再告知。")
+st.caption("提示：若圖表載入慢，可減少 K 線數量或使用較大時間框架。")
+st.caption("UT Bot 採用原版邏輯（上漲趨勢時 trailing stop 在價格下方）。")

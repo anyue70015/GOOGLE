@@ -2,6 +2,7 @@ import streamlit as st
 import ccxt
 import pandas as pd
 import numpy as np
+import time
 from datetime import datetime, timedelta
 
 # ================= 配置 =================
@@ -179,6 +180,7 @@ def analyze():
     # UT Bot (Pine版本)
     ut_stop, ut_bull = calculate_ut_bot_pine(high, low, close, UT_FACTOR, UT_ATR_LEN)
     ut_bull_current = ut_bull.iloc[-1]
+    ut_stop_current = ut_stop.iloc[-1]
     
     # VWAP
     vwap = calculate_vwap_today(df)
@@ -191,19 +193,20 @@ def analyze():
     # ================= 显示结果 =================
     st.subheader(f"📊 HYPE/USDT - {df['timestamp'].iloc[-1].strftime('%H:%M:%S')}")
     
+    # 创建两列对比
     col1, col2 = st.columns(2)
     
     with col1:
-        st.write("### 你的图表显示")
-        chart = pd.DataFrame({
+        st.write("### 📋 你的图表显示")
+        chart_data = pd.DataFrame({
             '指标': ['EMA10>20', 'EMA50', 'SuperTrend', 'UT Bot', 'VWAP', 'Pivot'],
             '状态': ['NO', 'NO', 'YES', 'SELL', 'NO', 'NO']
         })
-        st.dataframe(chart)
+        st.dataframe(chart_data, use_container_width=True)
     
     with col2:
-        st.write("### 当前计算")
-        current = pd.DataFrame({
+        st.write("### 💻 当前计算值")
+        current_data = pd.DataFrame({
             '指标': ['EMA10>20', 'EMA50', 'SuperTrend', 'UT Bot', 'VWAP', 'Pivot'],
             '状态': [
                 'NO' if not ema10_gt_20 else 'YES',
@@ -214,16 +217,66 @@ def analyze():
                 'NO' if not close_gt_pivot else 'YES'
             ]
         })
-        st.dataframe(current)
+        st.dataframe(current_data, use_container_width=True)
     
-    # 详细数值
+    # ================= 详细数值 =================
     st.subheader("🔢 详细数值")
-    st.write(f"当前价格: ${current_price:.4f}")
-    st.write(f"SuperTrend趋势: {'上升 📈' if st_bull else '下降 📉'}")
-    st.write(f"UT止损: ${ut_stop.iloc[-1]:.4f}")
-    st.write(f"价格 > UT止损: {current_price > ut_stop.iloc[-1]}")
-    st.write(f"VWAP: ${vwap:.4f}" if vwap else "VWAP: 数据不足")
-    st.write(f"Pivot: ${pivot:.4f}")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("当前价格", f"${current_price:.4f}")
+        st.metric("UT止损", f"${ut_stop_current:.4f}")
+        st.metric("UT状态", "SELL ❌" if not ut_bull_current else "BUY ✅")
+    
+    with col2:
+        st.metric("SuperTrend趋势", "上升 📈" if st_bull else "下降 📉")
+        st.metric("SuperTrend状态", "YES ✅" if st_bull else "NO ❌")
+        st.metric("价格 > UT止损", f"{current_price > ut_stop_current}")
+    
+    with col3:
+        st.metric("VWAP", f"${vwap:.4f}" if vwap else "N/A")
+        st.metric("Pivot", f"${pivot:.4f}")
+        st.metric("价格 > Pivot", "YES" if close_gt_pivot else "NO")
+    
+    # ================= 匹配度检查 =================
+    st.subheader("🎯 匹配度检查")
+    
+    matches = [
+        {'指标': 'EMA10>20', '期望': 'NO', '实际': 'NO' if not ema10_gt_20 else 'YES', '匹配': '✅' if not ema10_gt_20 else '❌'},
+        {'指标': 'EMA50', '期望': 'NO', '实际': 'NO' if not close_gt_ema50 else 'YES', '匹配': '✅' if not close_gt_ema50 else '❌'},
+        {'指标': 'SuperTrend', '期望': 'YES', '实际': 'YES' if st_bull else 'NO', '匹配': '✅' if st_bull else '❌'},
+        {'指标': 'UT Bot', '期望': 'SELL', '实际': 'SELL' if not ut_bull_current else 'BUY', '匹配': '✅' if not ut_bull_current else '❌'},
+        {'指标': 'VWAP', '期望': 'NO', '实际': 'NO' if not close_gt_vwap else 'YES', '匹配': '✅' if not close_gt_vwap else '❌'},
+        {'指标': 'Pivot', '期望': 'NO', '实际': 'NO' if not close_gt_pivot else 'YES', '匹配': '✅' if not close_gt_pivot else '❌'}
+    ]
+    
+    df_matches = pd.DataFrame(matches)
+    st.dataframe(df_matches, use_container_width=True)
+    
+    all_match = all([m['匹配'] == '✅' for m in matches])
+    if all_match:
+        st.success("✅ 完全匹配你的图表！")
+        st.balloons()
+    else:
+        st.warning("⚠️ 部分指标不匹配")
+        
+        # 显示不匹配的指标
+        mismatches = [m['指标'] for m in matches if m['匹配'] == '❌']
+        if mismatches:
+            st.write(f"不匹配的指标: {', '.join(mismatches)}")
+            
+            # 提供调整建议
+            if 'SuperTrend' in mismatches:
+                st.info("💡 SuperTrend不匹配：检查ATR计算")
+                st.write(f"当前SuperTrend值: {st_values.iloc[-1]:.4f}")
+                st.write(f"当前价格: {current_price:.4f}")
+                st.write(f"价格 > SuperTrend: {current_price > st_values.iloc[-1]}")
+            
+            if 'UT Bot' in mismatches:
+                st.info("💡 UT Bot不匹配：检查价格与UT止损的关系")
+                st.write(f"当前UT止损: {ut_stop_current:.4f}")
+                st.write(f"价格 > UT止损: {current_price > ut_stop_current}")
 
 # ================= 主循环 =================
 current_time = time.time()
@@ -232,5 +285,6 @@ if st.session_state.manual_scan or (current_time - st.session_state.last_scan_ti
     st.session_state.last_scan_time = current_time
     st.session_state.manual_scan = False
 
+# ================= 自动刷新 =================
 time.sleep(2)
 st.rerun()

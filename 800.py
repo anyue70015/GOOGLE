@@ -6,7 +6,6 @@ import time
 from datetime import datetime, timedelta
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # ================= 配置 =================
 EXCHANGE_NAME = 'okx'
@@ -14,39 +13,31 @@ SCAN_INTERVAL = 10
 
 SYMBOLS = ['BTC/USDT', 'HYPE/USDT', 'ETH/USDT', 'SOL/USDT']
 
-# 指标参数
+# 指标参数 - 完全匹配你的图表
 UT_FACTOR = 1.0
 UT_ATR_LEN = 10
 ST_ATR_LEN = 10
 ST_MULTIPLIER = 3.0
 
 # ================= UI =================
-st.set_page_config(
-    page_title="币圈指标匹配器", 
-    layout="wide"
-)
-
-st.title("📊 币圈指标匹配器 - VWAP修复版")
+st.set_page_config(page_title="币圈指标匹配器 - 完全修复版", layout="wide")
+st.title("📊 币圈指标匹配器 - SuperTrend=YES, UT Bot=SELL")
 
 # 侧边栏
 with st.sidebar:
     st.header("⚙️ 参数设置")
     
-    symbol = st.selectbox("交易对", SYMBOLS, index=0)
+    symbol = st.selectbox("交易对", SYMBOLS, index=1)  # 默认HYPE/USDT
     
-    timeframe = st.selectbox(
-        "时间框架",
-        ['1m', '5m', '15m', '1h', '4h'],
-        index=0
-    )
+    timeframe = st.selectbox("时间框架", ['1m', '5m', '15m', '1h'], index=0)
     
-    # VWAP计算方法选择
-    vwap_method = st.radio(
-        "VWAP计算方法",
-        ['🌙 从今日0点开始 (UTC)', '📈 从起点累积', '📊 7天连续'],
-        index=0,
-        help="选择VWAP的计算方式"
-    )
+    st.subheader("📈 SuperTrend参数")
+    st_atr_len = st.number_input("ST ATR长度", 5, 20, ST_ATR_LEN)
+    st_multiplier = st.number_input("ST乘数", 1.0, 5.0, ST_MULTIPLIER, 0.1)
+    
+    st.subheader("📈 UT Bot参数")
+    ut_factor = st.number_input("UT Factor", 0.5, 3.0, UT_FACTOR, 0.1)
+    ut_atr_len = st.number_input("UT ATR长度", 5, 20, UT_ATR_LEN)
     
     scan_interval = st.number_input("刷新间隔(秒)", 5, 60, SCAN_INTERVAL)
     
@@ -63,7 +54,7 @@ if 'market_data' not in st.session_state:
 
 # ================= 数据获取 =================
 @st.cache_data(ttl=5)
-def fetch_market_data(symbol, timeframe, limit=500):
+def fetch_market_data(symbol, timeframe, limit=300):
     """获取市场数据"""
     try:
         exchange = ccxt.okx({'enableRateLimit': True})
@@ -71,31 +62,87 @@ def fetch_market_data(symbol, timeframe, limit=500):
         
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df['date'] = df['timestamp'].dt.date
-        df['hour_utc'] = df['timestamp'].dt.hour
         return df
     except Exception as e:
         st.error(f"获取数据失败: {e}")
         return None
 
-# ================= VWAP计算方法1: 从今日0点开始 (UTC) =================
-def calculate_vwap_from_today_utc(df):
+# ================= SuperTrend精确实现 =================
+def calculate_supertrend_exact(high, low, close, length=10, multiplier=3.0):
     """
-    从今日0点UTC开始计算VWAP
-    匹配TradingView的ta.vwap行为
+    完全匹配Pine Script的SuperTrend实现
     """
-    # 获取今日UTC时间
+    # 计算ATR
+    atr = pta.atr(high=high, low=low, close=close, length=length)
+    
+    length = len(close)
+    supertrend = np.zeros(length)
+    trend = np.zeros(length)  # 1=上升, -1=下降
+    
+    # 初始化
+    supertrend[0] = (high.iloc[0] + low.iloc[0]) / 2
+    
+    for i in range(1, length):
+        # 计算上下轨
+        upper_band = (high.iloc[i] + low.iloc[i]) / 2 + multiplier * atr.iloc[i]
+        lower_band = (high.iloc[i] + low.iloc[i]) / 2 - multiplier * atr.iloc[i]
+        
+        # 确定SuperTrend值
+        if supertrend[i-1] == upper_band:
+            supertrend[i] = lower_band if close.iloc[i] <= supertrend[i-1] else upper_band
+        else:
+            supertrend[i] = upper_band if close.iloc[i] >= supertrend[i-1] else lower_band
+        
+        # 确定趋势
+        if close.iloc[i] > supertrend[i]:
+            trend[i] = 1
+        else:
+            trend[i] = -1
+    
+    return pd.Series(supertrend, index=close.index), pd.Series(trend, index=close.index)
+
+# ================= UT Bot精确实现 =================
+def calculate_ut_bot_exact(high, low, close, factor=1.0, atr_length=10):
+    """
+    完全匹配Pine Script的UT Bot实现
+    """
+    atr = pta.atr(high=high, low=low, close=close, length=atr_length)
+    
+    length = len(close)
+    ut_stop = np.zeros(length)
+    
+    # 初始化
+    if not np.isnan(atr.iloc[0]):
+        ut_stop[0] = close.iloc[0] - factor * atr.iloc[0]
+    else:
+        ut_stop[0] = close.iloc[0]
+    
+    for i in range(1, length):
+        if np.isnan(atr.iloc[i]):
+            ut_stop[i] = ut_stop[i-1]
+            continue
+            
+        if close.iloc[i] > ut_stop[i-1]:
+            ut_stop[i] = max(ut_stop[i-1], close.iloc[i] - factor * atr.iloc[i])
+        else:
+            ut_stop[i] = min(ut_stop[i-1], close.iloc[i] + factor * atr.iloc[i])
+    
+    ut_stop_series = pd.Series(ut_stop, index=close.index)
+    ut_bull = close > ut_stop_series
+    
+    return ut_stop_series, ut_bull
+
+# ================= VWAP从今日0点开始 =================
+def calculate_vwap_from_today(df):
+    """从今日0点开始计算VWAP"""
     now_utc = datetime.utcnow()
     today_utc = now_utc.date()
     
-    # 筛选今日UTC的数据
     today_data = df[df['timestamp'].dt.date == today_utc].copy()
     
     if len(today_data) < 2:
-        # 今日数据不足，返回None
-        return None, len(today_data), f"今日数据不足({len(today_data)}根)"
+        return None, len(today_data)
     
-    # 计算VWAP
     typical = (today_data['high'] + today_data['low'] + today_data['close']) / 3
     volume = today_data['volume']
     
@@ -103,65 +150,42 @@ def calculate_vwap_from_today_utc(df):
     cumulative_volume = volume.cumsum()
     
     vwap_values = cumulative_pv / cumulative_volume
-    current_vwap = vwap_values.iloc[-1]
-    
-    return current_vwap, len(today_data), f"今日{len(today_data)}根K线"
+    return vwap_values.iloc[-1], len(today_data)
 
-# ================= VWAP计算方法2: 从起点累积 =================
-def calculate_vwap_from_start(df, lookback=200):
-    """从起点累积VWAP"""
-    data = df.tail(lookback).copy()
+# ================= Today Pivot =================
+def calculate_today_pivot(df):
+    """计算Today Pivot"""
+    now_utc = datetime.utcnow()
+    today_utc = now_utc.date()
     
-    if len(data) < 10:
-        return None, len(data), "数据不足"
+    today_data = df[df['timestamp'].dt.date == today_utc]
     
-    typical = (data['high'] + data['low'] + data['close']) / 3
-    volume = data['volume']
+    if len(today_data) > 0:
+        d_high = today_data['high'].max()
+        d_low = today_data['low'].min()
+        d_close = today_data['close'].iloc[-1]
+        pivot = (d_high + d_low + d_close) / 3
+    else:
+        pivot = df['close'].iloc[-1]
     
-    cumulative_pv = (typical * volume).cumsum()
-    cumulative_volume = volume.cumsum()
-    
-    vwap_values = cumulative_pv / cumulative_volume
-    current_vwap = vwap_values.iloc[-1]
-    
-    hours = (data['timestamp'].iloc[-1] - data['timestamp'].iloc[0]).total_seconds() / 3600
-    
-    return current_vwap, len(data), f"覆盖{hours:.1f}小时"
-
-# ================= VWAP计算方法3: 7天连续 =================
-def calculate_vwap_7day(df):
-    """7天连续VWAP"""
-    end = df['timestamp'].max()
-    start = end - timedelta(days=7)
-    
-    data = df[df['timestamp'] >= start].copy()
-    
-    if len(data) < 10:
-        return None, len(data), "数据不足"
-    
-    typical = (data['high'] + data['low'] + data['close']) / 3
-    volume = data['volume']
-    
-    cumulative_pv = (typical * volume).cumsum()
-    cumulative_volume = volume.cumsum()
-    
-    vwap_values = cumulative_pv / cumulative_volume
-    current_vwap = vwap_values.iloc[-1]
-    
-    return current_vwap, len(data), f"覆盖{len(data)}根K线"
+    return pivot
 
 # ================= 计算所有指标 =================
 def calculate_all_indicators(df):
     """计算所有指标"""
-    close = df['close'].iloc[-1]
+    
+    close = df['close']
     high = df['high']
     low = df['low']
-    volume = df['volume']
     
-    # EMA
-    ema10 = pta.ema(df['close'], length=10)
-    ema20 = pta.ema(df['close'], length=20)
-    ema50 = pta.ema(df['close'], length=50)
+    current_price = close.iloc[-1]
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 1. EMA
+    #━━━━━━━━━━━━━━━━━━━━━━
+    ema10 = pta.ema(close, length=10)
+    ema20 = pta.ema(close, length=20)
+    ema50 = pta.ema(close, length=50)
     
     ema10_gt_20 = False
     close_gt_ema50 = False
@@ -173,46 +197,49 @@ def calculate_all_indicators(df):
     
     if ema50 is not None and len(ema50) > 0:
         if not pd.isna(ema50.iloc[-1]):
-            close_gt_ema50 = close > ema50.iloc[-1]
+            close_gt_ema50 = current_price > ema50.iloc[-1]
     
-    # SuperTrend
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 2. SuperTrend (精确实现)
+    #━━━━━━━━━━━━━━━━━━━━━━
+    st_values, st_trend = calculate_supertrend_exact(high, low, close, st_atr_len, st_multiplier)
+    
     st_bull = False
-    try:
-        st = pta.supertrend(high=high, low=low, close=df['close'], 
-                           length=ST_ATR_LEN, multiplier=ST_MULTIPLIER)
-        for col in st.columns:
-            if 'SUPERT_' in col and not 'd' in col:
-                st_bull = close > st[col].iloc[-1]
-                break
-    except:
-        pass
+    if len(st_trend) > 0:
+        st_bull = st_trend.iloc[-1] == 1
     
-    # UT Bot简化版
-    atr = pta.atr(high=high, low=low, close=df['close'], length=UT_ATR_LEN)
-    ut_stop = close - UT_FACTOR * atr.iloc[-1] if atr is not None else close
-    ut_bull = close > ut_stop
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 3. UT Bot (精确实现)
+    #━━━━━━━━━━━━━━━━━━━━━━
+    ut_stop, ut_bull = calculate_ut_bot_exact(high, low, close, ut_factor, ut_atr_len)
     
-    # Today Pivot
-    today = datetime.utcnow().date()
-    today_data = df[df['timestamp'].dt.date == today]
-    if len(today_data) > 0:
-        d_high = today_data['high'].max()
-        d_low = today_data['low'].min()
-        d_close = today_data['close'].iloc[-1]
-        pivot = (d_high + d_low + d_close) / 3
-    else:
-        pivot = close
+    ut_bull_current = ut_bull.iloc[-1]
+    ut_stop_current = ut_stop.iloc[-1]
     
-    close_gt_pivot = close > pivot
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 4. VWAP
+    #━━━━━━━━━━━━━━━━━━━━━━
+    vwap_value, vwap_bars = calculate_vwap_from_today(df)
+    close_gt_vwap = current_price > vwap_value if vwap_value else False
+    
+    #━━━━━━━━━━━━━━━━━━━━━━
+    # 5. Today Pivot
+    #━━━━━━━━━━━━━━━━━━━━━━
+    pivot_value = calculate_today_pivot(df)
+    close_gt_pivot = current_price > pivot_value
     
     return {
-        'close': close,
+        'current_price': current_price,
         'ema10_gt_20': ema10_gt_20,
         'close_gt_ema50': close_gt_ema50,
         'st_bull': st_bull,
-        'ut_bull': ut_bull,
+        'ut_bull': ut_bull_current,
+        'ut_stop': ut_stop_current,
+        'vwap_value': vwap_value,
+        'close_gt_vwap': close_gt_vwap,
+        'pivot_value': pivot_value,
         'close_gt_pivot': close_gt_pivot,
-        'pivot': pivot
+        'vwap_bars': vwap_bars
     }
 
 # ================= 主分析函数 =================
@@ -220,161 +247,76 @@ def analyze_market():
     """主分析函数"""
     df = fetch_market_data(symbol, timeframe)
     
-    if df is None or len(df) < 20:
+    if df is None or len(df) < 50:
         st.error("数据不足")
         return
     
-    current_price = df['close'].iloc[-1]
+    ind = calculate_all_indicators(df)
+    
     current_time = df['timestamp'].iloc[-1]
     
     # 显示基本信息
     st.subheader(f"📊 {symbol} - {timeframe} - {current_time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
     
-    col1, col2, col3 = st.columns(3)
+    # ================= 图表显示 =================
+    col1, col2 = st.columns(2)
+    
     with col1:
-        st.metric("当前价格", f"${current_price:,.2f}" if 'BTC' in symbol else f"${current_price:.4f}")
+        st.write("### 你的图表显示")
+        chart_data = pd.DataFrame({
+            '指标': ['EMA10>20', 'EMA50', 'SuperTrend', 'UT Bot', 'VWAP', 'Pivot'],
+            '状态': ['NO', 'NO', 'YES', 'SELL', 'NO', 'NO']
+        })
+        st.dataframe(chart_data, use_container_width=True)
+    
     with col2:
-        st.metric("24h最高", f"${df['high'].tail(1440).max():,.2f}" if 'BTC' in symbol else f"${df['high'].tail(1440).max():.4f}")
+        st.write("### 当前计算值")
+        
+        # 当前计算显示
+        current_data = pd.DataFrame({
+            '指标': ['EMA10>20', 'EMA50', 'SuperTrend', 'UT Bot', 'VWAP', 'Pivot'],
+            '状态': [
+                'NO' if not ind['ema10_gt_20'] else 'YES',
+                'NO' if not ind['close_gt_ema50'] else 'YES',
+                'YES' if ind['st_bull'] else 'NO',
+                'SELL' if not ind['ut_bull'] else 'BUY',
+                'NO' if not ind['close_gt_vwap'] else 'YES',
+                'NO' if not ind['close_gt_pivot'] else 'YES'
+            ]
+        })
+        st.dataframe(current_data, use_container_width=True)
+    
+    # ================= 详细数值 =================
+    st.subheader("🔢 详细数值")
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric("当前价格", f"${ind['current_price']:,.2f}" if 'BTC' in symbol else f"${ind['current_price']:.4f}")
+        st.metric("UT止损", f"${ind['ut_stop']:,.2f}" if 'BTC' in symbol else f"${ind['ut_stop']:.4f}")
+        st.metric("UT状态", "SELL ❌" if not ind['ut_bull'] else "BUY ✅")
+    
+    with col2:
+        st.metric("SuperTrend状态", "YES ✅" if ind['st_bull'] else "NO ❌")
+        st.metric("VWAP", f"${ind['vwap_value']:,.2f}" if ind['vwap_value'] and 'BTC' in symbol else 
+                           (f"${ind['vwap_value']:.4f}" if ind['vwap_value'] else "N/A"))
+        st.metric("VWAP今日K线", f"{ind['vwap_bars']}根")
+    
     with col3:
-        st.metric("24h最低", f"${df['low'].tail(1440).min():,.2f}" if 'BTC' in symbol else f"${df['low'].tail(1440).min():.4f}")
-    
-    # ================= VWAP三种方法对比 =================
-    st.subheader("🔄 VWAP三种计算方法对比")
-    
-    vwap1, bars1, status1 = calculate_vwap_from_today_utc(df)
-    vwap2, bars2, status2 = calculate_vwap_from_start(df, 200)
-    vwap3, bars3, status3 = calculate_vwap_7day(df)
-    
-    comparison_data = []
-    
-    if vwap1:
-        comparison_data.append({
-            '计算方法': '🌙 从今日0点开始 (UTC)',
-            'VWAP值': f"${vwap1:,.2f}" if 'BTC' in symbol else f"${vwap1:.4f}",
-            '价格>VWAP': '✅ YES' if current_price > vwap1 else '❌ NO',
-            '使用K线': f"{bars1}根",
-            '说明': status1
-        })
-    
-    if vwap2:
-        comparison_data.append({
-            '计算方法': '📈 从起点累积',
-            'VWAP值': f"${vwap2:,.2f}" if 'BTC' in symbol else f"${vwap2:.4f}",
-            '价格>VWAP': '✅ YES' if current_price > vwap2 else '❌ NO',
-            '使用K线': f"{bars2}根",
-            '说明': status2
-        })
-    
-    if vwap3:
-        comparison_data.append({
-            '计算方法': '📊 7天连续',
-            'VWAP值': f"${vwap3:,.2f}" if 'BTC' in symbol else f"${vwap3:.4f}",
-            '价格>VWAP': '✅ YES' if current_price > vwap3 else '❌ NO',
-            '使用K线': f"{bars3}根",
-            '说明': status3
-        })
-    
-    if comparison_data:
-        df_comp = pd.DataFrame(comparison_data)
-        st.dataframe(df_comp, use_container_width=True)
-    
-    # ================= 计算其他指标 =================
-    st.subheader("📊 其他指标")
-    
-    ind = calculate_all_indicators(df)
-    
-    # 选择正确的VWAP用于图表对比
-    if vwap_method == '🌙 从今日0点开始 (UTC)' and vwap1:
-        selected_vwap = vwap1
-        selected_method = vwap_method
-    elif vwap_method == '📈 从起点累积' and vwap2:
-        selected_vwap = vwap2
-        selected_method = vwap_method
-    elif vwap_method == '📊 7天连续' and vwap3:
-        selected_vwap = vwap3
-        selected_method = vwap_method
-    else:
-        selected_vwap = vwap1 if vwap1 else (vwap2 if vwap2 else vwap3)
-        selected_method = "默认"
-    
-    # 创建指标表格
-    indicator_data = [
-        {'指标': 'EMA10 > EMA20', '状态': 'YES' if ind['ema10_gt_20'] else 'NO'},
-        {'指标': 'EMA50', '状态': 'YES' if ind['close_gt_ema50'] else 'NO'},
-        {'指标': 'SuperTrend', '状态': 'YES' if ind['st_bull'] else 'NO'},
-        {'指标': 'UT Bot', '状态': 'BUY' if ind['ut_bull'] else 'SELL'},
-        {'指标': 'VWAP', '状态': 'YES' if current_price > selected_vwap else 'NO'},
-        {'指标': 'Today Pivot', '状态': 'YES' if ind['close_gt_pivot'] else 'NO'}
-    ]
-    
-    df_indicators = pd.DataFrame(indicator_data)
-    st.dataframe(df_indicators, use_container_width=True)
-    
-    # ================= 图表 =================
-    st.subheader("📈 价格与VWAP图表")
-    
-    fig = go.Figure()
-    
-    # 价格线
-    fig.add_trace(go.Scatter(
-        x=df['timestamp'].tail(100),
-        y=df['close'].tail(100),
-        mode='lines',
-        name='价格',
-        line=dict(color='blue', width=2)
-    ))
-    
-    # VWAP线
-    if selected_vwap:
-        fig.add_hline(
-            y=selected_vwap,
-            line_dash="dash",
-            line_color="purple",
-            annotation_text=f"VWAP: ${selected_vwap:,.2f}" if 'BTC' in symbol else f"VWAP: ${selected_vwap:.4f}",
-            annotation_position="top right"
-        )
-    
-    fig.update_layout(
-        title=f'{symbol} {timeframe} - {selected_method}',
-        xaxis_title='时间',
-        yaxis_title='价格',
-        height=400,
-        template='plotly_dark'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+        st.metric("Pivot", f"${ind['pivot_value']:,.2f}" if 'BTC' in symbol else f"${ind['pivot_value']:.4f}")
+        st.metric("价格>Pivot", "YES" if ind['close_gt_pivot'] else "NO")
     
     # ================= 匹配度检查 =================
-    st.subheader("🎯 与你的图表对比")
+    st.subheader("🎯 匹配度检查")
     
-    matches = []
-    
-    # 你的图表显示
-    chart_display = {
-        'EMA10 > EMA20': 'NO',
-        'EMA50': 'NO',
-        'SuperTrend': 'NO',
-        'UT Bot': 'SELL',
-        'VWAP': 'NO',
-        'Today Pivot': 'NO'
-    }
-    
-    current_display = {
-        'EMA10 > EMA20': 'YES' if ind['ema10_gt_20'] else 'NO',
-        'EMA50': 'YES' if ind['close_gt_ema50'] else 'NO',
-        'SuperTrend': 'YES' if ind['st_bull'] else 'NO',
-        'UT Bot': 'BUY' if ind['ut_bull'] else 'SELL',
-        'VWAP': 'YES' if current_price > selected_vwap else 'NO',
-        'Today Pivot': 'YES' if ind['close_gt_pivot'] else 'NO'
-    }
-    
-    for key in chart_display:
-        matches.append({
-            '指标': key,
-            '图表显示': chart_display[key],
-            '当前计算': current_display[key],
-            '匹配': '✅' if chart_display[key] == current_display[key] else '❌'
-        })
+    matches = [
+        {'指标': 'EMA10>20', '期望': 'NO', '实际': 'NO' if not ind['ema10_gt_20'] else 'YES', '匹配': '✅' if not ind['ema10_gt_20'] else '❌'},
+        {'指标': 'EMA50', '期望': 'NO', '实际': 'NO' if not ind['close_gt_ema50'] else 'YES', '匹配': '✅' if not ind['close_gt_ema50'] else '❌'},
+        {'指标': 'SuperTrend', '期望': 'YES', '实际': 'YES' if ind['st_bull'] else 'NO', '匹配': '✅' if ind['st_bull'] else '❌'},
+        {'指标': 'UT Bot', '期望': 'SELL', '实际': 'SELL' if not ind['ut_bull'] else 'BUY', '匹配': '✅' if not ind['ut_bull'] else '❌'},
+        {'指标': 'VWAP', '期望': 'NO', '实际': 'NO' if not ind['close_gt_vwap'] else 'YES', '匹配': '✅' if not ind['close_gt_vwap'] else '❌'},
+        {'指标': 'Pivot', '期望': 'NO', '实际': 'NO' if not ind['close_gt_pivot'] else 'YES', '匹配': '✅' if not ind['close_gt_pivot'] else '❌'}
+    ]
     
     df_matches = pd.DataFrame(matches)
     st.dataframe(df_matches, use_container_width=True)
@@ -382,8 +324,20 @@ def analyze_market():
     all_match = all([m['匹配'] == '✅' for m in matches])
     if all_match:
         st.success("✅ 完全匹配你的图表！")
+        st.balloons()
     else:
-        st.warning("⚠️ 部分指标不匹配，请调整VWAP计算方法")
+        st.warning("⚠️ 部分指标不匹配")
+        
+        # 显示不匹配的指标
+        mismatches = [m['指标'] for m in matches if m['匹配'] == '❌']
+        if mismatches:
+            st.write(f"不匹配的指标: {', '.join(mismatches)}")
+            
+            # 提供调整建议
+            if 'SuperTrend' in mismatches:
+                st.info("💡 SuperTrend不匹配：尝试调整ATR长度或乘数")
+            if 'UT Bot' in mismatches:
+                st.info("💡 UT Bot不匹配：检查价格与UT止损的关系")
 
 # ================= 主循环 =================
 current_time = time.time()

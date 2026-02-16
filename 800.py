@@ -20,8 +20,8 @@ ST_ATR_LEN = 10
 ST_MULTIPLIER = 3.0
 
 # ================= UI =================
-st.set_page_config(page_title="HYPE 精确匹配 - 修复版", layout="wide")
-st.title("🎯 HYPE/USDT - UT Bot和Pivot修复版")
+st.set_page_config(page_title="HYPE 精确匹配 - VWAP修复版", layout="wide")
+st.title("🎯 HYPE/USDT - VWAP应该显示NO")
 
 # 侧边栏
 with st.sidebar:
@@ -56,31 +56,24 @@ def fetch_hype_data():
         st.error(f"获取数据失败: {e}")
         return None
 
-# ================= UT Bot精确实现 (完全匹配Pine Script) =================
+# ================= UT Bot精确实现 =================
 def calculate_ut_bot_exact(high, low, close, factor=1.0, atr_length=10):
-    """
-    完全匹配Pine Script的UT Bot算法
-    """
-    # 计算ATR
+    """完全匹配Pine Script的UT Bot算法"""
     atr = pta.atr(high=high, low=low, close=close, length=atr_length)
     
     length = len(close)
     ut_stop = np.zeros(length)
-    ut_stop[:] = np.nan  # 初始化为NaN，匹配Pine的na
+    ut_stop[:] = np.nan
     
-    # 第一根K线
     if not np.isnan(atr.iloc[0]):
         ut_stop[0] = close.iloc[0] - factor * atr.iloc[0]
     
-    # 逐根计算 - 完全按照Pine Script逻辑
     for i in range(1, length):
         if np.isnan(ut_stop[i-1]) or np.isnan(atr.iloc[i]):
             if not np.isnan(atr.iloc[i]):
                 ut_stop[i] = close.iloc[i] - factor * atr.iloc[i]
             continue
         
-        # Pine Script逻辑:
-        # utStop := close > utStop[1] ? math.max(utStop[1], close - utFactor * atr) : math.min(utStop[1], close + utFactor * atr)
         if close.iloc[i] > ut_stop[i-1]:
             ut_stop[i] = max(ut_stop[i-1], close.iloc[i] - factor * atr.iloc[i])
         else:
@@ -88,14 +81,13 @@ def calculate_ut_bot_exact(high, low, close, factor=1.0, atr_length=10):
     
     ut_stop_series = pd.Series(ut_stop, index=close.index)
     ut_bull = close > ut_stop_series
-    ut_bear = close < ut_stop_series
     
-    return ut_stop_series, ut_bull, ut_bear
+    return ut_stop_series, ut_bull
 
-# ================= Today Pivot精确实现 =================
-def calculate_today_pivot(df):
+# ================= 日线VWAP精确实现 =================
+def calculate_daily_vwap(df):
     """
-    计算Today Pivot (使用日线数据)
+    计算从今日开始的VWAP（匹配TradingView的ta.vwap）
     """
     # 获取今天的日期
     today = datetime.now().date()
@@ -103,18 +95,37 @@ def calculate_today_pivot(df):
     # 筛选今天的数据
     today_data = df[df['timestamp'].dt.date == today]
     
+    if len(today_data) == 0:
+        # 如果没有今天的数据，使用最近的数据
+        today_data = df.tail(100)
+    
+    # 计算VWAP
+    # VWAP = Σ(价格 * 成交量) / Σ(成交量)
+    typical_prices = (today_data['high'] + today_data['low'] + today_data['close']) / 3
+    volume = today_data['volume']
+    
+    cumulative_pv = (typical_prices * volume).cumsum()
+    cumulative_volume = volume.cumsum()
+    
+    vwap_values = cumulative_pv / cumulative_volume
+    
+    return vwap_values.iloc[-1] if len(vwap_values) > 0 else None
+
+# ================= Today Pivot精确实现 =================
+def calculate_today_pivot(df):
+    """计算Today Pivot（使用日线数据）"""
+    today = datetime.now().date()
+    today_data = df[df['timestamp'].dt.date == today]
+    
     if len(today_data) > 0:
-        # 使用今天的最高最低和最新收盘
         d_high = today_data['high'].max()
         d_low = today_data['low'].min()
         d_close = today_data['close'].iloc[-1]
     else:
-        # 如果没有今天的数据，使用最近的数据
         d_high = df['high'].tail(100).max()
         d_low = df['low'].tail(100).min()
         d_close = df['close'].iloc[-1]
     
-    # Pivot = (High + Low + Close) / 3
     pivot = (d_high + d_low + d_close) / 3
     
     return pivot, d_high, d_low, d_close
@@ -134,9 +145,11 @@ def calculate_indicators(df):
     ema10 = pta.ema(close, length=10)
     ema20 = pta.ema(close, length=20)
     ema50 = pta.ema(close, length=50)
+    ema200 = pta.ema(close, length=200)
     
     ema10_gt_20 = False
     close_gt_ema50 = False
+    close_gt_ema200 = False
     
     if ema10 is not None and ema20 is not None:
         if len(ema10) > 0 and len(ema20) > 0:
@@ -146,6 +159,10 @@ def calculate_indicators(df):
     if ema50 is not None and len(ema50) > 0:
         if not pd.isna(ema50.iloc[-1]):
             close_gt_ema50 = close.iloc[-1] > ema50.iloc[-1]
+    
+    if ema200 is not None and len(ema200) > 0:
+        if not pd.isna(ema200.iloc[-1]):
+            close_gt_ema200 = close.iloc[-1] > ema200.iloc[-1]
     
     #━━━━━━━━━━━━━━━━━━━━━━
     # 2. SuperTrend
@@ -173,31 +190,21 @@ def calculate_indicators(df):
         pass
     
     #━━━━━━━━━━━━━━━━━━━━━━
-    # 3. UT Bot (精确匹配)
+    # 3. UT Bot
     #━━━━━━━━━━━━━━━━━━━━━━
-    ut_stop_series, ut_bull, ut_bear = calculate_ut_bot_exact(high, low, close, UT_FACTOR, UT_ATR_LEN)
+    ut_stop_series, ut_bull = calculate_ut_bot_exact(high, low, close, UT_FACTOR, UT_ATR_LEN)
     
     ut_bull_current = ut_bull.iloc[-1]
-    ut_bear_current = ut_bear.iloc[-1]
     ut_stop_current = ut_stop_series.iloc[-1]
     
     #━━━━━━━━━━━━━━━━━━━━━━
-    # 4. VWAP
+    # 4. 日线VWAP (关键修复)
     #━━━━━━━━━━━━━━━━━━━━━━
-    close_gt_vwap = False
-    vwap_value = None
-    
-    try:
-        typical = (high + low + close) / 3
-        vwap = (typical * volume).cumsum() / volume.cumsum()
-        if len(vwap) > 0:
-            vwap_value = vwap.iloc[-1]
-            close_gt_vwap = close.iloc[-1] > vwap_value
-    except:
-        pass
+    vwap_value = calculate_daily_vwap(df)
+    close_gt_vwap = close.iloc[-1] > vwap_value if vwap_value is not None else False
     
     #━━━━━━━━━━━━━━━━━━━━━━
-    # 5. Today Pivot (精确匹配)
+    # 5. Today Pivot
     #━━━━━━━━━━━━━━━━━━━━━━
     pivot_value, d_high, d_low, d_close = calculate_today_pivot(df)
     close_gt_pivot = close.iloc[-1] > pivot_value
@@ -207,17 +214,18 @@ def calculate_indicators(df):
         'ema10': ema10.iloc[-1] if ema10 is not None and len(ema10) > 0 else None,
         'ema20': ema20.iloc[-1] if ema20 is not None and len(ema20) > 0 else None,
         'ema50': ema50.iloc[-1] if ema50 is not None and len(ema50) > 0 else None,
+        'ema200': ema200.iloc[-1] if ema200 is not None and len(ema200) > 0 else None,
         'ema10_gt_20': ema10_gt_20,
         'close_gt_ema50': close_gt_ema50,
+        'close_gt_ema200': close_gt_ema200,
         'st_bull': st_bull,
         'super_trend': super_trend_value,
         'ut_bull': ut_bull_current,
-        'ut_bear': ut_bear_current,
         'ut_stop': ut_stop_current,
-        'close_gt_vwap': close_gt_vwap,
         'vwap': vwap_value,
-        'close_gt_pivot': close_gt_pivot,
+        'close_gt_vwap': close_gt_vwap,
         'pivot': pivot_value,
+        'close_gt_pivot': close_gt_pivot,
         'd_high': d_high,
         'd_low': d_low,
         'd_close': d_close
@@ -229,53 +237,74 @@ def display_results(ind):
     
     st.subheader("📊 HYPE/USDT 当前状态")
     
-    # 创建表格
-    data = []
+    # 创建对比表格
+    col1, col2 = st.columns(2)
     
-    # EMA10>20
-    data.append({
-        '指标': 'EMA10>20',
-        '状态': 'YES' if ind['ema10_gt_20'] else 'NO',
-        '数值': f"{ind['ema10']:.4f} > {ind['ema20']:.4f}" if ind['ema10'] and ind['ema20'] else 'N/A'
-    })
+    with col1:
+        st.write("### 你的图表显示")
+        chart_data = pd.DataFrame({
+            '指标': ['EMA10>20', 'EMA50', 'EMA200', 'SuperTrend', 'UT Bot', 'VWAP', 'Pivot'],
+            '状态': ['NO', 'NO', 'YES', 'NO', 'SELL', 'NO', 'NO']
+        })
+        st.dataframe(chart_data, use_container_width=True)
     
-    # EMA50
-    data.append({
-        '指标': 'EMA50',
-        '状态': 'YES' if ind['close_gt_ema50'] else 'NO',
-        '数值': f"{ind['close']:.4f} > {ind['ema50']:.4f}" if ind['ema50'] else 'N/A'
-    })
-    
-    # SuperTrend
-    data.append({
-        '指标': 'SuperTrend',
-        '状态': 'YES' if ind['st_bull'] else 'NO',
-        '数值': f"{ind['close']:.4f} > {ind['super_trend']:.4f}" if ind['super_trend'] else 'N/A'
-    })
-    
-    # UT Bot - 根据ut_bull显示BUY/SELL
-    data.append({
-        '指标': 'UT Bot',
-        '状态': 'BUY' if ind['ut_bull'] else 'SELL',
-        '数值': f"{ind['close']:.4f} > {ind['ut_stop']:.4f} = {ind['ut_bull']}"
-    })
-    
-    # VWAP
-    data.append({
-        '指标': 'VWAP',
-        '状态': 'YES' if ind['close_gt_vwap'] else 'NO',
-        '数值': f"{ind['close']:.4f} > {ind['vwap']:.4f}" if ind['vwap'] else 'N/A'
-    })
-    
-    # Today Pivot
-    data.append({
-        '指标': 'Today Pivot',
-        '状态': 'YES' if ind['close_gt_pivot'] else 'NO',
-        '数值': f"{ind['close']:.4f} > {ind['pivot']:.4f}"
-    })
-    
-    df_display = pd.DataFrame(data)
-    st.dataframe(df_display, use_container_width=True)
+    with col2:
+        st.write("### 当前计算值")
+        
+        # 格式化显示
+        hype_display = []
+        
+        # EMA10>20
+        hype_display.append({
+            '指标': 'EMA10>20',
+            '状态': 'NO' if not ind['ema10_gt_20'] else 'YES',
+            '数值': f"{ind['ema10']:.4f} > {ind['ema20']:.4f} = {ind['ema10_gt_20']}"
+        })
+        
+        # EMA50
+        hype_display.append({
+            '指标': 'EMA50',
+            '状态': 'NO' if not ind['close_gt_ema50'] else 'YES',
+            '数值': f"{ind['close']:.4f} > {ind['ema50']:.4f} = {ind['close_gt_ema50']}"
+        })
+        
+        # EMA200
+        hype_display.append({
+            '指标': 'EMA200',
+            '状态': 'YES' if ind['close_gt_ema200'] else 'NO',
+            '数值': f"{ind['close']:.4f} > {ind['ema200']:.4f} = {ind['close_gt_ema200']}"
+        })
+        
+        # SuperTrend
+        hype_display.append({
+            '指标': 'SuperTrend',
+            '状态': 'NO' if not ind['st_bull'] else 'YES',
+            '数值': f"{ind['close']:.4f} > {ind['super_trend']:.4f} = {ind['st_bull']}"
+        })
+        
+        # UT Bot
+        hype_display.append({
+            '指标': 'UT Bot',
+            '状态': 'SELL' if not ind['ut_bull'] else 'BUY',
+            '数值': f"{ind['close']:.4f} > {ind['ut_stop']:.4f} = {ind['ut_bull']}"
+        })
+        
+        # VWAP (关键)
+        hype_display.append({
+            '指标': 'VWAP',
+            '状态': 'NO' if not ind['close_gt_vwap'] else 'YES',
+            '数值': f"{ind['close']:.4f} > {ind['vwap']:.4f} = {ind['close_gt_vwap']}"
+        })
+        
+        # Pivot
+        hype_display.append({
+            '指标': 'Pivot',
+            '状态': 'NO' if not ind['close_gt_pivot'] else 'YES',
+            '数值': f"{ind['close']:.4f} > {ind['pivot']:.4f} = {ind['close_gt_pivot']}"
+        })
+        
+        df_display = pd.DataFrame(hype_display)
+        st.dataframe(df_display, use_container_width=True)
     
     # 详细数值
     st.subheader("🔢 详细数值")
@@ -285,48 +314,31 @@ def display_results(ind):
     with col1:
         st.metric("当前价格", f"${ind['close']:.4f}")
         st.metric("UT止损", f"${ind['ut_stop']:.4f}")
-        st.metric("UT状态", "BUY" if ind['ut_bull'] else "SELL")
+        st.metric("UT状态", "SELL" if not ind['ut_bull'] else "BUY")
     
     with col2:
         st.metric("SuperTrend", f"${ind['super_trend']:.4f}" if ind['super_trend'] else "N/A")
-        st.metric("ST状态", "YES" if ind['st_bull'] else "NO")
-        st.metric("VWAP", f"${ind['vwap']:.4f}" if ind['vwap'] else "N/A")
+        st.metric("ST状态", "NO" if not ind['st_bull'] else "YES")
+        st.metric("日线VWAP", f"${ind['vwap']:.4f}" if ind['vwap'] else "N/A")
     
     with col3:
-        st.metric("Today Pivot", f"${ind['pivot']:.4f}")
-        st.metric("日高", f"${ind['d_high']:.4f}")
-        st.metric("日低", f"${ind['d_low']:.4f}")
+        st.metric("Pivot", f"${ind['pivot']:.4f}")
+        st.metric("VWAP状态", "NO" if not ind['close_gt_vwap'] else "YES")
+        st.metric("Pivot状态", "NO" if not ind['close_gt_pivot'] else "YES")
     
-    # UT Bot详细计算
-    st.subheader("🔍 UT Bot计算过程")
+    # VWAP详细计算
+    st.subheader("📊 日线VWAP计算过程")
     st.write(f"""
-    **ATR计算:**
-    - 使用最近{UT_ATR_LEN}根K线计算ATR
-    - UT止损 = 根据价格与上一根止损的关系动态计算
-    
-    **当前值:**
-    - 价格: {ind['close']:.4f}
-    - UT止损: {ind['ut_stop']:.4f}
-    - 价格 > UT止损: {ind['close'] > ind['ut_stop']}
-    
-    **因此UT Bot显示: {'BUY' if ind['ut_bull'] else 'SELL'}**
-    """)
-    
-    # Pivot详细计算
-    st.subheader("📊 Today Pivot计算过程")
-    st.write(f"""
-    **Pivot公式:** (日高 + 日低 + 最新收盘) / 3
+    **VWAP公式:** Σ(典型价格 * 成交量) / Σ(成交量)
     
     **今日数据:**
-    - 日高: {ind['d_high']:.4f}
-    - 日低: {ind['d_low']:.4f}
-    - 最新收盘: {ind['d_close']:.4f}
+    - 当前价格: {ind['close']:.4f}
+    - 日线VWAP: {ind['vwap']:.4f}
     
-    **计算结果:**
-    - Pivot = ({ind['d_high']:.4f} + {ind['d_low']:.4f} + {ind['d_close']:.4f}) / 3 = {ind['pivot']:.4f}
-    - 当前价格 > Pivot: {ind['close'] > ind['pivot']}
+    **比较结果:**
+    - 价格 > VWAP: {ind['close'] > ind['vwap']}
     
-    **因此Pivot显示: {'YES' if ind['close_gt_pivot'] else 'NO'}**
+    **因此VWAP显示: {'YES' if ind['close_gt_vwap'] else 'NO'}**
     """)
 
 # ================= 主扫描 =================
